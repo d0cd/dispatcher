@@ -1,0 +1,198 @@
+package adapter
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"os/exec"
+
+	"github.com/d0cd/dispatcher/internal/types"
+)
+
+// SSHConfig holds connection details for an SSH target.
+type SSHConfig struct {
+	Host       string
+	User       string
+	Port       int
+	KeyFile    string
+	RemoteDir  string
+}
+
+// SSHAdapter runs workloads on a remote machine via SSH.
+type SSHAdapter struct {
+	config SSHConfig
+}
+
+// NewSSHAdapter creates a new SSH adapter with the given config.
+func NewSSHAdapter(cfg SSHConfig) *SSHAdapter {
+	if cfg.Port == 0 {
+		cfg.Port = 22
+	}
+	if cfg.RemoteDir == "" {
+		cfg.RemoteDir = "/tmp/dispatcher"
+	}
+	return &SSHAdapter{config: cfg}
+}
+
+func (s *SSHAdapter) ID() string { return "ssh" }
+
+func (s *SSHAdapter) Validate(ctx context.Context, w types.WorkloadSpec) (types.ValidationResult, error) {
+	v := types.ValidationResult{
+		Schema:             types.ValidationPass,
+		PackageBuild:       types.ValidationPass,
+		TargetCapabilities: types.ValidationPass,
+		Credentials:        types.ValidationSkipped,
+		Quota:              types.ValidationSkipped,
+		Network:            types.ValidationPass,
+		Policy:             types.ValidationPass,
+		CostEstimate:       types.ValidationPass,
+		CleanupPlan:        types.ValidationPass,
+	}
+
+	// Test SSH connectivity
+	args := s.sshArgs("-o", "ConnectTimeout=5", "echo", "ok")
+	if err := exec.CommandContext(ctx, "ssh", args...).Run(); err != nil {
+		v.TargetCapabilities = types.ValidationFail
+		return v, fmt.Errorf("SSH connection failed: %w", err)
+	}
+
+	if w.Requirements.GPU.Required {
+		v.TargetCapabilities = types.ValidationFail
+		return v, fmt.Errorf("SSH target does not support GPU workloads")
+	}
+
+	return v, nil
+}
+
+func (s *SSHAdapter) EstimateCost(_ context.Context, _ types.WorkloadSpec) (types.CostEstimate, error) {
+	return types.CostEstimate{
+		Value:       0.10,
+		Currency:    "USD",
+		Confidence:  types.ConfidenceMedium,
+		Assumptions: []string{"assumes 1h runtime on existing SSH host"},
+	}, nil
+}
+
+func (s *SSHAdapter) Prepare(ctx context.Context, p *types.Plan) error {
+	w := p.Workload
+
+	// Create remote directory
+	mkdirArgs := s.sshArgs("mkdir", "-p", s.config.RemoteDir)
+	if err := exec.CommandContext(ctx, "ssh", mkdirArgs...).Run(); err != nil {
+		return fmt.Errorf("failed to create remote directory: %w", err)
+	}
+
+	// Sync source files via rsync
+	dest := fmt.Sprintf("%s@%s:%s/", s.config.User, s.config.Host, s.config.RemoteDir)
+	rsyncArgs := []string{"-az", "--delete"}
+	if s.config.KeyFile != "" {
+		rsyncArgs = append(rsyncArgs, "-e", fmt.Sprintf("ssh -i %s -p %d", s.config.KeyFile, s.config.Port))
+	} else if s.config.Port != 22 {
+		rsyncArgs = append(rsyncArgs, "-e", fmt.Sprintf("ssh -p %d", s.config.Port))
+	}
+	rsyncArgs = append(rsyncArgs, w.Source.Path+"/", dest)
+
+	if err := exec.CommandContext(ctx, "rsync", rsyncArgs...).Run(); err != nil {
+		return fmt.Errorf("rsync failed: %w", err)
+	}
+
+	return nil
+}
+
+func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, error) {
+	w := p.Workload
+
+	envPrefix, err := DotEnvShellPrefix(w.Source.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	var remoteCmd string
+	dir := ShellQuote(s.config.RemoteDir)
+	if w.Package.Dockerfile != "" {
+		tag := SanitizeName(w.Name)
+		envArgs, err := DotEnvArgs(w.Source.Path)
+		if err != nil {
+			return nil, err
+		}
+		runArgs := append([]string{"docker", "run", "--rm"}, envArgs...)
+		runArgs = append(runArgs, "dispatcher-"+tag+":latest")
+		remoteCmd = fmt.Sprintf("cd %s && docker build -t %s . && %s",
+			dir, ShellQuote("dispatcher-"+tag+":latest"), ShellQuoteArgs(runArgs))
+	} else if len(w.Command) > 0 {
+		remoteCmd = fmt.Sprintf("cd %s && %s%s", dir, envPrefix, ShellQuoteArgs(w.Command))
+	} else if len(w.Entrypoints) > 0 {
+		cmdParts := runtimeCommand(w.Runtime, w.Entrypoints[0])
+		remoteCmd = fmt.Sprintf("cd %s && %s%s", dir, envPrefix, ShellQuoteArgs(cmdParts))
+	} else {
+		return nil, fmt.Errorf("no command or entrypoint for SSH execution")
+	}
+
+	args := s.sshArgs(remoteCmd)
+	cmd := exec.CommandContext(ctx, "ssh", args...)
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("SSH execution failed: %w", err)
+	}
+
+	return &RunHandle{
+		ID:       fmt.Sprintf("ssh-%s-%s", SanitizeName(w.Name), p.Metadata.ID),
+		TargetID: "ssh",
+		State:    &sshState{cmd: cmd},
+	}, nil
+}
+
+func (s *SSHAdapter) Status(_ context.Context, h *RunHandle) (types.RunState, error) {
+	ss := h.State.(*sshState)
+	if err := ss.cmd.Wait(); err != nil {
+		return types.RunStateExecutionFailed, nil
+	}
+	return types.RunStateCompleted, nil
+}
+
+func (s *SSHAdapter) Logs(_ context.Context, _ *RunHandle, _ io.Writer) error {
+	// SSH logs are streamed via stdout/stderr of the command
+	return nil
+}
+
+func (s *SSHAdapter) Artifacts(_ context.Context, _ *RunHandle) ([]ArtifactRef, error) {
+	return nil, nil
+}
+
+func (s *SSHAdapter) Terminate(ctx context.Context, h *RunHandle) error {
+	ss := h.State.(*sshState)
+	if ss.cmd.Process != nil {
+		return ss.cmd.Process.Kill()
+	}
+	return nil
+}
+
+func (s *SSHAdapter) Cleanup(ctx context.Context, _ *RunHandle) (*CleanupResult, error) {
+	// Clean up remote directory
+	args := s.sshArgs("rm", "-rf", s.config.RemoteDir)
+	if err := exec.CommandContext(ctx, "ssh", args...).Run(); err != nil {
+		return &CleanupResult{
+			Success: false,
+			Errors:  []string{err.Error()},
+		}, nil
+	}
+	return &CleanupResult{
+		Success:          true,
+		ResourcesCleaned: []string{s.config.RemoteDir},
+	}, nil
+}
+
+func (s *SSHAdapter) sshArgs(extraArgs ...string) []string {
+	var args []string
+	if s.config.KeyFile != "" {
+		args = append(args, "-i", s.config.KeyFile)
+	}
+	args = append(args, "-p", fmt.Sprintf("%d", s.config.Port))
+	args = append(args, fmt.Sprintf("%s@%s", s.config.User, s.config.Host))
+	args = append(args, extraArgs...)
+	return args
+}
+
+type sshState struct {
+	cmd *exec.Cmd
+}

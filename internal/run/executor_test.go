@@ -1,0 +1,302 @@
+package run
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"testing"
+	"time"
+
+	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/types"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// mockAdapter is a configurable adapter for executor testing.
+type mockAdapter struct {
+	id            string
+	validateErr   error
+	validateResult types.ValidationResult
+	prepareErr    error
+	executeErr    error
+	statusResult  types.RunState
+	statusErr     error
+	cleanupResult *adapter.CleanupResult
+	cleanupErr    error
+	cleanupCalls  int
+	executePanic  bool
+}
+
+func newMockAdapter() *mockAdapter {
+	return &mockAdapter{
+		id: "mock",
+		validateResult: adapter.DefaultValidationResult(),
+		statusResult:   types.RunStateCompleted,
+		cleanupResult:  &adapter.CleanupResult{Success: true},
+	}
+}
+
+func (m *mockAdapter) ID() string { return m.id }
+func (m *mockAdapter) Validate(_ context.Context, _ types.WorkloadSpec) (types.ValidationResult, error) {
+	return m.validateResult, m.validateErr
+}
+func (m *mockAdapter) EstimateCost(_ context.Context, _ types.WorkloadSpec) (types.CostEstimate, error) {
+	return types.CostEstimate{}, nil
+}
+func (m *mockAdapter) Prepare(_ context.Context, _ *types.Plan) error {
+	return m.prepareErr
+}
+func (m *mockAdapter) Execute(_ context.Context, _ *types.Plan) (*adapter.RunHandle, error) {
+	if m.executePanic {
+		panic("adapter panic!")
+	}
+	if m.executeErr != nil {
+		return nil, m.executeErr
+	}
+	return &adapter.RunHandle{ID: "mock-handle", TargetID: m.id, State: "opaque"}, nil
+}
+func (m *mockAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.RunState, error) {
+	return m.statusResult, m.statusErr
+}
+func (m *mockAdapter) Logs(_ context.Context, _ *adapter.RunHandle, w io.Writer) error {
+	fmt.Fprintln(w, "mock log line")
+	return nil
+}
+func (m *mockAdapter) Artifacts(_ context.Context, _ *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
+	return nil, nil
+}
+func (m *mockAdapter) Terminate(_ context.Context, _ *adapter.RunHandle) error { return nil }
+func (m *mockAdapter) Cleanup(_ context.Context, _ *adapter.RunHandle) (*adapter.CleanupResult, error) {
+	m.cleanupCalls++
+	return m.cleanupResult, m.cleanupErr
+}
+
+func executorTestPlan() *types.Plan {
+	return &types.Plan{
+		APIVersion: "dispatcher.dev/v1",
+		Kind:       "Plan",
+		Metadata: types.PlanMetadata{
+			ID:        "plan_exec_test",
+			CreatedAt: time.Now().UTC(),
+			CreatedBy: "test",
+		},
+		Workload: types.WorkloadSpec{
+			Name:         "test",
+			DetectedKind: types.WorkloadKindScript,
+			Runtime:      types.RuntimePython,
+		},
+		Recommendation: &types.Recommendation{
+			Target: "mock",
+			EstimatedCost: types.CostEstimate{Value: 0, Currency: "USD", Confidence: types.ConfidenceHigh},
+		},
+	}
+}
+
+func TestExecutor_HappyPath(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mock := newMockAdapter()
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateCompleted, r.GetState())
+	assert.True(t, mock.cleanupCalls > 0, "cleanup should be called")
+}
+
+func TestExecutor_ValidationFailure(t *testing.T) {
+	mock := newMockAdapter()
+	mock.validateErr = fmt.Errorf("docker not available")
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.Equal(t, types.RunStatePlanInvalid, r.GetState())
+	assert.Contains(t, r.Error, "docker not available")
+}
+
+func TestExecutor_ValidationResultInvalid(t *testing.T) {
+	mock := newMockAdapter()
+	mock.validateResult = types.ValidationResult{
+		Schema:             types.ValidationPass,
+		TargetCapabilities: types.ValidationFail,
+	}
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.Equal(t, types.RunStatePlanInvalid, r.GetState())
+}
+
+func TestExecutor_PrepareFailure(t *testing.T) {
+	mock := newMockAdapter()
+	mock.prepareErr = fmt.Errorf("build failed")
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.Equal(t, types.RunStatePackageFailed, r.GetState())
+}
+
+func TestExecutor_ExecuteFailure(t *testing.T) {
+	mock := newMockAdapter()
+	mock.executeErr = fmt.Errorf("process start failed")
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.Equal(t, types.RunStateExecutionFailed, r.GetState())
+}
+
+func TestExecutor_StatusFailure_CleanupStillRuns(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mock := newMockAdapter()
+	mock.statusErr = fmt.Errorf("status check failed")
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	// Critical: cleanup must still be called even when status fails
+	assert.True(t, mock.cleanupCalls > 0, "cleanup must run even on status failure")
+}
+
+func TestExecutor_WorkloadFailed_CleanupStillRuns(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mock := newMockAdapter()
+	mock.statusResult = types.RunStateExecutionFailed
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.True(t, mock.cleanupCalls > 0, "cleanup must run even on workload failure")
+}
+
+func TestExecutor_CleanupFailure_RetriesAndFails(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mock := newMockAdapter()
+	mock.cleanupResult = &adapter.CleanupResult{Success: false}
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.Equal(t, types.RunStateCleanupFailed, r.GetState())
+	// Should retry 3 times
+	assert.Equal(t, 3, mock.cleanupCalls, "cleanup should be retried 3 times")
+}
+
+func TestExecutor_PanicRecovery(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mock := newMockAdapter()
+	mock.executePanic = true
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	// Should NOT panic — executor recovers
+	assert.NotPanics(t, func() {
+		_ = exec.Execute(context.Background(), r, io.Discard)
+	})
+	assert.Equal(t, types.RunStateExecutionFailed, r.GetState())
+	assert.Contains(t, r.Error, "panic")
+}
+
+func TestExecutor_ApprovalDenied(t *testing.T) {
+	p := executorTestPlan()
+	p.RequiredApprovals = []types.PolicyRequirement{
+		{Name: "gpu-approval", Reason: "GPU workloads require approval"},
+	}
+
+	mock := newMockAdapter()
+	exec := NewExecutor(mock)
+	exec.SetApprovalFunc(func(approvals []types.PolicyRequirement) error {
+		assert.Len(t, approvals, 1)
+		assert.Equal(t, "gpu-approval", approvals[0].Name)
+		return ErrApprovalDenied
+	})
+	r := NewRun(p)
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.Equal(t, types.RunStateApprovalDenied, r.GetState())
+	assert.Contains(t, err.Error(), "denied")
+}
+
+func TestExecutor_ApprovalGranted(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	p := executorTestPlan()
+	p.RequiredApprovals = []types.PolicyRequirement{
+		{Name: "cost-approval", Reason: "cost exceeds threshold"},
+	}
+
+	mock := newMockAdapter()
+	exec := NewExecutor(mock)
+	approved := false
+	exec.SetApprovalFunc(func(approvals []types.PolicyRequirement) error {
+		approved = true
+		return nil
+	})
+	r := NewRun(p)
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.NoError(t, err)
+	assert.True(t, approved)
+	assert.Equal(t, types.RunStateCompleted, r.GetState())
+}
+
+func TestExecutor_ContextCancellation(t *testing.T) {
+	mock := newMockAdapter()
+	mock.executeErr = fmt.Errorf("context canceled")
+	exec := NewExecutor(mock)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	r := NewRun(executorTestPlan())
+	err := exec.Execute(ctx, r, io.Discard)
+	assert.Error(t, err)
+}
+
+func TestExecutor_EphemeralLifecycle(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mock := newMockAdapter()
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.NoError(t, err)
+	assert.Equal(t, LifecycleEphemeral, r.Lifecycle)
+}
+
+func TestExecutor_HandlePersisted(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	mock := newMockAdapter()
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.NoError(t, err)
+	assert.Equal(t, "mock-handle", r.HandleID)
+}

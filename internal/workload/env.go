@@ -1,0 +1,47 @@
+package workload
+
+import (
+	"bufio"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+// LoadDotEnv parses .env (and .env.local) in dir into a map. Lines are
+// KEY=VALUE; comments (#) and blanks are skipped; surrounding quotes are
+// stripped. Returns nil map (not an error) when no file is present.
+func LoadDotEnv(dir string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, name := range []string{".env", ".env.local"} {
+		path := filepath.Join(dir, name)
+		f, err := os.Open(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, fmt.Errorf("open %s: %w", path, err)
+		}
+		scanner := bufio.NewScanner(f)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			eq := strings.IndexByte(line, '=')
+			if eq <= 0 {
+				continue
+			}
+			key := strings.TrimSpace(line[:eq])
+			val := strings.TrimSpace(line[eq+1:])
+			val = strings.Trim(val, `"'`)
+			out[key] = val
+		}
+		err = scanner.Err()
+		f.Close()
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+	}
+	return out, nil
+}

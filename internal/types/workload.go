@@ -1,0 +1,94 @@
+package types
+
+// WorkloadKind classifies the type of workload detected.
+type WorkloadKind string
+
+const (
+	WorkloadKindScript    WorkloadKind = "script"
+	WorkloadKindJob       WorkloadKind = "job"
+	WorkloadKindService   WorkloadKind = "service"
+	WorkloadKindGPUJob    WorkloadKind = "gpu-job"
+	WorkloadKindSandbox   WorkloadKind = "sandbox"
+	WorkloadKindContainer WorkloadKind = "container"
+	WorkloadKindUnknown   WorkloadKind = "unknown"
+)
+
+// Runtime identifies the language/runtime of a workload.
+type Runtime string
+
+const (
+	RuntimePython  Runtime = "python"
+	RuntimeNode    Runtime = "node"
+	RuntimeGo      Runtime = "go"
+	RuntimeRust    Runtime = "rust"
+	RuntimeJava    Runtime = "java"
+	RuntimeRuby    Runtime = "ruby"
+	RuntimeUnknown Runtime = "unknown"
+)
+
+// PackageType describes how the workload should be packaged.
+type PackageType string
+
+const (
+	PackageTypeContainer PackageType = "container"
+	PackageTypeScript    PackageType = "script"
+	PackageTypeImage     PackageType = "image"
+)
+
+// GPURequirement describes GPU needs for a workload.
+type GPURequirement struct {
+	Required bool   `yaml:"required" json:"required"`
+	Count    int    `yaml:"count,omitempty" json:"count,omitempty"`
+	Model    string `yaml:"model,omitempty" json:"model,omitempty"`
+	Framework string `yaml:"framework,omitempty" json:"framework,omitempty"`
+}
+
+// ResourceRequirements describes compute resources needed.
+type ResourceRequirements struct {
+	CPU    string         `yaml:"cpu,omitempty" json:"cpu,omitempty"`
+	Memory string         `yaml:"memory,omitempty" json:"memory,omitempty"`
+	GPU    GPURequirement `yaml:"gpu" json:"gpu"`
+}
+
+// PackagePlan describes how to package a workload for execution.
+type PackagePlan struct {
+	Type          PackageType `yaml:"type" json:"type"`
+	Dockerfile    string      `yaml:"dockerfile,omitempty" json:"dockerfile,omitempty"`
+	BuildRequired bool        `yaml:"buildRequired" json:"buildRequired"`
+	BaseImage     string      `yaml:"baseImage,omitempty" json:"baseImage,omitempty"`
+}
+
+// SecretRef is a reference to a secret or credential found in the workload.
+type SecretRef struct {
+	Kind     string `yaml:"kind" json:"kind"`
+	Location string `yaml:"location" json:"location"`
+	Name     string `yaml:"name" json:"name"`
+}
+
+// DataRequirement describes a data dependency.
+type DataRequirement struct {
+	Kind     string `yaml:"kind" json:"kind"`
+	Location string `yaml:"location" json:"location"`
+	Details  string `yaml:"details,omitempty" json:"details,omitempty"`
+}
+
+// WorkloadSpec is the detected shape of a workload after inspection.
+type WorkloadSpec struct {
+	Name         string               `yaml:"name" json:"name"`
+	DetectedKind WorkloadKind         `yaml:"detectedKind" json:"detectedKind"`
+	Source       WorkloadSource       `yaml:"source" json:"source"`
+	Runtime      Runtime              `yaml:"runtime" json:"runtime"`
+	Entrypoints  []string             `yaml:"entrypoints,omitempty" json:"entrypoints,omitempty"`
+	Package      PackagePlan          `yaml:"package" json:"package"`
+	Command      []string             `yaml:"command,omitempty" json:"command,omitempty"`
+	Ports        []int                `yaml:"ports,omitempty" json:"ports,omitempty"`
+	Requirements ResourceRequirements `yaml:"requirements" json:"requirements"`
+	Secrets      []SecretRef          `yaml:"secrets,omitempty" json:"secrets,omitempty"`
+	Data         []DataRequirement    `yaml:"data,omitempty" json:"data,omitempty"`
+}
+
+// WorkloadSource identifies where the workload came from.
+type WorkloadSource struct {
+	Type string `yaml:"type" json:"type"`
+	Path string `yaml:"path" json:"path"`
+}

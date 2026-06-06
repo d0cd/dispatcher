@@ -1,0 +1,21 @@
+# Binary (root only, not cmd/dispatcher/ directory)
+/dispatcher
+/dispatch
+kubectl
+
+# Test and build artifacts
+tmp/
+*.test
+
+# Runtime state (created by `dispatcher run`)
+runs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Working notes / feedback drafts
+/feedback.md

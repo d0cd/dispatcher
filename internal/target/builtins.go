@@ -1,0 +1,353 @@
+package target
+
+import "github.com/d0cd/dispatcher/internal/types"
+
+// BuiltinTargets returns the built-in target definitions.
+func BuiltinTargets() []types.TargetConfig {
+	return []types.TargetConfig{
+		{
+			ID:      "local-process",
+			Kind:    types.TargetKindLocal,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU:    types.GPUCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   false,
+					PrivateVPCAccess: false,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: false,
+					RateCard:      "local",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"process"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: false,
+				},
+			},
+		},
+		{
+			ID:      "local-docker",
+			Kind:    types.TargetKindDocker,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU:    types.GPUCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   false,
+					PrivateVPCAccess: false,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: false,
+					RateCard:      "local",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"container"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
+		{
+			ID:      "lima-vm",
+			Kind:    types.TargetKindLocalVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU:    types.GPUCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   false,
+					PrivateVPCAccess: false,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: false,
+					RateCard:      "local",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
+		{
+			ID:      "ssh",
+			Kind:    types.TargetKindSSH,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU:    types.GPUCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   true,
+					PrivateVPCAccess: true,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: false,
+					RateCard:      "ssh",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"process", "container"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
+		{
+			ID:      "kubernetes",
+			Kind:    types.TargetKindKubernetes,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+					types.WorkloadKindGPUJob,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU: types.GPUCapability{
+						Supported: true,
+						Models:    []string{"a10", "l4"},
+					},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   true,
+					PrivateVPCAccess: true,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: false,
+					RateCard:      "internal",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"container", "dedicated-node"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   true,
+					Artifacts: true,
+				},
+			},
+		},
+		// modal and e2b builtins are intentionally not enabled — no execution
+		// adapter exists yet (see cli/run.go adapterForTarget). Re-add once
+		// internal/cloudvm/modal.go and internal/cloudvm/e2b.go land.
+		{
+			ID:      "aws-vm",
+			Kind:    types.TargetKindCloudVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+					types.WorkloadKindGPUJob,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU: types.GPUCapability{
+						Supported: true,
+						Models:    []string{"t4", "a10g", "a100"},
+					},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   true,
+					PrivateVPCAccess: true,
+					StaticEgressIP:   true,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: true,
+					RateCard:      "aws",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   true,
+					Artifacts: true,
+				},
+			},
+		},
+		{
+			ID:      "gcp-vm",
+			Kind:    types.TargetKindCloudVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+					types.WorkloadKindGPUJob,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU: types.GPUCapability{
+						Supported: true,
+						Models:    []string{"l4", "a100", "h100"},
+					},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   true,
+					PrivateVPCAccess: true,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: true,
+					RateCard:      "gcp",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   true,
+					Artifacts: true,
+				},
+			},
+		},
+		{
+			ID:      "azure-vm",
+			Kind:    types.TargetKindCloudVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+					types.WorkloadKindGPUJob,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU: types.GPUCapability{
+						Supported: true,
+						Models:    []string{"t4", "a100"},
+					},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   true,
+					PrivateVPCAccess: true,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: true,
+					RateCard:      "azure",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   true,
+					Artifacts: true,
+				},
+			},
+		},
+		{
+			ID:      "hetzner-vm",
+			Kind:    types.TargetKindCloudVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+					types.WorkloadKindGPUJob,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU: types.GPUCapability{
+						Supported: true,
+						Models:    []string{"a100"},
+					},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   true,
+					PrivateVPCAccess: false,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: true,
+					RateCard:      "hetzner",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
+	}
+}

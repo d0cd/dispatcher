@@ -1,0 +1,179 @@
+package cli
+
+import (
+	"context"
+	"fmt"
+	"os"
+
+	"github.com/fatih/color"
+	"github.com/spf13/cobra"
+
+	"github.com/d0cd/dispatcher/internal/run"
+	"github.com/d0cd/dispatcher/internal/types"
+)
+
+var statusCmd = &cobra.Command{
+	Use:   "status <run-id>",
+	Short: "Show the status of a run",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		record, err := run.LoadRecord(args[0])
+		if err != nil {
+			return err
+		}
+
+		// For non-terminal runs with durable state, try live status
+		if !record.State.IsTerminal() && record.HandleState != nil {
+			ctx := context.Background()
+			r, a, reconnErr := run.ReconnectToRun(ctx, args[0], adapterForTarget)
+			if reconnErr == nil && a != nil && r.Handle != nil {
+				if liveState, err := a.Status(ctx, r.Handle); err == nil {
+					record.State = liveState
+				}
+				// Compute live cost
+				liveCost := r.ComputeLiveCost()
+				if liveCost.Value > 0 {
+					record.Cost = liveCost
+				}
+			}
+		}
+
+		bold := color.New(color.Bold)
+		bold.Fprintf(os.Stdout, "Run: %s\n", record.ID)
+		fmt.Fprintf(os.Stdout, "Plan:       %s\n", record.PlanID)
+		fmt.Fprintf(os.Stdout, "Target:     %s\n", record.TargetID)
+		fmt.Fprintf(os.Stdout, "Owner:      %s\n", record.Owner)
+
+		if record.Lifecycle != "" {
+			fmt.Fprintf(os.Stdout, "Lifecycle:  %s\n", record.Lifecycle)
+		}
+
+		stateColor := color.New(color.FgGreen)
+		if types.RunState(record.State).IsFailure() {
+			stateColor = color.New(color.FgRed)
+		} else if !types.RunState(record.State).IsTerminal() {
+			stateColor = color.New(color.FgYellow)
+		}
+		fmt.Fprintf(os.Stdout, "State:      ")
+		stateColor.Fprintln(os.Stdout, record.State)
+
+		if !record.StartedAt.IsZero() {
+			fmt.Fprintf(os.Stdout, "Started:    %s\n", record.StartedAt.Format("2006-01-02 15:04:05 UTC"))
+		}
+		if !record.FinishedAt.IsZero() {
+			fmt.Fprintf(os.Stdout, "Finished:   %s\n", record.FinishedAt.Format("2006-01-02 15:04:05 UTC"))
+			duration := record.FinishedAt.Sub(record.StartedAt)
+			fmt.Fprintf(os.Stdout, "Duration:   %s\n", duration.Round(100*1e6))
+		}
+		if record.HandleID != "" {
+			fmt.Fprintf(os.Stdout, "Handle:     %s\n", record.HandleID)
+		}
+		if record.Error != "" {
+			color.New(color.FgRed).Fprintf(os.Stdout, "Error:      %s\n", record.Error)
+		}
+		if record.Cost.Value > 0 {
+			fmt.Fprintf(os.Stdout, "Cost:       $%.2f %s (%s)\n",
+				record.Cost.Value, record.Cost.Currency, record.Cost.Confidence)
+		}
+
+		return nil
+	},
+}
+
+var logsCmd = &cobra.Command{
+	Use:   "logs <run-id>",
+	Short: "Show logs for a run",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		record, err := run.LoadRecord(args[0])
+		if err != nil {
+			return err
+		}
+
+		// For non-terminal runs, try to reconnect and stream live logs
+		if !record.State.IsTerminal() && record.HandleState != nil {
+			ctx := context.Background()
+			r, a, reconnErr := run.ReconnectToRun(ctx, args[0], adapterForTarget)
+			if reconnErr == nil && a != nil && r.Handle != nil {
+				fmt.Fprintf(os.Stderr, "Streaming logs for run %s on %s...\n\n", r.ID, r.TargetID)
+				if err := a.Logs(ctx, r.Handle, os.Stdout); err != nil {
+					fmt.Fprintf(os.Stderr, "\nLog streaming ended: %v\n", err)
+				}
+				return nil
+			}
+		}
+
+		// Fallback: read from saved log file if available
+		fmt.Fprintf(os.Stdout, "Run %s (%s on %s)\n\n", record.ID, record.State, record.TargetID)
+
+		if record.LogFile != "" {
+			data, err := os.ReadFile(record.LogFile)
+			if err == nil && len(data) > 0 {
+				os.Stdout.Write(data)
+				return nil
+			}
+		}
+
+		if record.State.IsTerminal() {
+			color.New(color.Faint).Fprintln(os.Stdout, "No logs available for this run.")
+			if record.Error != "" {
+				fmt.Fprintf(os.Stdout, "\nError output:\n  %s\n", record.Error)
+			}
+		} else {
+			fmt.Fprintln(os.Stdout, "Run is still in progress but reconnection is not available for this target.")
+		}
+
+		return nil
+	},
+}
+
+var costCmd = &cobra.Command{
+	Use:   "cost <run-id>",
+	Short: "Show cost tracking for a run",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		record, err := run.LoadRecord(args[0])
+		if err != nil {
+			return err
+		}
+
+		// For non-terminal runs, try to compute live cost
+		if !record.State.IsTerminal() && record.HandleState != nil {
+			ctx := context.Background()
+			r, _, reconnErr := run.ReconnectToRun(ctx, args[0], adapterForTarget)
+			if reconnErr == nil && r.Plan != nil {
+				record.Cost = r.ComputeLiveCost()
+			}
+		}
+
+		bold := color.New(color.Bold)
+		bold.Fprintf(os.Stdout, "Run: %s\n", record.ID)
+		fmt.Fprintf(os.Stdout, "Target:         %s\n", record.TargetID)
+		fmt.Fprintf(os.Stdout, "State:          %s\n", record.State)
+
+		est := record.Cost
+		fmt.Fprintf(os.Stdout, "Estimated cost: $%.2f %s\n", est.Value, est.Currency)
+		fmt.Fprintf(os.Stdout, "Confidence:     %s\n", est.Confidence)
+
+		if !record.StartedAt.IsZero() && !record.FinishedAt.IsZero() {
+			duration := record.FinishedAt.Sub(record.StartedAt)
+			fmt.Fprintf(os.Stdout, "Runtime:        %s\n", duration.Round(100*1e6))
+		}
+
+		if len(est.Assumptions) > 0 {
+			fmt.Fprintln(os.Stdout)
+			bold.Fprintln(os.Stdout, "Assumptions:")
+			for _, a := range est.Assumptions {
+				fmt.Fprintf(os.Stdout, "  - %s\n", a)
+			}
+		}
+
+		return nil
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(statusCmd)
+	rootCmd.AddCommand(logsCmd)
+	rootCmd.AddCommand(costCmd)
+}
