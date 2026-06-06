@@ -17,67 +17,74 @@ var statusCmd = &cobra.Command{
 	Short: "Show the status of a run",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		record, err := run.LoadRecord(args[0])
-		if err != nil {
-			return err
-		}
+		return runStatusByID(args[0])
+	},
+}
 
-		// For non-terminal runs with durable state, try live status
-		if !record.State.IsTerminal() && record.HandleState != nil {
-			ctx := context.Background()
-			r, a, reconnErr := run.ReconnectToRun(ctx, args[0], adapterForTarget)
-			if reconnErr == nil && a != nil && r.Handle != nil {
-				if liveState, err := a.Status(ctx, r.Handle); err == nil {
-					record.State = liveState
-				}
-				// Compute live cost
-				liveCost := r.ComputeLiveCost()
-				if liveCost.Value > 0 {
-					record.Cost = liveCost
-				}
+// runStatusByID prints status for a single run id. Extracted so other
+// commands (e.g. `recover --attach`) can refresh state without spawning
+// a new dispatcher process.
+func runStatusByID(id string) error {
+	record, err := run.LoadRecord(id)
+	if err != nil {
+		return err
+	}
+
+	// For non-terminal runs with durable state, try live status
+	if !record.State.IsTerminal() && record.HandleState != nil {
+		ctx := context.Background()
+		r, a, reconnErr := run.ReconnectToRun(ctx, id, adapterForTarget)
+		if reconnErr == nil && a != nil && r.Handle != nil {
+			if liveState, err := a.Status(ctx, r.Handle); err == nil {
+				record.State = liveState
+			}
+			// Compute live cost
+			liveCost := r.ComputeLiveCost()
+			if liveCost.Value > 0 {
+				record.Cost = liveCost
 			}
 		}
+	}
 
-		bold := color.New(color.Bold)
-		bold.Fprintf(os.Stdout, "Run: %s\n", record.ID)
-		fmt.Fprintf(os.Stdout, "Plan:       %s\n", record.PlanID)
-		fmt.Fprintf(os.Stdout, "Target:     %s\n", record.TargetID)
-		fmt.Fprintf(os.Stdout, "Owner:      %s\n", record.Owner)
+	bold := color.New(color.Bold)
+	bold.Fprintf(os.Stdout, "Run: %s\n", record.ID)
+	fmt.Fprintf(os.Stdout, "Plan:       %s\n", record.PlanID)
+	fmt.Fprintf(os.Stdout, "Target:     %s\n", record.TargetID)
+	fmt.Fprintf(os.Stdout, "Owner:      %s\n", record.Owner)
 
-		if record.Lifecycle != "" {
-			fmt.Fprintf(os.Stdout, "Lifecycle:  %s\n", record.Lifecycle)
-		}
+	if record.Lifecycle != "" {
+		fmt.Fprintf(os.Stdout, "Lifecycle:  %s\n", record.Lifecycle)
+	}
 
-		stateColor := color.New(color.FgGreen)
-		if types.RunState(record.State).IsFailure() {
-			stateColor = color.New(color.FgRed)
-		} else if !types.RunState(record.State).IsTerminal() {
-			stateColor = color.New(color.FgYellow)
-		}
-		fmt.Fprintf(os.Stdout, "State:      ")
-		stateColor.Fprintln(os.Stdout, record.State)
+	stateColor := color.New(color.FgGreen)
+	if types.RunState(record.State).IsFailure() {
+		stateColor = color.New(color.FgRed)
+	} else if !types.RunState(record.State).IsTerminal() {
+		stateColor = color.New(color.FgYellow)
+	}
+	fmt.Fprintf(os.Stdout, "State:      ")
+	stateColor.Fprintln(os.Stdout, record.State)
 
-		if !record.StartedAt.IsZero() {
-			fmt.Fprintf(os.Stdout, "Started:    %s\n", record.StartedAt.Format("2006-01-02 15:04:05 UTC"))
-		}
-		if !record.FinishedAt.IsZero() {
-			fmt.Fprintf(os.Stdout, "Finished:   %s\n", record.FinishedAt.Format("2006-01-02 15:04:05 UTC"))
-			duration := record.FinishedAt.Sub(record.StartedAt)
-			fmt.Fprintf(os.Stdout, "Duration:   %s\n", duration.Round(100*1e6))
-		}
-		if record.HandleID != "" {
-			fmt.Fprintf(os.Stdout, "Handle:     %s\n", record.HandleID)
-		}
-		if record.Error != "" {
-			color.New(color.FgRed).Fprintf(os.Stdout, "Error:      %s\n", record.Error)
-		}
-		if record.Cost.Value > 0 {
-			fmt.Fprintf(os.Stdout, "Cost:       $%.2f %s (%s)\n",
-				record.Cost.Value, record.Cost.Currency, record.Cost.Confidence)
-		}
+	if !record.StartedAt.IsZero() {
+		fmt.Fprintf(os.Stdout, "Started:    %s\n", record.StartedAt.Format("2006-01-02 15:04:05 UTC"))
+	}
+	if !record.FinishedAt.IsZero() {
+		fmt.Fprintf(os.Stdout, "Finished:   %s\n", record.FinishedAt.Format("2006-01-02 15:04:05 UTC"))
+		duration := record.FinishedAt.Sub(record.StartedAt)
+		fmt.Fprintf(os.Stdout, "Duration:   %s\n", duration.Round(100*1e6))
+	}
+	if record.HandleID != "" {
+		fmt.Fprintf(os.Stdout, "Handle:     %s\n", record.HandleID)
+	}
+	if record.Error != "" {
+		color.New(color.FgRed).Fprintf(os.Stdout, "Error:      %s\n", record.Error)
+	}
+	if record.Cost.Value > 0 {
+		fmt.Fprintf(os.Stdout, "Cost:       $%.2f %s (%s)\n",
+			record.Cost.Value, record.Cost.Currency, record.Cost.Confidence)
+	}
 
-		return nil
-	},
+	return nil
 }
 
 var logsCmd = &cobra.Command{

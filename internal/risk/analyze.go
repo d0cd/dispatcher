@@ -28,6 +28,17 @@ func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate)
 			Category:    "capacity-risk",
 			Description: "GPU availability may be limited; job could be queued",
 		})
+		// Right-sizing warning: a GPU spec without a model matches the
+		// cheapest GPU instance in the catalog, which is usually fine but
+		// can pick a wrong-tier instance in regions with unusual inventory.
+		// Concretely, "gpu.count: 1" alone routinely matches T4 or L4 when
+		// the user expected an A100/H100. Flag it so reviewers notice.
+		if w.Requirements.GPU.Model == "" {
+			risks = append(risks, types.Risk{
+				Category:    "right-sizing",
+				Description: "GPU spec has no model — planner picks the cheapest GPU instance, which may not match your performance expectation; set gpu.model (e.g. h100, a100, t4) to pin the tier",
+			})
+		}
 	}
 
 	// Secret access risks
