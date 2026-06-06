@@ -31,6 +31,10 @@ func setupTestEnv(t *testing.T) (*ToolRegistry, string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.py"), []byte(`print("hello")`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("flask\n"), 0o644))
 
+	// Scope path-taking tools to this dir. The planner sets this in
+	// Plan/Audit; tests have to do it explicitly.
+	require.NoError(t, tools.SetWorkloadRoot(dir))
+
 	return tools, dir
 }
 
@@ -145,7 +149,7 @@ func TestToolDefinitions(t *testing.T) {
 	tools, _ := setupTestEnv(t)
 	defs := tools.Definitions()
 
-	assert.Len(t, defs, 4)
+	assert.Len(t, defs, 5)
 	names := make([]string, len(defs))
 	for i, d := range defs {
 		names[i] = d.Name
@@ -154,6 +158,7 @@ func TestToolDefinitions(t *testing.T) {
 	}
 	assert.Contains(t, names, "inspect_workload")
 	assert.Contains(t, names, "evaluate_all_targets")
+	assert.Contains(t, names, "inspect_run")
 	assert.Contains(t, names, "find_cheapest_instances")
 	assert.Contains(t, names, "get_run_history")
 }

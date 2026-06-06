@@ -9,13 +9,13 @@ import (
 type ProviderID string
 
 const (
-	ProviderHetzner   ProviderID = "hetzner"
-	ProviderAWS       ProviderID = "aws"
-	ProviderGCP       ProviderID = "gcp"
-	ProviderAzure     ProviderID = "azure"
-	ProviderMultipass   ProviderID = "multipass"
-	ProviderLima        ProviderID = "lima"
-	ProviderKubernetes  ProviderID = "kubernetes"
+	ProviderHetzner    ProviderID = "hetzner"
+	ProviderAWS        ProviderID = "aws"
+	ProviderGCP        ProviderID = "gcp"
+	ProviderAzure      ProviderID = "azure"
+	ProviderMultipass  ProviderID = "multipass"
+	ProviderLima       ProviderID = "lima"
+	ProviderKubernetes ProviderID = "kubernetes"
 )
 
 // VMOptions describes the VM to create.
@@ -31,9 +31,24 @@ type VMOptions struct {
 
 // VMInfo describes a provisioned VM.
 type VMInfo struct {
-	ID        string
-	Name      string
-	IP        string
+	ID   string
+	Name string
+	IP   string
+	// SSHPort is non-zero when the provider exposes SSH on a non-standard
+	// port (Lima forwards to 127.0.0.1:<random>). Cloud VMs leave it 0 and
+	// the adapter defaults to 22.
+	SSHPort int
+	// SSHKeyPath, when non-empty, is a path to a private key that the
+	// provider has pre-authorized for the VM. Cloud-VM providers (AWS,
+	// GCP, Azure, Hetzner) leave this empty — the adapter generates a
+	// per-run ed25519 key and injects the pub via cloud-init. Lima sets
+	// it to ~/.lima/_config/user since Lima manages its own SSH identity.
+	SSHKeyPath string
+	// SSHUser, when non-empty, is the username the provider expects on the
+	// VM. Lima uses the host user's name; cloud VMs use a provider-
+	// specific default ("ubuntu", "ec2-user", "dispatcher", etc.) and let
+	// the adapter Config supply it.
+	SSHUser   string
 	State     VMState
 	CreatedAt time.Time
 	Tags      map[string]string

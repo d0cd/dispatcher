@@ -52,7 +52,7 @@ func TestE2E_InitPlanRun(t *testing.T) {
 	// Init
 	_, _, err := executeCommand("init", dir)
 	require.NoError(t, err)
-	assert.FileExists(t, filepath.Join(dir, "dispatch.yaml"))
+	assert.FileExists(t, filepath.Join(dir, "dispatcher.yaml"))
 
 	// Plan
 	_, _, err = executeCommand("plan", dir)
@@ -128,7 +128,7 @@ func TestE2E_PlanWithDispatchYaml(t *testing.T) {
 	setupE2E(t)
 	dir := writeFixture(t, "configured", map[string]string{
 		"main.py": `print("configured")`,
-		"dispatch.yaml": `name: my-app
+		"dispatcher.yaml": `name: my-app
 command: ["python3", "main.py"]
 maxCost: 25
 `,
@@ -142,7 +142,7 @@ func TestE2E_PlanWithDispatchYamlService(t *testing.T) {
 	setupE2E(t)
 	dir := writeFixture(t, "svc-config", map[string]string{
 		"main.py": `print("svc")`,
-		"dispatch.yaml": `name: my-svc
+		"dispatcher.yaml": `name: my-svc
 command: ["python3", "main.py"]
 service:
   port: 8080
@@ -237,7 +237,7 @@ func TestE2E_RunServiceOnLocalProcessRejected(t *testing.T) {
 	setupE2E(t)
 	dir := writeFixture(t, "svc", map[string]string{
 		"main.py": `print("svc")`,
-		"dispatch.yaml": `name: svc
+		"dispatcher.yaml": `name: svc
 service:
   port: 8080
 `,
@@ -356,8 +356,8 @@ func TestE2E_TargetsAddAndList(t *testing.T) {
 func TestE2E_InitForce(t *testing.T) {
 	setupE2E(t)
 	dir := writeFixture(t, "py", map[string]string{
-		"main.py":       `print("hello")`,
-		"dispatch.yaml": "old content",
+		"main.py":         `print("hello")`,
+		"dispatcher.yaml": "old content",
 	})
 
 	// Without force — should fail
@@ -368,7 +368,7 @@ func TestE2E_InitForce(t *testing.T) {
 	_, _, err = executeCommand("init", dir, "--force")
 	require.NoError(t, err)
 
-	data, _ := os.ReadFile(filepath.Join(dir, "dispatch.yaml"))
+	data, _ := os.ReadFile(filepath.Join(dir, "dispatcher.yaml"))
 	assert.NotEqual(t, "old content", string(data))
 }
 
@@ -381,10 +381,10 @@ func TestE2E_GCDryRun(t *testing.T) {
 func TestE2E_DispatchIgnore(t *testing.T) {
 	setupE2E(t)
 	dir := writeFixture(t, "with-ignore", map[string]string{
-		"main.py":          `print("hello")`,
-		".dispatchignore":  "data/\nlogs/\n",
-		"data/big.csv":     "lots of data",
-		"src/lib.py":       "import os",
+		"main.py":         `print("hello")`,
+		".dispatchignore": "data/\nlogs/\n",
+		"data/big.csv":    "lots of data",
+		"src/lib.py":      "import os",
 	})
 
 	_, _, err := executeCommand("plan", dir)

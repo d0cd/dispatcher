@@ -1,0 +1,4 @@
+# Minimal local-process workload — runs natively, no isolation.
+# Tests: workload detection, command inference, .env injection.
+name: hello-python
+maxCost: 0.10

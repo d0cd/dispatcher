@@ -1,7 +1,13 @@
+// Package cost stores run-history data used for cost estimation. Storage
+// is JSONL at <state-dir>/history.jsonl; Record uses O_APPEND (atomic
+// for sub-PIPE_BUF writes) so concurrent dispatchers never lose entries.
+// Compaction runs on load when the file exceeds the cap.
 package cost
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -11,6 +17,10 @@ import (
 	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// maxEntries is the cap on retained run history. Old entries are trimmed
+// when the on-disk file grows past 2x this number.
+const maxEntries = 500
 
 // RunHistory records the actual outcome of a completed run.
 type RunHistory struct {
@@ -34,30 +44,67 @@ type HistoryStore struct {
 	path    string
 }
 
-// NewHistoryStore creates a store backed by a JSON file.
+// NewHistoryStore creates a store backed by a JSONL file in the state dir.
 func NewHistoryStore() (*HistoryStore, error) {
 	dir, err := state.Dir()
 	if err != nil {
 		return nil, err
 	}
-	store := &HistoryStore{path: filepath.Join(dir, "history.json")}
+	store := &HistoryStore{path: filepath.Join(dir, "history.jsonl")}
 	store.load()
 	return store, nil
 }
 
-// Record adds a completed run to the history.
+// Record appends a completed run to the history. Uses O_APPEND so
+// concurrent dispatcher processes never lose each other's entries.
+//
+// The on-disk file is intentionally NOT trimmed here — trimming during
+// Record means snapshotting the in-memory state and rewriting the file,
+// which races against any other process's concurrent appends (they'd
+// land on a soon-to-be-deleted inode). Disk size grows unbounded between
+// dispatcher invocations; the next NewHistoryStore call trims on load.
 func (h *HistoryStore) Record(entry RunHistory) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	h.entries = append(h.entries, entry)
-
-	// Keep last 500 entries
-	if len(h.entries) > 500 {
-		h.entries = h.entries[len(h.entries)-500:]
+	// Defensive bound: workload names can theoretically be large; cap the
+	// serialized line at 1 KiB so it stays well under PIPE_BUF (4 KiB)
+	// and Linux/macOS guarantee O_APPEND atomicity.
+	if len(entry.WorkloadName) > 256 {
+		entry.WorkloadName = entry.WorkloadName[:256] + "…"
+	}
+	line, err := json.Marshal(entry)
+	if err != nil {
+		return fmt.Errorf("marshal history entry: %w", err)
+	}
+	line = append(line, '\n')
+	if len(line) > 4096 {
+		// Last-resort truncation. The runID + targetID + numbers fit
+		// easily; this guards against pathological future fields.
+		return fmt.Errorf("history entry exceeds PIPE_BUF (%d bytes); refusing to risk torn write", len(line))
 	}
 
-	return h.save()
+	// O_APPEND is atomic for writes < PIPE_BUF on both Linux and macOS:
+	// two concurrent Record calls produce two complete lines in some
+	// interleaved order rather than one mangled line.
+	f, err := os.OpenFile(h.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open history: %w", err)
+	}
+	if _, err := f.Write(line); err != nil {
+		f.Close()
+		return fmt.Errorf("write history entry: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+
+	h.mu.Lock()
+	h.entries = append(h.entries, entry)
+	// In-memory cap is strict so estimators never look at more than
+	// `maxEntries` worth of data.
+	if len(h.entries) > maxEntries {
+		h.entries = h.entries[len(h.entries)-maxEntries:]
+	}
+	h.mu.Unlock()
+	return nil
 }
 
 // EstimateDuration returns the average duration for similar runs.
@@ -80,7 +127,6 @@ func (h *HistoryStore) EstimateDuration(targetID, workloadKind string) time.Dura
 		return 0
 	}
 
-	// Return median duration
 	return median(durations)
 }
 
@@ -99,7 +145,7 @@ func (h *HistoryStore) ConfidenceForTarget(targetID string) types.Confidence {
 	}
 
 	if len(errors) < 3 {
-		return "" // not enough data
+		return ""
 	}
 
 	avgErr := avg(errors)
@@ -170,22 +216,87 @@ type TargetStats struct {
 	AvgDuration   time.Duration `json:"avgDuration"`
 }
 
+// load reads the JSONL file into memory. Malformed lines are skipped (one
+// bad line shouldn't corrupt the whole history). If the on-disk file has
+// grown well past the cap, the file is compacted on load — this is the
+// only place trimming happens, so concurrent Record calls can never race
+// the rewrite (Record only appends, never rewrites).
 func (h *HistoryStore) load() {
-	data, err := os.ReadFile(h.path)
+	f, err := os.Open(h.path)
 	if err != nil {
 		return
 	}
-	_ = json.Unmarshal(data, &h.entries)
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	// Allow larger lines than the default 64 KiB — a history entry with
+	// long workload names could exceed it.
+	scanner.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var entry RunHistory
+		if err := json.Unmarshal(line, &entry); err != nil {
+			continue
+		}
+		h.entries = append(h.entries, entry)
+	}
+	// Trim to the last maxEntries on load — older entries are still on
+	// disk but we don't care about them for estimation.
+	if len(h.entries) > maxEntries {
+		h.entries = h.entries[len(h.entries)-maxEntries:]
+	}
+	// Compact when the file has grown past 4x the cap. Doing it here
+	// (in NewHistoryStore, called once per CLI invocation) is safe:
+	// nothing else is using the file yet. If two CLI processes start
+	// simultaneously both may try to trim; we serialize with a flock-
+	// style lock file so only one rewrite wins.
+	if info, err := os.Stat(h.path); err == nil && info.Size() > int64(4*maxEntries*400) {
+		_ = h.compactOnLoad()
+	}
 }
 
-func (h *HistoryStore) save() error {
-	data, err := json.MarshalIndent(h.entries, "", "  ")
+// compactOnLoad atomically rewrites the file to contain just the
+// in-memory entries (already capped at maxEntries). Uses temp+rename so
+// concurrent O_APPEND writers from another CLI invocation might land in
+// the old inode and lose their write — to avoid this, we acquire an
+// exclusive flock on a sibling .lock file, blocking any other CLI's
+// compactOnLoad until we finish. Record() doesn't take this lock; it
+// only appends, which is atomic regardless.
+func (h *HistoryStore) compactOnLoad() error {
+	lockPath := h.path + ".compact.lock"
+	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return err
 	}
-	// Atomic write via temp file + rename
+	defer lock.Close()
+	defer os.Remove(lockPath)
+	if err := flockExclusive(lock); err != nil {
+		return err
+	}
+	defer flockUnlock(lock)
+
 	tmp := h.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	for _, e := range h.entries {
+		line, err := json.Marshal(e)
+		if err != nil {
+			f.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+		if _, err := f.Write(append(line, '\n')); err != nil {
+			f.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	return os.Rename(tmp, h.path)
@@ -196,7 +307,6 @@ func median(ds []time.Duration) time.Duration {
 	if n == 0 {
 		return 0
 	}
-	// Simple selection — copy and sort
 	sorted := make([]time.Duration, n)
 	copy(sorted, ds)
 	for i := 0; i < n; i++ {

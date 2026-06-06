@@ -16,8 +16,9 @@ import (
 )
 
 // MCPServer exposes the planner's ToolRegistry over the Model Context Protocol
-// (JSON-RPC 2.0 over HTTP). aitelier's /v1/agent passes its URL to claude-code
-// via --mcp-config, and the agent invokes our Go-side tools through it.
+// (JSON-RPC 2.0 over HTTP). aitelier's /v1/chat/completions receives this URL
+// in the aitelier.mcp_servers block and forwards it to the inner agent, which
+// invokes our Go-side tools through it.
 type MCPServer struct {
 	registry *ToolRegistry
 

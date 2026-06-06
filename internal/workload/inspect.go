@@ -28,9 +28,18 @@ func InspectCodebase(path string) (types.WorkloadSpec, error) {
 	spec.Package = detectPackagePlan(path, spec.Runtime)
 	spec.DetectedKind = classifyWorkload(spec)
 
-	// Apply dispatch.yaml overrides if present
+	// Apply dispatcher.yaml overrides if present
 	if cfg, err := LoadConfig(path); err == nil && cfg != nil {
 		ApplyConfig(&spec, cfg)
+	}
+
+	// Default outputs detection: if config didn't specify and `outputs/`
+	// exists in the workload directory, retrieve it after the run. Users get
+	// data-preserving behavior without having to declare it.
+	if len(spec.Outputs) == 0 {
+		if info, err := os.Stat(filepath.Join(path, "outputs")); err == nil && info.IsDir() {
+			spec.Outputs = []string{"outputs/"}
+		}
 	}
 
 	return spec, nil

@@ -11,14 +11,14 @@ import (
 
 // GPU framework indicators in import statements or config files.
 var gpuFrameworks = map[string]string{
-	"torch":        "pytorch",
-	"tensorflow":   "tensorflow",
-	"jax":          "jax",
-	"cupy":         "cupy",
-	"cuda":         "cuda",
-	"nvidia":       "nvidia",
-	"triton":       "triton",
-	"onnxruntime":  "onnxruntime",
+	"torch":       "pytorch",
+	"tensorflow":  "tensorflow",
+	"jax":         "jax",
+	"cupy":        "cupy",
+	"cuda":        "cuda",
+	"nvidia":      "nvidia",
+	"triton":      "triton",
+	"onnxruntime": "onnxruntime",
 }
 
 // DetectGPURequirements scans imports and configs for GPU framework usage.

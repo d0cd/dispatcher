@@ -9,7 +9,6 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
-	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/cost"
 	"github.com/d0cd/dispatcher/internal/plan"
 	"github.com/d0cd/dispatcher/internal/planner"
@@ -27,9 +26,9 @@ var planFlags struct {
 
 var planCmd = &cobra.Command{
 	Use:   "plan [path]",
-	Short: "Generate an execution plan for a workload",
-	Long:  "Inspects the workload at the given path, evaluates configured targets, and produces a structured plan with cost estimates, risks, and recommendations.",
-	Args:  cobra.ExactArgs(1),
+	Short: "Generate an execution plan for a workload (defaults to current directory)",
+	Long:  "Inspects the workload at the given path, evaluates configured targets, and produces a structured plan with cost estimates, risks, and recommendations.\n\nIf path is omitted, the current directory is used.",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runPlan,
 }
 
@@ -42,9 +41,13 @@ func init() {
 }
 
 func runPlan(cmd *cobra.Command, args []string) error {
-	path, err := filepath.Abs(args[0])
+	raw := "."
+	if len(args) > 0 {
+		raw = args[0]
+	}
+	path, err := filepath.Abs(raw)
 	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
+		return fmt.Errorf("invalid path %q: %w", raw, err)
 	}
 
 	info, err := os.Stat(path)
@@ -70,12 +73,17 @@ func runPlan(cmd *cobra.Command, args []string) error {
 		return runAIPlan(path, constraints)
 	}
 
-	result, err := plan.Build(path, constraints)
+	catalog := loadLiveCatalog(os.Stderr)
+
+	result, err := plan.Build(path, constraints, catalog)
 	if err != nil {
 		return fmt.Errorf("plan failed: %w", err)
 	}
 
 	plan.Print(result, color.Output)
+	if footnote := formatPricingFootnote(catalog); footnote != "" {
+		color.New(color.Faint).Fprintln(os.Stderr, footnote)
+	}
 
 	savedPath, err := plan.Save(result)
 	if err != nil {
@@ -91,10 +99,12 @@ func runPlan(cmd *cobra.Command, args []string) error {
 func runAIPlan(path string, constraints types.PlanConstraints) error {
 	reg := target.NewRegistry()
 	reg.LoadBuiltins()
-	_ = reg.LoadUserConfig()
+	if err := reg.LoadUserConfig(); err != nil {
+		color.New(color.Faint).Fprintf(os.Stderr, "warning: could not load user targets: %v\n", err)
+	}
 
 	hist, _ := cost.NewHistoryStore()
-	cat := cloudvm.NewCatalog()
+	cat := loadLiveCatalog(os.Stderr)
 
 	tools := planner.NewToolRegistry(reg, hist, cat)
 

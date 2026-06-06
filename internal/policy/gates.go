@@ -53,9 +53,5 @@ func Evaluate(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate
 }
 
 func isExternalProvider(t types.TargetConfig) bool {
-	switch t.Kind {
-	case types.TargetKindModal, types.TargetKindE2B, types.TargetKindCloudVM:
-		return true
-	}
-	return false
+	return t.Kind == types.TargetKindCloudVM
 }

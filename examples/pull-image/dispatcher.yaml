@@ -1,0 +1,16 @@
+# Pre-built image workload — exercises PackageTypeImage. Docker pulls the
+# image and runs it as-is; dispatcher does NOT mount the workload source
+# (the image already contains the code). The classic use case: running a
+# tool or sidecar (redis, postgres, a one-shot validator) without writing
+# any code yourself.
+#
+# `hello-world` is Docker's canonical smoke test — prints a message and
+# exits 0. Tiny image (~13kB) so the example runs quickly.
+#
+# `target: local-docker` is pinned because local-process can't run an
+# image. On a cloud target (cloud-vm) this would also work; Docker is the
+# only "local" adapter that knows how to pull and run images.
+name: pull-image
+image: hello-world:latest
+target: local-docker
+maxCost: 0.10

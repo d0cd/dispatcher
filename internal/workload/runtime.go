@@ -55,13 +55,13 @@ func DetectRuntime(path string) types.Runtime {
 	}
 
 	extMap := map[string]types.Runtime{
-		".py":  types.RuntimePython,
-		".js":  types.RuntimeNode,
-		".ts":  types.RuntimeNode,
-		".go":  types.RuntimeGo,
-		".rs":  types.RuntimeRust,
+		".py":   types.RuntimePython,
+		".js":   types.RuntimeNode,
+		".ts":   types.RuntimeNode,
+		".go":   types.RuntimeGo,
+		".rs":   types.RuntimeRust,
 		".java": types.RuntimeJava,
-		".rb":  types.RuntimeRuby,
+		".rb":   types.RuntimeRuby,
 	}
 
 	for _, entry := range entries {

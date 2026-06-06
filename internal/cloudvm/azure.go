@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"time"
+
+	"github.com/d0cd/dispatcher/internal/adapter"
 )
 
 // AzureProvider implements Provider using the az CLI.
@@ -65,30 +68,41 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 	}
 
 	if opts.UserData != "" {
-		args = append(args, "--custom-data", opts.UserData)
+		// Azure CLI's `--custom-data @<path>` reads from a file. Keeps the
+		// (potentially large, potentially shell-special) blob entirely off
+		// argv where `ps` would otherwise show it.
+		path, err := adapter.WriteSecureTempFile("dispatcher-azure-userdata-*.sh", []byte(opts.UserData))
+		if err != nil {
+			return nil, fmt.Errorf("write user-data: %w", err)
+		}
+		defer os.Remove(path)
+		args = append(args, "--custom-data", "@"+path)
 	}
 
-	// Azure tags
+	// Azure tags: az CLI's `--tags` accepts repeated `key=value` arguments
+	// AFTER the flag — separate argv elements, no joining. The previous
+	// space-joined single-string form was a flag-injection vector if any
+	// value contained a space. Validation rejects metacharacters before we
+	// hit the CLI at all.
+	if err := validateLabels(opts.Tags); err != nil {
+		return nil, fmt.Errorf("azure tags: %w", err)
+	}
 	if len(opts.Tags) > 0 {
-		tagArgs := ""
+		args = append(args, "--tags")
 		for k, v := range opts.Tags {
-			if tagArgs != "" {
-				tagArgs += " "
-			}
-			tagArgs += fmt.Sprintf("%s=%s", k, v)
+			args = append(args, k+"="+v)
 		}
-		args = append(args, "--tags", tagArgs)
 	}
 
 	cmd := exec.CommandContext(ctx, "az", args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("az vm create failed: %w", err)
+		return nil, wrapExecError("az vm create", err)
 	}
 
 	var result struct {
 		ID              string `json:"id"`
-		PublicIpAddress  string `json:"publicIpAddress"`
+		PublicIpAddress string `json:"publicIpAddress"`
 	}
 	if err := json.Unmarshal(output, &result); err != nil {
 		return nil, fmt.Errorf("cannot parse az output: %w", err)
@@ -121,9 +135,9 @@ func (a *AzureProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error)
 	}
 
 	var result struct {
-		Name           string `json:"name"`
-		PowerState     string `json:"powerState"`
-		PublicIps      string `json:"publicIps"`
+		Name       string `json:"name"`
+		PowerState string `json:"powerState"`
+		PublicIps  string `json:"publicIps"`
 	}
 	if err := json.Unmarshal(output, &result); err != nil {
 		return nil, err
@@ -165,7 +179,7 @@ func (a *AzureProvider) ListVMs(ctx context.Context, tags map[string]string) ([]
 	cmd := exec.CommandContext(ctx, "az", args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("az vm list failed: %w", err)
+		return nil, wrapExecError("az vm list", err)
 	}
 
 	var vms []struct {

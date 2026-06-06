@@ -63,10 +63,6 @@ func RuntimeForTarget(t types.TargetConfig) string {
 		return "ssh-remote"
 	case types.TargetKindKubernetes:
 		return "kubernetes-deployment"
-	case types.TargetKindModal:
-		return "managed-service"
-	case types.TargetKindE2B:
-		return "managed-sandbox"
 	case types.TargetKindCloudVM:
 		return "cloud-vm"
 	default:

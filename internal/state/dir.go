@@ -1,25 +1,27 @@
-// Package state resolves the dispatch state directory.
-//
-// Resolution order:
-//  1. $DISPATCH_HOME if set.
-//  2. A `.dispatcher/` directory found by walking up from the current working
-//     directory (per-project isolation).
-//  3. `~/.dispatcher/` as the cross-project fallback.
+// Package state resolves the dispatcher state directory. Order:
+// $DISPATCHER_HOME, then walk up from cwd looking for .dispatcher/, then
+// ~/.dispatcher/. Every resolved dir is enforced to mode 0700 even if it
+// pre-existed at a looser mode.
 package state
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const dirName = ".dispatcher"
 
-// Dir resolves the dispatch state directory, creating it if missing.
+// Dir resolves the dispatcher state directory, creating it if missing and
+// enforcing mode 0700.
 func Dir() (string, error) {
-	if env := os.Getenv("DISPATCH_HOME"); env != "" {
-		if err := os.MkdirAll(env, 0o700); err != nil {
-			return "", fmt.Errorf("create $DISPATCH_HOME (%s): %w", env, err)
+	if env := os.Getenv("DISPATCHER_HOME"); env != "" {
+		if err := validateHomeOverride(env); err != nil {
+			return "", err
+		}
+		if err := ensureSecureDir(env); err != nil {
+			return "", err
 		}
 		return env, nil
 	}
@@ -31,13 +33,16 @@ func Dir() (string, error) {
 
 	if cwd, err := os.Getwd(); err == nil {
 		if found, ok := findUpward(cwd, home); ok {
+			if err := ensureSecureDir(found); err != nil {
+				return "", err
+			}
 			return found, nil
 		}
 	}
 
 	d := filepath.Join(home, dirName)
-	if err := os.MkdirAll(d, 0o700); err != nil {
-		return "", fmt.Errorf("create %s: %w", d, err)
+	if err := ensureSecureDir(d); err != nil {
+		return "", err
 	}
 	return d, nil
 }
@@ -49,17 +54,56 @@ func Subdir(name string) (string, error) {
 		return "", err
 	}
 	d := filepath.Join(base, name)
-	if err := os.MkdirAll(d, 0o700); err != nil {
-		return "", fmt.Errorf("create %s: %w", d, err)
+	if err := ensureSecureDir(d); err != nil {
+		return "", err
 	}
 	return d, nil
 }
 
-// findUpward walks parents looking for a project root, defined as a directory
-// containing a project marker (.git, go.mod, package.json, pyproject.toml,
-// Cargo.toml, dispatch.yaml) or a .dispatcher/ directory itself. Stops at $HOME
-// so the global ~/.dispatcher/ is never mistaken for a project-local one.
-// Returns the .dispatcher/ path at that project root if it exists.
+func validateHomeOverride(env string) error {
+	if !filepath.IsAbs(env) {
+		return fmt.Errorf("DISPATCHER_HOME must be absolute (got %q)", env)
+	}
+	for _, seg := range strings.Split(env, string(filepath.Separator)) {
+		if seg == ".." {
+			return fmt.Errorf("DISPATCHER_HOME contains path traversal (got %q)", env)
+		}
+	}
+	return nil
+}
+
+// ensureSecureDir creates dir if missing and enforces mode 0700. Symlinks
+// to the target are accepted (operators legitimately remap state-dir);
+// chmod failure on existing dirs is fatal rather than silently leaking.
+func ensureSecureDir(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return fmt.Errorf("stat %s: %w", dir, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		info, err = os.Stat(dir)
+		if err != nil {
+			return fmt.Errorf("stat target of %s: %w", dir, err)
+		}
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s exists but is not a directory", dir)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return fmt.Errorf("%s has insecure perms %o and could not be chmodded: %w",
+				dir, info.Mode().Perm(), err)
+		}
+	}
+	return nil
+}
+
+// findUpward walks parents looking for an existing .dispatcher/ at a
+// project root (identified by isProjectRoot markers). Stops at $HOME so
+// the global state dir isn't mistaken for project-local.
 func findUpward(start, home string) (string, bool) {
 	dir := start
 	for {
@@ -82,7 +126,7 @@ func findUpward(start, home string) (string, bool) {
 }
 
 func isProjectRoot(dir string) bool {
-	for _, marker := range []string{".git", "go.mod", "package.json", "pyproject.toml", "Cargo.toml", "dispatch.yaml", "dispatch.yml"} {
+	for _, marker := range []string{".git", "go.mod", "package.json", "pyproject.toml", "Cargo.toml", "dispatcher.yaml", "dispatcher.yml"} {
 		if _, err := os.Stat(filepath.Join(dir, marker)); err == nil {
 			return true
 		}

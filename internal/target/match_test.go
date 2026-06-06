@@ -21,25 +21,6 @@ func TestCheckFeasibility_SimpleScript(t *testing.T) {
 	assert.True(t, result.Feasible)
 }
 
-// CheckFeasibility_KindToCapabilityMapping verifies the E2B/sandbox capability
-// branch still functions even though e2b is not a default builtin.
-func TestCheckFeasibility_KindToCapabilityMapping(t *testing.T) {
-	e2b := types.TargetConfig{
-		ID:      "e2b-test",
-		Kind:    types.TargetKindE2B,
-		Enabled: true,
-		Capabilities: types.Capabilities{
-			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindSandbox, types.WorkloadKindScript},
-			Isolation:     types.IsolationCapability{Levels: []string{"sandbox"}},
-		},
-	}
-	result := CheckFeasibility(e2b, types.WorkloadSpec{
-		DetectedKind: types.WorkloadKindScript,
-		Runtime:      types.RuntimePython,
-	})
-	assert.True(t, result.Feasible)
-}
-
 func TestCheckFeasibility_GPUJobRejectsCPUOnly(t *testing.T) {
 	registry := NewRegistry()
 	registry.LoadBuiltins()
@@ -59,22 +40,6 @@ func TestCheckFeasibility_GPUJobRejectsCPUOnly(t *testing.T) {
 	k8s, _ := registry.Get("kubernetes")
 	result = CheckFeasibility(k8s, w)
 	assert.True(t, result.Feasible)
-}
-
-func TestCheckFeasibility_ServiceRejectsE2B(t *testing.T) {
-	e2b := types.TargetConfig{
-		ID:      "e2b-test",
-		Kind:    types.TargetKindE2B,
-		Enabled: true,
-		Capabilities: types.Capabilities{
-			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindSandbox, types.WorkloadKindScript},
-		},
-	}
-	result := CheckFeasibility(e2b, types.WorkloadSpec{
-		DetectedKind: types.WorkloadKindService,
-		Ports:        []int{8080},
-	})
-	assert.False(t, result.Feasible)
 }
 
 func TestCheckFeasibility_DisabledTarget(t *testing.T) {
@@ -105,5 +70,4 @@ func TestRegistryListOrder(t *testing.T) {
 func TestRuntimeForTarget(t *testing.T) {
 	assert.Equal(t, "local-docker", RuntimeForTarget(types.TargetConfig{Kind: types.TargetKindDocker}))
 	assert.Equal(t, "kubernetes-deployment", RuntimeForTarget(types.TargetConfig{Kind: types.TargetKindKubernetes}))
-	assert.Equal(t, "managed-sandbox", RuntimeForTarget(types.TargetConfig{Kind: types.TargetKindE2B}))
 }

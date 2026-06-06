@@ -153,6 +153,7 @@ func BuiltinTargets() []types.TargetConfig {
 			Enabled: true,
 			Capabilities: types.Capabilities{
 				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
 					types.WorkloadKindJob,
 					types.WorkloadKindContainer,
 					types.WorkloadKindService,
@@ -186,9 +187,6 @@ func BuiltinTargets() []types.TargetConfig {
 				},
 			},
 		},
-		// modal and e2b builtins are intentionally not enabled — no execution
-		// adapter exists yet (see cli/run.go adapterForTarget). Re-add once
-		// internal/cloudvm/modal.go and internal/cloudvm/e2b.go land.
 		{
 			ID:      "aws-vm",
 			Kind:    types.TargetKindCloudVM,

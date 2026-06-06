@@ -10,8 +10,6 @@ const (
 	TargetKindSSH        TargetKind = "ssh"
 	TargetKindKubernetes TargetKind = "kubernetes"
 	TargetKindCloudVM    TargetKind = "cloud-vm"
-	TargetKindModal      TargetKind = "modal"
-	TargetKindE2B        TargetKind = "e2b"
 )
 
 // GPUCapability describes GPU support on a target.
@@ -22,9 +20,9 @@ type GPUCapability struct {
 
 // NetworkingCapability describes networking features.
 type NetworkingCapability struct {
-	PublicEndpoint  bool `yaml:"publicEndpoint" json:"publicEndpoint"`
+	PublicEndpoint   bool `yaml:"publicEndpoint" json:"publicEndpoint"`
 	PrivateVPCAccess bool `yaml:"privateVpcAccess" json:"privateVpcAccess"`
-	StaticEgressIP  bool `yaml:"staticEgressIp" json:"staticEgressIp"`
+	StaticEgressIP   bool `yaml:"staticEgressIp" json:"staticEgressIp"`
 }
 
 // AccountingCapability describes cost tracking support.
@@ -48,13 +46,13 @@ type ObservabilityCapability struct {
 
 // Capabilities describes what a target can do.
 type Capabilities struct {
-	WorkloadKinds  []WorkloadKind          `yaml:"workloadKinds" json:"workloadKinds"`
-	Resources      ResourceCapability      `yaml:"resources" json:"resources"`
-	Networking     NetworkingCapability    `yaml:"networking" json:"networking"`
-	Accounting     AccountingCapability    `yaml:"accounting" json:"accounting"`
-	Isolation      IsolationCapability     `yaml:"isolation" json:"isolation"`
-	Observability  ObservabilityCapability `yaml:"observability" json:"observability"`
-	NotSupported   []string               `yaml:"notSupported,omitempty" json:"notSupported,omitempty"`
+	WorkloadKinds []WorkloadKind          `yaml:"workloadKinds" json:"workloadKinds"`
+	Resources     ResourceCapability      `yaml:"resources" json:"resources"`
+	Networking    NetworkingCapability    `yaml:"networking" json:"networking"`
+	Accounting    AccountingCapability    `yaml:"accounting" json:"accounting"`
+	Isolation     IsolationCapability     `yaml:"isolation" json:"isolation"`
+	Observability ObservabilityCapability `yaml:"observability" json:"observability"`
+	NotSupported  []string                `yaml:"notSupported,omitempty" json:"notSupported,omitempty"`
 }
 
 // ResourceCapability describes compute resources available.

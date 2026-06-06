@@ -35,6 +35,12 @@ type AtelierBackend struct {
 	apiKey   string // optional Bearer token for hosted mode
 	registry *ToolRegistry
 	client   *http.Client
+
+	// responseSchema is the JSON schema sent to aitelier as response_format.
+	// Defaults to the plan schema; callers can override via SetResponseSchema
+	// before invoking Diagnose/Audit so the inner agent isn't told to produce
+	// PlanResult-shaped JSON for a non-plan flow.
+	responseSchema *responseFormat
 }
 
 type AtelierConfig struct {
@@ -66,14 +72,35 @@ func NewAtelierBackend(cfg AtelierConfig) *AtelierBackend {
 	}
 
 	return &AtelierBackend{
-		baseURL:  cfg.BaseURL,
-		agent:    cfg.Agent,
-		model:    cfg.Model,
-		apiKey:   cfg.APIKey,
-		registry: cfg.ToolRegistry,
-		client:   &http.Client{Timeout: 5 * time.Minute},
+		baseURL:        cfg.BaseURL,
+		agent:          cfg.Agent,
+		model:          cfg.Model,
+		apiKey:         cfg.APIKey,
+		registry:       cfg.ToolRegistry,
+		client:         &http.Client{Timeout: 5 * time.Minute},
+		responseSchema: planResultResponseFormat(),
 	}
 }
+
+// SetResponseSchema overrides the response_format sent to aitelier on the
+// next Chat call. Pass nil to ask for free-form text. Audit/Diagnose use this
+// so the inner agent isn't told to produce a PlanResult-shaped object when
+// it's actually doing a different job.
+func (a *AtelierBackend) SetResponseSchema(s *responseFormat) {
+	a.responseSchema = s
+}
+
+// ResponseSchemaPlan exposes the plan schema so callers (Diagnose/Audit) can
+// reset to the plan schema after temporarily overriding for another flow.
+// Kept as a method rather than a constant because the schema is built lazily.
+func ResponseSchemaPlan() *responseFormat { return planResultResponseFormat() }
+
+// ResponseSchemaAudit returns the JSON schema for an AuditResult. Used by
+// Audit() to tell aitelier "produce this shape, not PlanResult".
+func ResponseSchemaAudit() *responseFormat { return auditResultResponseFormat() }
+
+// ResponseSchemaDiagnose returns the JSON schema for a DiagnoseResult.
+func ResponseSchemaDiagnose() *responseFormat { return diagnoseResultResponseFormat() }
 
 // Agent returns the backend name (used for CLI display).
 func (a *AtelierBackend) Agent() string { return a.agent }
@@ -201,7 +228,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 	req := chatCompletionRequest{
 		Model:          a.modelString(),
 		Messages:       toChatMessages(messages),
-		ResponseFormat: planResultResponseFormat(),
+		ResponseFormat: a.responseSchema,
 		Aitelier: &aitelierOpts{
 			MCPServers: []mcpServerSpec{
 				{Name: mcpServerName, Transport: "http", URL: mcp.URL()},
@@ -554,6 +581,60 @@ func planResultResponseFormat() *responseFormat {
 				},
 				"suggestions": stringArray,
 				"toolsUsed":   stringArray,
+			},
+			"required": []string{"explanation"},
+		},
+	}
+}
+
+// auditResultResponseFormat mirrors planner.AuditResult. The strict schema
+// pins down field names and severity enums so the inner agent can't return a
+// near-miss shape (e.g. "warn" instead of "warning", "message" instead of
+// "title+detail") that our parser would treat as the wrong schema.
+func auditResultResponseFormat() *responseFormat {
+	severities := []string{"critical", "warning", "info"}
+	categories := []string{"secrets", "cost", "reliability", "compliance", "config"}
+	verdicts := []string{"ready", "concerns", "blocked"}
+	finding := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"severity":   map[string]any{"type": "string", "enum": severities},
+			"category":   map[string]any{"type": "string", "enum": categories},
+			"title":      map[string]any{"type": "string"},
+			"detail":     map[string]any{"type": "string"},
+			"suggestion": map[string]any{"type": "string"},
+		},
+		"required": []string{"severity", "category", "title"},
+	}
+	return &responseFormat{
+		Type: "json_schema",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"summary":   map[string]any{"type": "string"},
+				"verdict":   map[string]any{"type": "string", "enum": verdicts},
+				"findings":  map[string]any{"type": "array", "items": finding},
+				"toolsUsed": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			},
+			"required": []string{"summary", "verdict", "findings"},
+		},
+	}
+}
+
+// diagnoseResultResponseFormat mirrors planner.DiagnoseResult.
+func diagnoseResultResponseFormat() *responseFormat {
+	severities := []string{"info", "warning", "error"}
+	return &responseFormat{
+		Type: "json_schema",
+		Schema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"explanation":    map[string]any{"type": "string"},
+				"likelyCause":    map[string]any{"type": "string"},
+				"severity":       map[string]any{"type": "string", "enum": severities},
+				"recommendation": map[string]any{"type": "string"},
+				"nextSteps":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"toolsUsed":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			},
 			"required": []string{"explanation"},
 		},

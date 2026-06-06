@@ -234,11 +234,11 @@ func TestEstimateCostWithHistory(t *testing.T) {
 	}
 
 	// With history: should use 30min instead of default 1h
-	withHistory := EstimateCostWithHistory(w, target, store)
+	withHistory := EstimateCostWithHistory(w, target, store, nil)
 	assert.Contains(t, withHistory.Assumptions[0], "historical")
 
 	// Without history: uses default 1h
-	withoutHistory := EstimateCost(w, target)
+	withoutHistory := EstimateCost(w, target, nil)
 
 	// Historical estimate should be cheaper (30min vs 1h)
 	assert.Less(t, withHistory.Value, withoutHistory.Value)

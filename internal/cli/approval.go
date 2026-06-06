@@ -4,17 +4,19 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/user"
 	"strings"
 
 	"github.com/fatih/color"
 
-	"github.com/d0cd/dispatcher/internal/run"
+	"github.com/d0cd/dispatcher/internal/approval"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// terminalApproval prompts the user in the terminal for each required approval.
-// Returns nil if all approved, run.ErrApprovalDenied if any denied.
-func terminalApproval(approvals []types.PolicyRequirement) error {
+// terminalApproval prompts the operator at the terminal. The decider tag
+// captures the OS username so multi-operator shared terminals can't
+// produce indistinguishable audit records.
+func terminalApproval(approvals []types.PolicyRequirement) (string, error) {
 	bold := color.New(color.Bold)
 	yellow := color.New(color.FgYellow)
 
@@ -31,16 +33,39 @@ func terminalApproval(approvals []types.PolicyRequirement) error {
 	reader := bufio.NewReader(os.Stdin)
 	input, err := reader.ReadString('\n')
 	if err != nil {
-		return run.ErrApprovalDenied
+		return interactiveDecider(), approval.ErrDenied
 	}
 
 	input = strings.TrimSpace(strings.ToLower(input))
 	if input == "y" || input == "yes" {
 		color.New(color.FgGreen).Fprintln(os.Stderr, "Approved.")
 		fmt.Fprintln(os.Stderr)
-		return nil
+		return interactiveDecider(), nil
 	}
 
 	color.New(color.FgRed).Fprintln(os.Stderr, "Denied.")
-	return run.ErrApprovalDenied
+	return interactiveDecider(), approval.ErrDenied
+}
+
+// yesApproval auto-approves and stamps the audit-distinct "yes-flag:<user>"
+// decider so reviewers can see both that --yes was used AND which user
+// invoked it.
+func yesApproval(approvals []types.PolicyRequirement) (string, error) {
+	dim := color.New(color.Faint)
+	dim.Fprintln(os.Stderr, "Auto-approving (--yes):")
+	for _, a := range approvals {
+		dim.Fprintf(os.Stderr, "  • %s — %s\n", a.Name, a.Reason)
+	}
+	return "yes-flag:" + osUsername(), nil
+}
+
+func interactiveDecider() string {
+	return "interactive:" + osUsername()
+}
+
+func osUsername() string {
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		return u.Username
+	}
+	return "unknown"
 }

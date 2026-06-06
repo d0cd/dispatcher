@@ -1,0 +1,8 @@
+# Workload that ships with a bloated dependency dir (fake node_modules/)
+# and a .dispatchignore that excludes it from cloud rsync transfers.
+#
+# Most relevant on cloud targets — local execution doesn't ship anything,
+# so .dispatchignore is a no-op there. Run with --target hetzner-vm (or
+# any cloud-vm target) to see the file-skip behavior in action.
+name: with-dispatchignore
+maxCost: 0.10

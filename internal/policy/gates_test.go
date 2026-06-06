@@ -71,7 +71,7 @@ func TestEvaluate_SecretsOnExternalProvider(t *testing.T) {
 		DetectedKind: types.WorkloadKindScript,
 		Secrets:      []types.SecretRef{{Kind: "api-key", Name: "KEY"}},
 	}
-	target := types.TargetConfig{Kind: types.TargetKindModal}
+	target := types.TargetConfig{Kind: types.TargetKindCloudVM}
 	est := types.CostEstimate{Value: 3.0, Confidence: types.ConfidenceMedium}
 
 	reqs := Evaluate(w, target, est)

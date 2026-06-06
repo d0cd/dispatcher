@@ -31,7 +31,7 @@ type CleanupResult struct {
 
 // ResourceAccounting tracks resource usage for a run.
 type ResourceAccounting struct {
-	EstimatedCost types.CostEstimate
+	EstimatedCost  types.CostEstimate
 	RuntimeSeconds float64
 }
 
@@ -39,12 +39,12 @@ type ResourceAccounting struct {
 type RunHandle struct {
 	ID       string
 	TargetID string
-	// Adapter-specific opaque state
-	State interface{}
+	State    interface{} // adapter-specific opaque state
+	RunID    string      // set post-Execute for artifact-tree routing
 }
 
-// SerializableState is implemented by adapter states that can survive CLI restarts.
-// When RunHandle.State implements this, the executor persists it to the run record.
+// SerializableState lets adapter state survive CLI restarts. When
+// RunHandle.State implements this, the executor persists it.
 type SerializableState interface {
 	MarshalHandleState() (json.RawMessage, error)
 }
@@ -109,4 +109,20 @@ type TargetAdapter interface {
 
 	// Cleanup releases all resources associated with the run.
 	Cleanup(ctx context.Context, h *RunHandle) (*CleanupResult, error)
+}
+
+// FailureDetails is the adapter's best-effort post-mortem; classifyFailure
+// keys off it to decide whether a retry is appropriate. Only consulted
+// when run state is ExecutionFailed (ExitCode=0 also means "unknown").
+type FailureDetails struct {
+	ExitCode  int    // process exit code
+	Signal    string // "SIGKILL", "SIGSEGV", etc.; empty for normal exit
+	OOMKilled bool   // runtime-confirmed OOM (docker/k8s); local can only infer from SIGKILL
+	Message   string // one-line human explanation
+}
+
+// FailureReporter is optional. Adapters that don't implement it get a
+// zero-value FailureDetails → classifyFailure says "unknown" → no retry.
+type FailureReporter interface {
+	FailureDetails(h *RunHandle) FailureDetails
 }

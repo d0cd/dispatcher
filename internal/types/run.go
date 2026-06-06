@@ -16,9 +16,9 @@ const (
 	RunStateCompleted           RunState = "completed"
 
 	// Durable execution states.
-	RunStateDetached      RunState = "detached"      // CLI disconnected, workload still running
-	RunStateReconnecting  RunState = "reconnecting"  // CLI reconnecting to running workload
-	RunStateStopping      RunState = "stopping"       // user requested stop
+	RunStateDetached     RunState = "detached"     // CLI disconnected, workload still running
+	RunStateReconnecting RunState = "reconnecting" // CLI reconnecting to running workload
+	RunStateStopping     RunState = "stopping"     // user requested stop
 
 	// Failure states.
 	RunStatePlanInvalid        RunState = "plan-invalid"

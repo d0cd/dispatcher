@@ -11,11 +11,11 @@ import (
 )
 
 var (
-	bold    = color.New(color.Bold)
-	green   = color.New(color.FgGreen)
-	yellow  = color.New(color.FgYellow)
-	red     = color.New(color.FgRed)
-	dim     = color.New(color.Faint)
+	bold   = color.New(color.Bold)
+	green  = color.New(color.FgGreen)
+	yellow = color.New(color.FgYellow)
+	red    = color.New(color.FgRed)
+	dim    = color.New(color.Faint)
 )
 
 // Print renders a plan to the given writer in terminal-friendly format.
@@ -66,6 +66,14 @@ func printRecommendation(w io.Writer, p *types.Plan) {
 	fmt.Fprintf(w, "  %-18s %s\n", "Runtime:", r.Runtime)
 	fmt.Fprintf(w, "  %-18s $%.2f %s\n", "Estimated cost:", r.EstimatedCost.Value, r.EstimatedCost.Currency)
 	fmt.Fprintf(w, "  %-18s %s\n", "Confidence:", r.EstimatedCost.Confidence)
+	// Surface the safety rails — watchdog TTL and cost-excluded categories —
+	// so the user knows the worst-case bill and what we're NOT counting.
+	if p.Constraints.WatchdogTTL > 0 {
+		fmt.Fprintf(w, "  %-18s %s (VM self-destructs if dispatcher dies)\n", "Watchdog TTL:", p.Constraints.WatchdogTTL)
+	}
+	if len(r.EstimatedCost.Exclusions) > 0 {
+		fmt.Fprintf(w, "  %-18s %s\n", "Cost excludes:", strings.Join(r.EstimatedCost.Exclusions, ", "))
+	}
 	fmt.Fprintln(w)
 
 	if len(r.Reason) > 0 {

@@ -265,7 +265,7 @@ func setupFixture(t *testing.T, files map[string]string) string {
 
 func mustBuild(t *testing.T, dir string, c types.PlanConstraints) *types.Plan {
 	t.Helper()
-	p, err := Build(dir, c)
+	p, err := Build(dir, c, nil)
 	require.NoError(t, err)
 	require.NotNil(t, p)
 	return p

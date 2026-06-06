@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/approval"
 	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -23,13 +26,21 @@ type RunRecord struct {
 	Error      string             `json:"error,omitempty"`
 	Cost       types.CostEstimate `json:"cost"`
 
+	// Failure detail surfaced by the adapter when the run ended in
+	// ExecutionFailed. Used by `dispatcher diagnose` to classify the cause
+	// (OOM, signal, exit code) without re-running anything.
+	Failure    adapter.FailureDetails `json:"failure,omitempty"`
+	RetryCount int                    `json:"retryCount,omitempty"`
+
 	// Durable execution fields
-	HandleID      string            `json:"handleId,omitempty"`
-	HandleState   json.RawMessage   `json:"handleState,omitempty"`
-	Lifecycle     LifecycleMode     `json:"lifecycle,omitempty"`
-	WatchdogTTL   time.Duration     `json:"watchdogTtl,omitempty"`
-	LastHeartbeat time.Time         `json:"lastHeartbeat,omitempty"`
-	LogFile       string            `json:"logFile,omitempty"`
+	HandleID      string          `json:"handleId,omitempty"`
+	HandleState   json.RawMessage `json:"handleState,omitempty"`
+	Lifecycle     LifecycleMode   `json:"lifecycle,omitempty"`
+	WatchdogTTL   time.Duration   `json:"watchdogTtl,omitempty"`
+	LastHeartbeat time.Time       `json:"lastHeartbeat,omitempty"`
+	LogFile       string          `json:"logFile,omitempty"`
+
+	Approval *approval.Record `json:"approval,omitempty"`
 }
 
 // ToRecord converts a Run to a serializable RunRecord.
@@ -46,22 +57,26 @@ func (r *Run) ToRecord() RunRecord {
 		FinishedAt:    r.FinishedAt,
 		Error:         r.Error,
 		Cost:          r.Cost,
+		Failure:       r.Failure,
+		RetryCount:    r.RetryCount,
 		HandleID:      r.HandleID,
 		HandleState:   r.HandleState,
 		Lifecycle:     r.Lifecycle,
 		WatchdogTTL:   r.WatchdogTTL,
 		LastHeartbeat: r.LastHeartbeat,
 		LogFile:       r.LogFile,
+		Approval:      r.Approval,
 	}
 }
 
-// StoreDir returns the directory where runs are persisted.
 func StoreDir() (string, error) {
 	return state.Subdir("runs")
 }
 
-// Save persists the run state to disk.
 func (r *Run) Save() (string, error) {
+	if err := validateRunID(r.ID); err != nil {
+		return "", err
+	}
 	dir, err := StoreDir()
 	if err != nil {
 		return "", err
@@ -81,16 +96,21 @@ func (r *Run) Save() (string, error) {
 	return path, nil
 }
 
-// atomicWriteLocked writes data to path with an exclusive flock and a
-// write-tmp-then-rename sequence so concurrent readers see either the prior
-// version or the new one — never a torn write.
+// atomicWriteLocked: flock + write-tmp-then-rename. Concurrent readers
+// see either the prior version or the new one, never a torn write.
 func atomicWriteLocked(path string, data []byte, perm os.FileMode) error {
 	lockPath := path + ".lock"
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return fmt.Errorf("open lock %s: %w", lockPath, err)
 	}
-	defer lock.Close()
+	// Remove the lock file before closing the descriptor: flock still
+	// protects us while the fd lives, and removal stops .lock files from
+	// accumulating across long-lived deployments.
+	defer func() {
+		_ = os.Remove(lockPath)
+		lock.Close()
+	}()
 	if err := flockExclusive(lock); err != nil {
 		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
 	}
@@ -117,8 +137,10 @@ func atomicWriteLocked(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmpPath, path)
 }
 
-// LoadRecord reads a run record from the store by ID.
 func LoadRecord(id string) (*RunRecord, error) {
+	if err := validateRunID(id); err != nil {
+		return nil, err
+	}
 	dir, err := StoreDir()
 	if err != nil {
 		return nil, err
@@ -138,7 +160,16 @@ func LoadRecord(id string) (*RunRecord, error) {
 	return &record, nil
 }
 
-// ListRecords returns all saved run IDs, most recent first.
+func validateRunID(id string) error {
+	if id == "" {
+		return fmt.Errorf("run id is empty")
+	}
+	if strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("invalid run id %q: contains path separator or traversal", id)
+	}
+	return nil
+}
+
 func ListRecords() ([]string, error) {
 	dir, err := StoreDir()
 	if err != nil {

@@ -11,7 +11,7 @@ type InstanceType struct {
 	GPUCount     int        `json:"gpuCount,omitempty"`
 	GPUModel     string     `json:"gpuModel,omitempty"`
 	PricePerHour float64    `json:"pricePerHour"` // USD
-	Arch         string     `json:"arch"`          // x86_64 or arm64
+	Arch         string     `json:"arch"`         // x86_64 or arm64
 }
 
 // InstanceRequirements describes what a workload needs.

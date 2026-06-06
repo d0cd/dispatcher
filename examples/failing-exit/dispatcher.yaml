@@ -1,0 +1,6 @@
+# Deliberately failing workload — used to validate that exit codes and
+# failure classification flow correctly from workload → adapter → run record
+# → `dispatcher diagnose` output. Should classify as "permanent" (workload
+# bug); --retry-transient should NOT trigger a retry.
+name: failing-exit
+maxCost: 0.10

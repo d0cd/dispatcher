@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/d0cd/dispatcher/internal/adapter"
 )
 
 // GCPProvider implements Provider using the gcloud CLI.
@@ -64,18 +67,34 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		args = append(args, "--project", g.project)
 	}
 	if opts.UserData != "" {
-		args = append(args, "--metadata", "startup-script="+opts.UserData)
+		// --metadata startup-script=<blob> would let any byte in UserData
+		// (newline, =, --) corrupt or inject gcloud args. --metadata-from-file
+		// keeps the blob entirely off argv and out of process listings.
+		path, err := adapter.WriteSecureTempFile("dispatcher-gcp-userdata-*.sh", []byte(opts.UserData))
+		if err != nil {
+			return nil, fmt.Errorf("write user-data: %w", err)
+		}
+		defer os.Remove(path)
+		args = append(args, "--metadata-from-file", "startup-script="+path)
 	}
 
-	// GCP uses labels (key=value, lowercase, hyphens)
-	for k, v := range opts.Tags {
-		args = append(args, "--labels", fmt.Sprintf("%s=%s", k, v))
+	// GCP labels: validated at the boundary so a key/value with a comma or
+	// space can't break out of the comma-joined --labels argument.
+	if err := validateLabels(opts.Tags); err != nil {
+		return nil, fmt.Errorf("gcp labels: %w", err)
+	}
+	if len(opts.Tags) > 0 {
+		pairs := make([]string, 0, len(opts.Tags))
+		for k, v := range opts.Tags {
+			pairs = append(pairs, k+"="+v)
+		}
+		args = append(args, "--labels", strings.Join(pairs, ","))
 	}
 
 	cmd := exec.CommandContext(ctx, "gcloud", args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("gcloud compute instances create failed: %w", err)
+		return nil, wrapExecError("gcloud compute instances create", err)
 	}
 
 	var instances []struct {
@@ -167,7 +186,12 @@ func (g *GCPProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VM
 		args = append(args, "--project", g.project)
 	}
 
-	// GCP filter syntax for labels
+	// GCP filter syntax for labels. Validate first — `AND`, parens, and
+	// quotes are reserved in the gcloud filter language; a label value
+	// containing them would corrupt the predicate.
+	if err := validateLabels(tags); err != nil {
+		return nil, fmt.Errorf("gcp filter labels: %w", err)
+	}
 	var filters []string
 	for k, v := range tags {
 		filters = append(filters, fmt.Sprintf("labels.%s=%s", k, v))
@@ -179,7 +203,7 @@ func (g *GCPProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VM
 	cmd := exec.CommandContext(ctx, "gcloud", args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("gcloud compute instances list failed: %w", err)
+		return nil, wrapExecError("gcloud compute instances list", err)
 	}
 
 	var instances []struct {
@@ -205,4 +229,3 @@ func (g *GCPProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VM
 	}
 	return vms, nil
 }
-

@@ -1,12 +1,12 @@
 # Dispatcher
 
-AI-assisted workload planner and runner. See `docs/DESIGN.md` for architecture, `docs/PLAN.md` for implementation plan, and `dispatch_design_doc.md` for the full design document.
+AI-assisted workload planner and runner. See `docs/DESIGN.md` for architecture, `docs/USAGE.md` for commands and config, and `docs/SECURITY.md` for the security model.
 
 ## Quick Start
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher
-./dispatcher init .                    # Scaffold dispatch.yaml
+./dispatcher init .                    # Scaffold dispatcher.yaml
 ./dispatcher plan .                    # See where it can run and what it will cost
 ./dispatcher run .                     # Execute the workload
 ./dispatcher status <run-id>           # Check on it
@@ -19,17 +19,20 @@ go build -o dispatcher ./cmd/dispatcher
 cmd/
   dispatcher/         # CLI entry point (main.go)
 internal/
-  cli/                # Cobra command definitions (12 commands)
+  cli/                # Cobra command definitions (17 commands)
   workload/           # Workload inspection, config loading, recursive scanning
   target/             # Target registry, builtins, YAML config, feasibility matching
   plan/               # Plan generation, validation, formatting, persistence
-  cost/               # Cost estimation, rate cards, historical run data
-  policy/             # Policy engine and approval gates
+  cost/               # Cost estimation (JSONL append-only history)
+  policy/             # Policy engine and approval requirements
   risk/               # Risk analysis
   run/                # Run state machine, executor, persistence, reconnection
-  adapter/            # Target adapter interface, shared utilities, local/docker/ssh adapters
-  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure), watchdog, catalog
-  planner/            # AI planner, tool registry, LLM backend interface
+  approval/           # Per-run Unix-socket approval gate (audit Record embedded in run state)
+  adapter/            # TargetAdapter interface, shared utilities, local/docker/ssh adapters
+  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima), watchdog
+  planner/            # AI planner, tool registry, LLM backend (aitelier)
+  state/              # State-dir resolution + 0700 enforcement
+  dlog/               # Structured JSON log file
   types/              # Shared Go types and constants
 docs/                 # Design doc, implementation plan
 ```
@@ -38,8 +41,9 @@ docs/                 # Design doc, implementation plan
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher   # Build binary
-go test ./...                         # Run all tests (~270 tests)
+go test ./...                         # Run all tests (~512 tests, 15 packages)
 go vet ./...                          # Lint
+gofmt -l .                            # Find unformatted files
 ```
 
 ## Dev Conventions
@@ -48,12 +52,14 @@ go vet ./...                          # Lint
 - Validate all external input at system boundaries.
 - Every target adapter must implement the TargetAdapter interface.
 - Durable adapters (cloud VMs) must also implement DurableAdapter.
-- Plan schema must match `dispatch_design_doc.md` section 10.
+- Plan schema is defined by the `types.Plan` struct (internal/types/plan.go).
 - Keep CLI commands thin — delegate to domain packages in internal/.
 - No silent failures: errors must surface with actionable context.
 - Implementation order: all deterministic primitives and tools first, AI planner last.
 - File permissions: 0600 for data files, 0700 for directories containing sensitive data.
-- Shared utilities go in adapter/shared.go (SanitizeName, RuntimeCommand, DefaultValidationResult).
+- Shared utilities live in adapter/shared.go (SanitizeName, RuntimeCommand, ShellQuote, WriteSecureTempFile).
+- Cloud CLI argv: never concatenate `k=v` into a single arg — use repeated `--flag k=v` or file:// inputs.
+- Label/tag values: validate at the boundary via cloudvm.validateLabels (charset `[a-zA-Z0-9_.-]`).
 
 ## Key Types
 
@@ -65,7 +71,9 @@ go vet ./...                          # Lint
 - `TargetAdapter` — execution interface every target implements (internal/adapter)
 - `DurableAdapter` — extends TargetAdapter with reconnection/watchdog/GC (internal/adapter)
 - `CloudProvider` — cloud VM lifecycle interface (internal/cloudvm)
-- `DispatchConfig` — dispatch.yaml schema (internal/workload)
+- `DispatcherConfig` — dispatcher.yaml schema (internal/workload)
+- `approval.Gate` — per-run Unix-socket approval gate (filesystem perms are the auth boundary)
+- `approval.Record` — audit-trail entry embedded in the persisted run state
 
 ## Tech Stack
 

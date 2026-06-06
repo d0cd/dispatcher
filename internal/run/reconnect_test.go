@@ -122,13 +122,13 @@ func TestReconnectToRun_NotFound(t *testing.T) {
 
 func TestRunFromRecord(t *testing.T) {
 	rec := &RunRecord{
-		ID:        "run_42",
-		PlanID:    "plan_42",
-		TargetID:  "aws-vm",
-		Owner:     "test-user",
-		State:     types.RunStateRunning,
-		Lifecycle: LifecycleLongRunning,
-		HandleID:  "vm-abc",
+		ID:          "run_42",
+		PlanID:      "plan_42",
+		TargetID:    "aws-vm",
+		Owner:       "test-user",
+		State:       types.RunStateRunning,
+		Lifecycle:   LifecycleLongRunning,
+		HandleID:    "vm-abc",
 		HandleState: json.RawMessage(`{"vmId":"i-abc"}`),
 	}
 

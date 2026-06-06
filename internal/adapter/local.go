@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/d0cd/dispatcher/internal/types"
@@ -138,20 +139,31 @@ func (l *LocalAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, 
 func (l *LocalAdapter) Status(_ context.Context, h *RunHandle) (types.RunState, error) {
 	ls := h.State.(*localState)
 	err := ls.cmd.Wait()
-	// Close write end so the log copy goroutine gets EOF
+
+	// Close write end so the log-copy goroutine gets EOF, then wait for it
+	// to finish before closing the read end. Mutex serializes against a
+	// concurrent Logs() call so we can't observe logStarted=false and miss
+	// the wait while Logs is mid-spawn.
+	ls.mu.Lock()
 	if ls.outW != nil {
 		ls.outW.Close()
 		ls.outW = nil
 	}
-	// Wait for log copy to finish (only if Logs() was called and started the goroutine)
-	if ls.logStarted && ls.logDone != nil {
-		<-ls.logDone
+	waitFor := ls.logStarted && ls.logDone != nil
+	done := ls.logDone
+	ls.mu.Unlock()
+
+	if waitFor {
+		<-done
 	}
-	// Close read end
+
+	ls.mu.Lock()
 	if ls.outR != nil {
 		ls.outR.Close()
 		ls.outR = nil
 	}
+	ls.mu.Unlock()
+
 	if err != nil {
 		return types.RunStateExecutionFailed, nil
 	}
@@ -160,20 +172,57 @@ func (l *LocalAdapter) Status(_ context.Context, h *RunHandle) (types.RunState, 
 
 func (l *LocalAdapter) Logs(_ context.Context, h *RunHandle, w io.Writer) error {
 	ls := h.State.(*localState)
-	if ls.outR != nil && w != nil {
-		ls.logStarted = true
-		go func() {
-			io.Copy(w, ls.outR)
-			if ls.logDone != nil {
-				close(ls.logDone)
-			}
-		}()
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	if ls.outR == nil || w == nil {
+		// Pipe is already closed (Status ran) or no writer — nothing to do.
+		return nil
 	}
+	if ls.logStarted {
+		// Logs already started; second caller would race the first.
+		return nil
+	}
+	ls.logStarted = true
+	r := ls.outR
+	done := ls.logDone
+	go func() {
+		_, _ = io.Copy(w, r)
+		if done != nil {
+			close(done)
+		}
+	}()
 	return nil
 }
 
 func (l *LocalAdapter) Artifacts(_ context.Context, _ *RunHandle) ([]ArtifactRef, error) {
 	return nil, nil
+}
+
+// FailureDetails returns the process exit code and (on Unix) signal name.
+// Implements FailureReporter.
+//
+// Local-process can't reliably distinguish OOM from other SIGKILLs without
+// reading /sys/fs/cgroup or dmesg — we conservatively set OOMKilled=false
+// and let the classifier treat SIGKILL as "possibly transient" instead.
+func (l *LocalAdapter) FailureDetails(h *RunHandle) FailureDetails {
+	ls, ok := h.State.(*localState)
+	if !ok || ls.cmd == nil || ls.cmd.ProcessState == nil {
+		return FailureDetails{Message: "process state not available"}
+	}
+	ps := ls.cmd.ProcessState
+	fd := FailureDetails{ExitCode: ps.ExitCode()}
+	if ws, ok := ps.Sys().(syscall.WaitStatus); ok {
+		if ws.Signaled() {
+			fd.Signal = ws.Signal().String()
+		}
+	}
+	switch {
+	case fd.Signal != "":
+		fd.Message = fmt.Sprintf("killed by %s", fd.Signal)
+	case fd.ExitCode != 0:
+		fd.Message = fmt.Sprintf("exited with code %d", fd.ExitCode)
+	}
+	return fd
 }
 
 func (l *LocalAdapter) Terminate(_ context.Context, h *RunHandle) error {
@@ -194,12 +243,16 @@ func (l *LocalAdapter) Cleanup(_ context.Context, _ *RunHandle) (*CleanupResult,
 	return &CleanupResult{Success: true}, nil
 }
 
+// localState carries the running command and its log-pipe plumbing. mu
+// serializes Logs()/Status() so a concurrent caller can't read outR after
+// Status() has closed it (the race the audit flagged).
 type localState struct {
+	mu         sync.Mutex
 	cmd        *exec.Cmd
 	started    bool
 	outR       *os.File      // read end of output pipe
 	outW       *os.File      // write end of output pipe
-	logDone    chan struct{}  // closed when log copy goroutine finishes
+	logDone    chan struct{} // closed when log copy goroutine finishes
 	logStarted bool          // true after Logs() spawns the goroutine
 }
 

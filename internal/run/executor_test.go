@@ -15,22 +15,23 @@ import (
 
 // mockAdapter is a configurable adapter for executor testing.
 type mockAdapter struct {
-	id            string
-	validateErr   error
+	id             string
+	validateErr    error
 	validateResult types.ValidationResult
-	prepareErr    error
-	executeErr    error
-	statusResult  types.RunState
-	statusErr     error
-	cleanupResult *adapter.CleanupResult
-	cleanupErr    error
-	cleanupCalls  int
-	executePanic  bool
+	prepareErr     error
+	executeErr     error
+	statusResult   types.RunState
+	statusErr      error
+	cleanupResult  *adapter.CleanupResult
+	cleanupErr     error
+	cleanupCalls   int
+	executePanic   bool
+	executed       bool // set true on Execute; used to assert non-invocation
 }
 
 func newMockAdapter() *mockAdapter {
 	return &mockAdapter{
-		id: "mock",
+		id:             "mock",
 		validateResult: adapter.DefaultValidationResult(),
 		statusResult:   types.RunStateCompleted,
 		cleanupResult:  &adapter.CleanupResult{Success: true},
@@ -48,6 +49,7 @@ func (m *mockAdapter) Prepare(_ context.Context, _ *types.Plan) error {
 	return m.prepareErr
 }
 func (m *mockAdapter) Execute(_ context.Context, _ *types.Plan) (*adapter.RunHandle, error) {
+	m.executed = true
 	if m.executePanic {
 		panic("adapter panic!")
 	}
@@ -87,7 +89,7 @@ func executorTestPlan() *types.Plan {
 			Runtime:      types.RuntimePython,
 		},
 		Recommendation: &types.Recommendation{
-			Target: "mock",
+			Target:        "mock",
 			EstimatedCost: types.CostEstimate{Value: 0, Currency: "USD", Confidence: types.ConfidenceHigh},
 		},
 	}
@@ -218,6 +220,7 @@ func TestExecutor_PanicRecovery(t *testing.T) {
 }
 
 func TestExecutor_ApprovalDenied(t *testing.T) {
+	t.Setenv("DISPATCHER_HOME", t.TempDir())
 	p := executorTestPlan()
 	p.RequiredApprovals = []types.PolicyRequirement{
 		{Name: "gpu-approval", Reason: "GPU workloads require approval"},
@@ -225,10 +228,10 @@ func TestExecutor_ApprovalDenied(t *testing.T) {
 
 	mock := newMockAdapter()
 	exec := NewExecutor(mock)
-	exec.SetApprovalFunc(func(approvals []types.PolicyRequirement) error {
+	exec.SetApprovalFunc(func(approvals []types.PolicyRequirement) (string, error) {
 		assert.Len(t, approvals, 1)
 		assert.Equal(t, "gpu-approval", approvals[0].Name)
-		return ErrApprovalDenied
+		return "interactive:test", ErrApprovalDenied
 	})
 	r := NewRun(p)
 
@@ -238,9 +241,41 @@ func TestExecutor_ApprovalDenied(t *testing.T) {
 	assert.Contains(t, err.Error(), "denied")
 }
 
+// TestExecutor_FailsClosedWithoutApprover is the regression test for the
+// pre-fix bug: when a plan required approvals AND no ApprovalFunc was
+// installed, the executor silently proceeded past every policy gate.
+// This must NEVER happen — callers either install an approver (terminal
+// or auto-approve via `--yes`) or wait for an external `dispatcher approve
+// <id>`. With no approver and no external decision, the gate blocks
+// indefinitely; we assert that here by using a short ctx deadline.
+func TestExecutor_FailsClosedWithoutApprover(t *testing.T) {
+	t.Setenv("DISPATCHER_HOME", t.TempDir())
+
+	p := executorTestPlan()
+	p.RequiredApprovals = []types.PolicyRequirement{
+		{Name: "gpu-approval", Reason: "GPU workloads require approval"},
+	}
+
+	mock := newMockAdapter()
+	exec := NewExecutor(mock)
+	// Deliberately NO SetApprovalFunc. The gate has no in-process approver
+	// and nobody is connecting from outside, so Wait will block until ctx
+	// expires.
+	r := NewRun(p)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	err := exec.Execute(ctx, r, io.Discard)
+	require.Error(t, err)
+	assert.Equal(t, types.RunStateApprovalDenied, r.GetState())
+	// Critically — the adapter must NOT have been invoked: policy gates
+	// stay closed even when the deadline trips.
+	assert.False(t, mock.executed,
+		"adapter.Execute must not have run when no approval arrived")
+}
+
 func TestExecutor_ApprovalGranted(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
+	t.Setenv("DISPATCHER_HOME", t.TempDir())
 
 	p := executorTestPlan()
 	p.RequiredApprovals = []types.PolicyRequirement{
@@ -250,9 +285,9 @@ func TestExecutor_ApprovalGranted(t *testing.T) {
 	mock := newMockAdapter()
 	exec := NewExecutor(mock)
 	approved := false
-	exec.SetApprovalFunc(func(approvals []types.PolicyRequirement) error {
+	exec.SetApprovalFunc(func(approvals []types.PolicyRequirement) (string, error) {
 		approved = true
-		return nil
+		return "test", nil
 	})
 	r := NewRun(p)
 

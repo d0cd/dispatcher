@@ -1,0 +1,5 @@
+# Node.js workload — validates runtime detection (package.json + .js) and
+# the local-process path for a non-Python runtime. No npm install needed:
+# the script uses only Node built-ins.
+name: hello-node
+maxCost: 0.10

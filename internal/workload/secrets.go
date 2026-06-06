@@ -44,7 +44,7 @@ func DetectSecrets(path string) []types.SecretRef {
 	configFiles := []string{
 		"docker-compose.yml", "docker-compose.yaml",
 		"compose.yml", "compose.yaml",
-		"dispatch.yaml",
+		"dispatcher.yaml",
 	}
 	for _, name := range configFiles {
 		full := filepath.Join(path, name)

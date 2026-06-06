@@ -47,9 +47,9 @@ func (b *budgetAdapter) Cleanup(context.Context, *adapter.RunHandle) (*adapter.C
 // Sampler must call Terminate and transition to BudgetExceeded when live cost
 // climbs past the user-supplied --max-cost budget.
 func TestCostSampler_TerminatesWhenBudgetExceeded(t *testing.T) {
-	prev := CostSampleInterval
-	CostSampleInterval = 20 * time.Millisecond
-	defer func() { CostSampleInterval = prev }()
+	prev := SetCostSampleInterval(20 * time.Millisecond)
+
+	defer func() { SetCostSampleInterval(prev) }()
 
 	a := &budgetAdapter{}
 	exec := NewExecutor(a)
@@ -60,7 +60,7 @@ func TestCostSampler_TerminatesWhenBudgetExceeded(t *testing.T) {
 		Plan: &types.Plan{
 			Constraints: types.PlanConstraints{MaxEstimatedCostUSD: 0.01},
 			Recommendation: &types.Recommendation{
-				Target: "test",
+				Target:        "test",
 				EstimatedCost: types.CostEstimate{Value: 100, Currency: "USD", Confidence: types.ConfidenceHigh},
 			},
 			Workload: types.WorkloadSpec{DetectedKind: types.WorkloadKindScript},
@@ -83,9 +83,9 @@ func TestCostSampler_TerminatesWhenBudgetExceeded(t *testing.T) {
 }
 
 func TestCostSampler_NoBudgetNoSampler(t *testing.T) {
-	prev := CostSampleInterval
-	CostSampleInterval = 20 * time.Millisecond
-	defer func() { CostSampleInterval = prev }()
+	prev := SetCostSampleInterval(20 * time.Millisecond)
+
+	defer func() { SetCostSampleInterval(prev) }()
 
 	a := &budgetAdapter{}
 	exec := NewExecutor(a)

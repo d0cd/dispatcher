@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/d0cd/dispatcher/internal/adapter"
 )
 
 // AWSProvider implements Provider using the aws CLI.
@@ -53,7 +56,12 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		instanceType = "t3.micro"
 	}
 
-	// Build tag specifications
+	// Build tag specifications. AWS uses commas to separate tag KV pairs
+	// inside the --tag-specifications value, so a label value with a comma
+	// or `}` would corrupt the spec. Validation at the boundary catches it.
+	if err := validateLabels(opts.Tags); err != nil {
+		return nil, fmt.Errorf("aws tags: %w", err)
+	}
 	var tagSpecs []string
 	for k, v := range opts.Tags {
 		tagSpecs = append(tagSpecs, fmt.Sprintf("{Key=%s,Value=%s}", k, v))
@@ -71,13 +79,22 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	}
 
 	if opts.UserData != "" {
-		args = append(args, "--user-data", opts.UserData)
+		// Pass user-data via `file://` so it never appears in argv (visible
+		// to other users on the host via `ps`). Today user-data is just the
+		// watchdog cloud-init script; if we ever inject creds, this stops
+		// being a "low" issue and prevents leakage upfront.
+		f, err := adapter.WriteSecureTempFile("dispatcher-aws-userdata-*.yaml", []byte(opts.UserData))
+		if err != nil {
+			return nil, fmt.Errorf("write user-data: %w", err)
+		}
+		defer os.Remove(f)
+		args = append(args, "--user-data", "file://"+f)
 	}
 
 	cmd := exec.CommandContext(ctx, "aws", args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("aws ec2 run-instances failed: %w", err)
+		return nil, wrapExecError("aws ec2 run-instances", err)
 	}
 
 	var result struct {
@@ -147,15 +164,15 @@ func (a *AWSProvider) getVMInRegion(ctx context.Context, vmID, region string) (*
 	)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("aws ec2 describe-instances failed: %w", err)
+		return nil, wrapExecError("aws ec2 describe-instances", err)
 	}
 
 	var result struct {
 		Reservations []struct {
 			Instances []struct {
-				InstanceId    string `json:"InstanceId"`
+				InstanceId      string `json:"InstanceId"`
 				PublicIpAddress string `json:"PublicIpAddress"`
-				State         struct {
+				State           struct {
 					Name string `json:"Name"`
 				} `json:"State"`
 			} `json:"Instances"`
@@ -193,6 +210,9 @@ func (a *AWSProvider) DestroyVM(ctx context.Context, vmID string) error {
 }
 
 func (a *AWSProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {
+	if err := validateLabels(tags); err != nil {
+		return nil, fmt.Errorf("aws filter tags: %w", err)
+	}
 	args := []string{"ec2", "describe-instances",
 		"--region", a.defaultRegion,
 		"--output", "json",
@@ -210,7 +230,7 @@ func (a *AWSProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VM
 	cmd := exec.CommandContext(ctx, "aws", args...)
 	output, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("aws ec2 describe-instances failed: %w", err)
+		return nil, wrapExecError("aws ec2 describe-instances", err)
 	}
 
 	var result struct {
@@ -250,4 +270,3 @@ func (a *AWSProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VM
 	}
 	return vms, nil
 }
-

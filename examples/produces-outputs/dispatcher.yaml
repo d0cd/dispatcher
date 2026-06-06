@@ -1,0 +1,11 @@
+# Workload that writes to `outputs/`. On cloud targets, dispatcher rsyncs
+# the directory back to <state-dir>/runs/<id>/artifacts/ before destroying
+# the VM. On local targets it's a no-op (files are already on the host).
+#
+# `outputs:` is implicit here — dispatcher auto-detects an `outputs/` dir.
+# To pin specific paths instead, uncomment:
+#   outputs:
+#     - outputs/result.json
+#     - outputs/run.log
+name: produces-outputs
+maxCost: 0.10

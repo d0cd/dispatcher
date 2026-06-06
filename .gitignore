@@ -1,6 +1,8 @@
 # Binary (root only, not cmd/dispatcher/ directory)
 /dispatcher
 /dispatch
+/dispatcher-bin
+/dispatcher-*
 kubectl
 
 # Test and build artifacts

@@ -106,9 +106,9 @@ func init() {
 // durableAdapters returns cloud VM adapters whose CLIs are actually installed.
 func durableAdapters() []adapter.DurableAdapter {
 	cliChecks := map[string]string{
-		"lima-vm":      "limactl",
-		"kubernetes":   "kubectl",
-		"hetzner-vm":  "hcloud",
+		"lima-vm":    "limactl",
+		"kubernetes": "kubectl",
+		"hetzner-vm": "hcloud",
 		"aws-vm":     "aws",
 		"gcp-vm":     "gcloud",
 		"azure-vm":   "az",

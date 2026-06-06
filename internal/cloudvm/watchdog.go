@@ -46,11 +46,22 @@ func ExtendWatchdogViaSSH(ctx context.Context, state *CloudVMState, ttl time.Dur
 	return newDeadline, nil
 }
 
-// sshCmdArgs builds SSH command arguments from CloudVMState.
+// sshCmdArgs builds SSH command arguments from CloudVMState. When state has
+// a populated KnownHostsPath, strict host key checking is enforced against it
+// (defense against MITM on reconnects). When empty — only possible during the
+// first connection before keyscan has run, or for legacy state files — we
+// fall back to permissive checking with a clear log note.
 func sshCmdArgs(state *CloudVMState, remoteCmd string) []string {
 	var args []string
-	args = append(args, "-o", "StrictHostKeyChecking=no")
-	args = append(args, "-o", "UserKnownHostsFile=/dev/null")
+	if state.KnownHostsPath != "" {
+		args = append(args, "-o", "StrictHostKeyChecking=yes")
+		args = append(args, "-o", fmt.Sprintf("UserKnownHostsFile=%s", state.KnownHostsPath))
+	} else {
+		// First-connection or legacy state. The right call site (provisioning)
+		// should immediately follow with PinHostKey to populate KnownHostsPath.
+		args = append(args, "-o", "StrictHostKeyChecking=no")
+		args = append(args, "-o", "UserKnownHostsFile=/dev/null")
+	}
 	args = append(args, "-o", "ConnectTimeout=10")
 	if state.SSHKeyPath != "" {
 		args = append(args, "-i", state.SSHKeyPath)

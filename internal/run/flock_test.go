@@ -15,7 +15,7 @@ import (
 // observe a torn JSON document (parse error) or a partially-written file.
 func TestSave_ConcurrentWritesSerializeViaFlock(t *testing.T) {
 	tmp := t.TempDir()
-	t.Setenv("DISPATCH_HOME", tmp)
+	t.Setenv("DISPATCHER_HOME", tmp)
 
 	const writers = 12
 	var wg sync.WaitGroup

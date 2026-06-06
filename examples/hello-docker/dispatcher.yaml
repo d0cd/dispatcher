@@ -1,0 +1,4 @@
+# Docker workload — exercises the --env-file path (values never appear in
+# `ps` output) and container build/run lifecycle.
+name: hello-docker
+maxCost: 0.10

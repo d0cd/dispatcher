@@ -79,7 +79,7 @@ func shouldSkipDir(name string) bool {
 		".cache":        true,
 		".parcel-cache": true,
 		".terraform":    true,
-		".dispatcher":     true,
+		".dispatcher":   true,
 		"coverage":      true,
 	}
 	return skip[name]

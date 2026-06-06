@@ -7,7 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/cost"
+	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/policy"
 	"github.com/d0cd/dispatcher/internal/risk"
 	"github.com/d0cd/dispatcher/internal/target"
@@ -21,14 +23,18 @@ type candidate struct {
 }
 
 // Build generates a complete plan for the workload at the given path.
-func Build(path string, constraints types.PlanConstraints) (*types.Plan, error) {
-	// Inspect workload (includes dispatch.yaml overrides)
+//
+// catalog supplies live cloud pricing; pass nil when no catalog is available
+// (offline, tests). Cloud-vm targets without catalog data are surfaced with
+// ConfidenceUnknown rather than a misleading static estimate.
+func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Catalog) (*types.Plan, error) {
+	// Inspect workload (includes dispatcher.yaml overrides)
 	spec, err := workload.InspectCodebase(path)
 	if err != nil {
 		return nil, fmt.Errorf("workload inspection failed: %w", err)
 	}
 
-	// Merge dispatch.yaml constraints (file config) into plan constraints.
+	// Merge dispatcher.yaml constraints (file config) into plan constraints.
 	// CLI flags take precedence — only fill in unset values.
 	if cfg, _ := workload.LoadConfig(path); cfg != nil {
 		if constraints.MaxEstimatedCostUSD == 0 && cfg.MaxCost > 0 {
@@ -42,6 +48,11 @@ func Build(path string, constraints types.PlanConstraints) (*types.Plan, error) 
 		if constraints.TargetName == "" && cfg.Target != "" {
 			constraints.TargetName = cfg.Target
 		}
+		if constraints.WatchdogTTL == 0 && cfg.WatchdogTTL != "" {
+			if d, err := time.ParseDuration(cfg.WatchdogTTL); err == nil {
+				constraints.WatchdogTTL = d
+			}
+		}
 	}
 
 	// Apply GPU override from constraints
@@ -52,8 +63,11 @@ func Build(path string, constraints types.PlanConstraints) (*types.Plan, error) 
 	// Load targets (builtins + user config)
 	registry := target.NewRegistry()
 	registry.LoadBuiltins()
-	// User-defined targets override builtins; errors are non-fatal
-	_ = registry.LoadUserConfig()
+	// User-defined targets override builtins; errors are non-fatal but
+	// recorded so misconfigured user targets aren't invisible.
+	if err := registry.LoadUserConfig(); err != nil {
+		dlog.L().Warn("plan.user_targets_load_failed", "err", err.Error())
+	}
 
 	var feasible []candidate
 	var rejected []types.RejectedTarget
@@ -70,7 +84,7 @@ func Build(path string, constraints types.PlanConstraints) (*types.Plan, error) 
 		if !result.Feasible {
 			return nil, fmt.Errorf("target %q is not feasible: %s", constraints.TargetName, result.Reasons[0])
 		}
-		est := cost.EstimateCost(spec, t)
+		est := cost.EstimateCost(spec, t, catalog)
 		feasible = append(feasible, candidate{target: t, cost: est})
 
 		// Evaluate rest as alternatives
@@ -80,7 +94,7 @@ func Build(path string, constraints types.PlanConstraints) (*types.Plan, error) 
 			}
 			result := target.CheckFeasibility(other, spec)
 			if result.Feasible {
-				est := cost.EstimateCost(spec, other)
+				est := cost.EstimateCost(spec, other, catalog)
 				feasible = append(feasible, candidate{target: other, cost: est})
 			} else {
 				rejected = append(rejected, types.RejectedTarget{
@@ -93,7 +107,7 @@ func Build(path string, constraints types.PlanConstraints) (*types.Plan, error) 
 		for _, t := range targets {
 			result := target.CheckFeasibility(t, spec)
 			if result.Feasible {
-				est := cost.EstimateCost(spec, t)
+				est := cost.EstimateCost(spec, t, catalog)
 				feasible = append(feasible, candidate{target: t, cost: est})
 			} else {
 				rejected = append(rejected, types.RejectedTarget{
@@ -233,17 +247,9 @@ func buildReasons(w types.WorkloadSpec, t types.TargetConfig) []string {
 func buildTradeoffs(alt, best types.TargetConfig) []string {
 	var tradeoffs []string
 
-	if alt.Kind == types.TargetKindModal {
-		tradeoffs = append(tradeoffs, "simpler autoscaling")
-		tradeoffs = append(tradeoffs, "less private networking control")
-	}
 	if alt.Kind == types.TargetKindCloudVM {
 		tradeoffs = append(tradeoffs, "more isolation")
 		tradeoffs = append(tradeoffs, "more setup and cleanup overhead")
-	}
-	if alt.Kind == types.TargetKindE2B {
-		tradeoffs = append(tradeoffs, "sandboxed execution")
-		tradeoffs = append(tradeoffs, "limited to short-lived tasks")
 	}
 	if alt.Kind == types.TargetKindDocker && best.Kind != types.TargetKindDocker {
 		tradeoffs = append(tradeoffs, "zero marginal cost")

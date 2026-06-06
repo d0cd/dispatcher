@@ -19,6 +19,13 @@ type MockProvider struct {
 	DestroyErr error
 	GetErr     error
 	CLIErr     error
+
+	// Lima-style overrides: when set, CreateVM populates these on the
+	// returned VMInfo so tests can exercise the provider-supplied-identity
+	// path (the same code path Lima uses).
+	OverrideSSHKeyPath string
+	OverrideSSHUser    string
+	OverrideSSHPort    int
 }
 
 // NewMockProvider creates a new mock provider.
@@ -46,12 +53,15 @@ func (m *MockProvider) CreateVM(_ context.Context, opts VMOptions) (*VMInfo, err
 	m.nextID++
 	id := fmt.Sprintf("mock-%s-%d", m.id, m.nextID)
 	vm := &VMInfo{
-		ID:        id,
-		Name:      opts.Name,
-		IP:        fmt.Sprintf("10.0.0.%d", m.nextID),
-		State:     VMStateRunning,
-		CreatedAt: time.Now().UTC(),
-		Tags:      opts.Tags,
+		ID:         id,
+		Name:       opts.Name,
+		IP:         fmt.Sprintf("10.0.0.%d", m.nextID),
+		SSHPort:    m.OverrideSSHPort,
+		SSHKeyPath: m.OverrideSSHKeyPath,
+		SSHUser:    m.OverrideSSHUser,
+		State:      VMStateRunning,
+		CreatedAt:  time.Now().UTC(),
+		Tags:       opts.Tags,
 	}
 	m.vms[id] = vm
 	return vm, nil

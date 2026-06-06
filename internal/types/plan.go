@@ -44,6 +44,13 @@ type PlanConstraints struct {
 	MaxDuration         time.Duration `yaml:"maxDuration,omitempty" json:"maxDuration,omitempty"`
 	RequireGPU          string        `yaml:"requireGpu,omitempty" json:"requireGpu,omitempty"`
 	TargetName          string        `yaml:"targetName,omitempty" json:"targetName,omitempty"`
+	// WatchdogTTL bounds how long a cloud VM lives after dispatcher stops
+	// heartbeating it. Zero = use adapter default (30 minutes).
+	WatchdogTTL time.Duration `yaml:"watchdogTtl,omitempty" json:"watchdogTtl,omitempty"`
+	// RetryTransientFailures, when set, retries workload execution once if
+	// the failure is classified as transient (OOM kill, network glitch).
+	// Default false — most workloads aren't idempotent.
+	RetryTransientFailures bool `yaml:"retryTransientFailures,omitempty" json:"retryTransientFailures,omitempty"`
 }
 
 // Recommendation is the primary target recommendation.
@@ -119,10 +126,10 @@ type PolicyRequirement struct {
 
 // Plan is the full structured recommendation per design doc section 10.
 type Plan struct {
-	APIVersion string           `yaml:"apiVersion" json:"apiVersion"`
-	Kind       string           `yaml:"kind" json:"kind"`
-	Metadata   PlanMetadata     `yaml:"metadata" json:"metadata"`
-	Workload   WorkloadSpec     `yaml:"workload" json:"workload"`
+	APIVersion  string          `yaml:"apiVersion" json:"apiVersion"`
+	Kind        string          `yaml:"kind" json:"kind"`
+	Metadata    PlanMetadata    `yaml:"metadata" json:"metadata"`
+	Workload    WorkloadSpec    `yaml:"workload" json:"workload"`
 	Constraints PlanConstraints `yaml:"constraints" json:"constraints"`
 
 	Recommendation    *Recommendation     `yaml:"recommendation,omitempty" json:"recommendation,omitempty"`

@@ -1,0 +1,14 @@
+# Service workload — long-running HTTP listener. Validates the
+# WorkloadKindService branch end-to-end:
+#   - container-required packaging (Dockerfile present)
+#   - 24h cost assumption baked into the estimator
+#   - service-port handling
+#   - lifecycle: long-running (no auto-cleanup until you 'dispatcher stop')
+#
+# `maxCost` is essential for services — without it, a forgotten run bills
+# 24/7. `watchdogTtl` shrinks the worst-case bleed if dispatcher dies.
+name: flask-service
+maxCost: 5
+watchdogTtl: 2h
+service:
+  port: 8080

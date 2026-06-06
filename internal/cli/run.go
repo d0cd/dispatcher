@@ -20,19 +20,21 @@ import (
 )
 
 var runFlags struct {
-	target   string
-	optimize string
-	maxCost  float64
-	timeout  string
-	gpu      string
-	yes      bool
+	target         string
+	optimize       string
+	maxCost        float64
+	timeout        string
+	gpu            string
+	yes            bool
+	retryTransient bool
+	watchdogTTL    string
 }
 
 var runCmd = &cobra.Command{
 	Use:   "run [path]",
-	Short: "Plan and execute a workload",
-	Long:  "Generates a plan for the workload at the given path, then executes it on the recommended target.",
-	Args:  cobra.ExactArgs(1),
+	Short: "Plan and execute a workload (defaults to current directory)",
+	Long:  "Generates a plan for the workload at the given path, then executes it on the recommended target.\n\nIf path is omitted, the current directory is used.\n\nExit codes:\n  0  workload completed successfully\n  1  setup/plan/cleanup failure (no feasible target, validation error, cleanup error, anything before or after execution)\n  2  approval denied (a required policy gate was rejected)\n  3  workload-level failure (non-zero exit, OOM kill, budget exceeded)",
+	Args:  cobra.MaximumNArgs(1),
 	RunE:  runRun,
 }
 
@@ -43,18 +45,29 @@ func init() {
 	runCmd.Flags().StringVar(&runFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, h100:1)")
 	runCmd.Flags().StringVar(&runFlags.timeout, "timeout", "", "maximum run duration (e.g. 30m, 2h)")
 	runCmd.Flags().BoolVarP(&runFlags.yes, "yes", "y", false, "auto-approve all policy gates")
+	runCmd.Flags().BoolVar(&runFlags.retryTransient, "retry-transient", false,
+		"retry once on environmental failures (OOM kill, SIGKILL, SIGTERM); does NOT retry workload bugs")
+	runCmd.Flags().StringVar(&runFlags.watchdogTTL, "watchdog-ttl", "",
+		"cloud VM self-destruct timer if dispatcher dies (e.g. 15m, 2h); default 30m")
 	rootCmd.AddCommand(runCmd)
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
-	path, err := filepath.Abs(args[0])
+	raw := "."
+	if len(args) > 0 {
+		raw = args[0]
+	}
+	path, err := filepath.Abs(raw)
 	if err != nil {
-		return fmt.Errorf("invalid path: %w", err)
+		return fmt.Errorf("invalid path %q: %w", raw, err)
 	}
 
 	info, err := os.Stat(path)
-	if err != nil || !info.IsDir() {
-		return fmt.Errorf("path %s is not a valid directory", path)
+	if err != nil {
+		return fmt.Errorf("cannot read %s (does it exist?): %w", path, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("path must be a directory; %s is a file", path)
 	}
 
 	optimizeFor := types.OptimizeCost
@@ -71,13 +84,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 		maxDuration = d
 	}
 
+	var watchdogTTL time.Duration
+	if runFlags.watchdogTTL != "" {
+		d, err := time.ParseDuration(runFlags.watchdogTTL)
+		if err != nil {
+			return fmt.Errorf("invalid --watchdog-ttl %q: %w", runFlags.watchdogTTL, err)
+		}
+		watchdogTTL = d
+	}
+
 	constraints := types.PlanConstraints{
-		TargetScope:         "workspace-defaults",
-		OptimizeFor:         optimizeFor,
-		MaxEstimatedCostUSD: runFlags.maxCost,
-		MaxDuration:         maxDuration,
-		RequireGPU:          runFlags.gpu,
-		TargetName:          runFlags.target,
+		TargetScope:            "workspace-defaults",
+		OptimizeFor:            optimizeFor,
+		MaxEstimatedCostUSD:    runFlags.maxCost,
+		MaxDuration:            maxDuration,
+		RequireGPU:             runFlags.gpu,
+		TargetName:             runFlags.target,
+		WatchdogTTL:            watchdogTTL,
+		RetryTransientFailures: runFlags.retryTransient,
 	}
 
 	// Generate plan
@@ -85,7 +109,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 	dim := color.New(color.Faint)
 
 	bold.Fprintln(os.Stderr, "Planning...")
-	p, err := plan.Build(path, constraints)
+	catalog := loadLiveCatalog(os.Stderr)
+	p, err := plan.Build(path, constraints, catalog)
 	if err != nil {
 		return fmt.Errorf("plan failed: %w", err)
 	}
@@ -121,7 +146,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Create and execute run
 	r := run.NewRun(p)
 	executor := run.NewExecutor(a)
-	if !runFlags.yes {
+	// Always install an approver so the executor never falls into its
+	// fail-closed branch on the happy path. `--yes` installs an auto-
+	// approver that records "yes-flag" in the audit trail (distinct from
+	// "interactive" approvals).
+	if runFlags.yes {
+		executor.SetApprovalFunc(yesApproval)
+	} else {
 		executor.SetApprovalFunc(terminalApproval)
 	}
 
@@ -143,7 +174,14 @@ func runRun(cmd *cobra.Command, args []string) error {
 		defer logCloser.Close()
 	}
 
-	if err := executor.Execute(ctx, r, logWriter); err != nil {
+	// Heartbeat: print elapsed time every 30s so the user knows we're alive.
+	// Stop when execute returns.
+	stopHeartbeat := make(chan struct{})
+	go runHeartbeat(r, stopHeartbeat)
+
+	err = executor.Execute(ctx, r, logWriter)
+	close(stopHeartbeat)
+	if err != nil {
 		// Save run state even on failure
 		if _, saveErr := r.Save(); saveErr != nil {
 			dim.Fprintf(os.Stderr, "warning: could not save run: %v\n", saveErr)
@@ -152,6 +190,16 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "State: %s\n", r.GetState())
 		if r.Error != "" {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", r.Error)
+		}
+		// Distinct exit codes so CI / wrappers can tell failure modes apart.
+		// See `dispatcher run --help` for the documented codes. We return a
+		// typed error rather than calling os.Exit so tests don't kill the
+		// runner process.
+		switch r.GetState() {
+		case types.RunStateApprovalDenied:
+			return &ExitError{Code: 2, Err: err}
+		case types.RunStateExecutionFailed, types.RunStateBudgetExceeded:
+			return &ExitError{Code: 3, Err: err}
 		}
 		return fmt.Errorf("run failed: %w", err)
 	}
@@ -171,6 +219,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 	recordRunHistory(r, p)
 
 	return nil
+}
+
+// runHeartbeat prints elapsed time + current run state every 30s until
+// the stop channel closes. Output goes to stderr so it doesn't pollute logs.
+func runHeartbeat(r *run.Run, stop <-chan struct{}) {
+	dim := color.New(color.Faint)
+	start := time.Now()
+	tick := time.NewTicker(30 * time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+			elapsed := time.Since(start).Round(time.Second)
+			dim.Fprintf(os.Stderr, "  ... %s elapsed (%s)\n", elapsed, r.GetState())
+		}
+	}
 }
 
 func setupRunLogFile(r *run.Run) (io.Writer, io.Closer) {

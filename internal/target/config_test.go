@@ -156,7 +156,7 @@ func TestLoadProjectConfig(t *testing.T) {
     kind: docker
     enabled: true
 `
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatch.yaml"), []byte(yamlContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatcher.yaml"), []byte(yamlContent), 0o644))
 
 	r := NewRegistry()
 	require.NoError(t, r.LoadProjectConfig(dir))
@@ -168,5 +168,5 @@ func TestLoadProjectConfig(t *testing.T) {
 func TestLoadProjectConfig_NoFile(t *testing.T) {
 	r := NewRegistry()
 	err := r.LoadProjectConfig(t.TempDir())
-	assert.NoError(t, err) // no dispatch.yaml is fine
+	assert.NoError(t, err) // no dispatcher.yaml is fine
 }

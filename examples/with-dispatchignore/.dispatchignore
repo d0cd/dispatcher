@@ -1,0 +1,8 @@
+# Patterns here are passed to rsync's --exclude when shipping the workload
+# to a cloud VM. Behaves like .gitignore but applies to dispatcher's
+# remote-execution transfers.
+#
+# Patterns starting with `-` are rejected to prevent rsync option injection.
+node_modules/
+*.log
+.cache/

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
@@ -66,7 +67,7 @@ func (r *Registry) LoadFromDir(dir string) error {
 
 // LoadUserConfig loads targets from the standard user config locations:
 //  1. <state-dir>/targets/*.yaml (per-project when ./.dispatcher/ exists, else ~/.dispatcher/)
-//  2. ./dispatch.yaml (project-local targets, "targets:" key)
+//  2. ./dispatcher.yaml (project-local targets, "targets:" key)
 func (r *Registry) LoadUserConfig() error {
 	if targetsDir, err := state.Subdir("targets"); err == nil {
 		if err := r.LoadFromDir(targetsDir); err != nil {
@@ -81,9 +82,9 @@ func (r *Registry) LoadUserConfig() error {
 	return nil
 }
 
-// LoadProjectConfig loads targets from dispatch.yaml in the given directory.
+// LoadProjectConfig loads targets from dispatcher.yaml in the given directory.
 func (r *Registry) LoadProjectConfig(dir string) error {
-	for _, name := range []string{"dispatch.yaml", "dispatch.yml"} {
+	for _, name := range []string{"dispatcher.yaml", "dispatcher.yml"} {
 		path := filepath.Join(dir, name)
 		if _, err := os.Stat(path); err != nil {
 			continue
@@ -94,7 +95,16 @@ func (r *Registry) LoadProjectConfig(dir string) error {
 }
 
 // SaveTarget writes a single target definition to <state-dir>/targets/<id>.yaml.
+// Defense in depth: rejects IDs with path separators / traversal so a
+// `dispatcher targets add --id "../etc/passwd"` invocation can't escape the
+// targets directory.
 func SaveTarget(t types.TargetConfig) (string, error) {
+	if t.ID == "" {
+		return "", fmt.Errorf("target id is empty")
+	}
+	if strings.ContainsAny(t.ID, "/\\") || strings.Contains(t.ID, "..") {
+		return "", fmt.Errorf("invalid target id %q: contains path separator or traversal", t.ID)
+	}
 	dir, err := state.Subdir("targets")
 	if err != nil {
 		return "", err
@@ -107,7 +117,9 @@ func SaveTarget(t types.TargetConfig) (string, error) {
 	}
 
 	path := filepath.Join(dir, t.ID+".yaml")
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	// 0o600: target configs reference SSH key paths and host details that
+	// shouldn't be readable by other users on the host.
+	if err := os.WriteFile(path, data, 0o600); err != nil {
 		return "", fmt.Errorf("cannot write target file: %w", err)
 	}
 

@@ -12,7 +12,7 @@ import (
 func TestDir_HomeFallback(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("DISPATCH_HOME", "")
+	t.Setenv("DISPATCHER_HOME", "")
 	chdirTo(t, home)
 
 	d, err := Dir()
@@ -23,7 +23,7 @@ func TestDir_HomeFallback(t *testing.T) {
 
 func TestDir_EnvOverride(t *testing.T) {
 	override := filepath.Join(t.TempDir(), "custom")
-	t.Setenv("DISPATCH_HOME", override)
+	t.Setenv("DISPATCHER_HOME", override)
 
 	d, err := Dir()
 	require.NoError(t, err)
@@ -34,7 +34,7 @@ func TestDir_EnvOverride(t *testing.T) {
 func TestDir_PerProjectScoped(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("DISPATCH_HOME", "")
+	t.Setenv("DISPATCHER_HOME", "")
 
 	project := resolved(t, t.TempDir())
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".dispatcher"), 0o700))
@@ -48,7 +48,7 @@ func TestDir_PerProjectScoped(t *testing.T) {
 func TestDir_WalksUpToFindProjectRoot(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("DISPATCH_HOME", "")
+	t.Setenv("DISPATCHER_HOME", "")
 
 	project := resolved(t, t.TempDir())
 	require.NoError(t, os.MkdirAll(filepath.Join(project, ".dispatcher"), 0o700))
@@ -64,7 +64,7 @@ func TestDir_WalksUpToFindProjectRoot(t *testing.T) {
 func TestSubdir_CreatesAndReturnsChild(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	t.Setenv("DISPATCH_HOME", "")
+	t.Setenv("DISPATCHER_HOME", "")
 	chdirTo(t, home)
 
 	d, err := Subdir("runs")

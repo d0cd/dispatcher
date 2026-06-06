@@ -37,9 +37,9 @@ const (
 
 // GPURequirement describes GPU needs for a workload.
 type GPURequirement struct {
-	Required bool   `yaml:"required" json:"required"`
-	Count    int    `yaml:"count,omitempty" json:"count,omitempty"`
-	Model    string `yaml:"model,omitempty" json:"model,omitempty"`
+	Required  bool   `yaml:"required" json:"required"`
+	Count     int    `yaml:"count,omitempty" json:"count,omitempty"`
+	Model     string `yaml:"model,omitempty" json:"model,omitempty"`
 	Framework string `yaml:"framework,omitempty" json:"framework,omitempty"`
 }
 
@@ -85,6 +85,10 @@ type WorkloadSpec struct {
 	Requirements ResourceRequirements `yaml:"requirements" json:"requirements"`
 	Secrets      []SecretRef          `yaml:"secrets,omitempty" json:"secrets,omitempty"`
 	Data         []DataRequirement    `yaml:"data,omitempty" json:"data,omitempty"`
+	// Outputs lists workload-relative paths that adapters retrieve from
+	// remote execution targets before teardown. Populated by dispatcher.yaml
+	// or by auto-detecting a default `outputs/` directory.
+	Outputs []string `yaml:"outputs,omitempty" json:"outputs,omitempty"`
 }
 
 // WorkloadSource identifies where the workload came from.

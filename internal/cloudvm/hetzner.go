@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/d0cd/dispatcher/internal/adapter"
 )
 
 // HetznerProvider implements Provider using the hcloud CLI.
@@ -51,7 +54,12 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 	}
 	instanceType := opts.InstanceType
 	if instanceType == "" {
-		instanceType = "cx22"
+		// cax11 is Hetzner's cheapest current server type: ARM, 2 vCPU,
+		// 4 GB, ~€0.005/hr, available in EU regions. The old cx22 default
+		// was removed from new accounts; cax11 is the spiritual successor.
+		// Real workloads should pin a type via opts.InstanceType — picked
+		// by the planner from the live pricing catalog.
+		instanceType = "cax11"
 	}
 
 	args := []string{
@@ -63,14 +71,35 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 		"-o", "json",
 	}
 
-	if opts.SSHKeyPath != "" {
-		args = append(args, "--ssh-key", opts.SSHKeyPath)
-	}
-	if opts.UserData != "" {
-		args = append(args, "--user-data", opts.UserData)
+	// Hetzner needs the SSH key registered in the account first, then
+	// referenced by name. Upload the per-run public key under a name
+	// derived from the run ID (unique across concurrent runs).
+	sshKeyName := hetznerSSHKeyName(opts)
+	if opts.SSHKeyPath != "" && sshKeyName != "" {
+		if err := uploadHetznerSSHKey(ctx, sshKeyName, opts.SSHKeyPath); err != nil {
+			return nil, err
+		}
+		args = append(args, "--ssh-key", sshKeyName)
 	}
 
-	// Add labels (Hetzner's version of tags)
+	// hcloud >=1.45 dropped --user-data in favor of --user-data-from-file.
+	// Write to a 0600-from-creation tempfile (no TOCTOU window where the
+	// umask-default mode could leak the contents) and pass the path.
+	if opts.UserData != "" {
+		path, err := adapter.WriteSecureTempFile("dispatcher-userdata-*.yaml", []byte(opts.UserData))
+		if err != nil {
+			return nil, fmt.Errorf("write user-data: %w", err)
+		}
+		defer os.Remove(path)
+		args = append(args, "--user-data-from-file", path)
+	}
+
+	// Add labels (Hetzner's version of tags). Validated at the boundary so
+	// a label value with `=` or other CLI-significant chars can't break
+	// out of the --label argument.
+	if err := validateLabels(opts.Tags); err != nil {
+		return nil, fmt.Errorf("hetzner labels: %w", err)
+	}
 	for k, v := range opts.Tags {
 		args = append(args, "--label", fmt.Sprintf("%s=%s", k, v))
 	}
@@ -85,6 +114,11 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 		return nil
 	})
 	if err != nil {
+		// VM creation failed but we may have already uploaded the SSH key.
+		// Best-effort cleanup so we don't leak Hetzner ssh-keys on errors.
+		if sshKeyName != "" {
+			_ = exec.CommandContext(context.Background(), "hcloud", "ssh-key", "delete", sshKeyName).Run()
+		}
 		return nil, err
 	}
 
@@ -125,9 +159,9 @@ func (h *HetznerProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, erro
 	}
 
 	var server struct {
-		ID     int    `json:"id"`
-		Name   string `json:"name"`
-		Status string `json:"status"`
+		ID        int    `json:"id"`
+		Name      string `json:"name"`
+		Status    string `json:"status"`
 		PublicNet struct {
 			IPv4 struct {
 				IP string `json:"ip"`
@@ -163,10 +197,75 @@ func (h *HetznerProvider) DestroyVM(ctx context.Context, vmID string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("hcloud server delete failed: %w", err)
 	}
+	// Best-effort: clean up any dispatcher-managed SSH keys for this VM.
+	// We don't know the run ID from vmID alone, so list and delete by
+	// label match. Errors are non-fatal — `dispatcher gc` is the backstop.
+	_ = cleanupHetznerSSHKeysForVM(ctx, vmID)
+	return nil
+}
+
+// hetznerSSHKeyName derives a stable per-run name for the SSH key dispatcher
+// uploads to Hetzner. Hetzner requires SSH keys to be account-registered
+// before they can be injected into a VM at create time. We delete them
+// during VM teardown so they don't accumulate.
+func hetznerSSHKeyName(opts VMOptions) string {
+	runID := opts.Tags["dispatcher-run-id"]
+	if runID == "" {
+		// Fall back to VM name if no run id is in tags (legacy callers).
+		return "dispatcher-" + opts.Name
+	}
+	return "dispatcher-" + runID
+}
+
+// uploadHetznerSSHKey registers a public key with the Hetzner account
+// under `name`. Tolerates "already exists" since concurrent retries can
+// race the upload.
+func uploadHetznerSSHKey(ctx context.Context, name, pubKeyPath string) error {
+	out, err := exec.CommandContext(ctx, "hcloud", "ssh-key", "create",
+		"--name", name,
+		"--public-key-from-file", pubKeyPath,
+	).CombinedOutput()
+	if err != nil {
+		// "already exists" is fine — concurrent uploads, retries, etc.
+		if strings.Contains(string(out), "already_exists") ||
+			strings.Contains(string(out), "already exists") {
+			return nil
+		}
+		return fmt.Errorf("hcloud ssh-key create: %s: %w", string(out), err)
+	}
+	return nil
+}
+
+// cleanupHetznerSSHKeysForVM removes the dispatcher-uploaded SSH key
+// associated with a VM. The key is named "dispatcher-<run-id>"; we find
+// the right one by listing keys with the dispatcher label and matching
+// against the VM's run-id label.
+//
+// Best-effort: failures are logged but not propagated.
+func cleanupHetznerSSHKeysForVM(ctx context.Context, vmID string) error {
+	// Read the VM's labels to recover the run id.
+	out, err := exec.CommandContext(ctx, "hcloud", "server", "describe", vmID, "-o", "json").Output()
+	if err != nil {
+		// VM is gone already (typical — we just deleted it). The label
+		// info we need is gone too; give up cleanly.
+		return nil
+	}
+	var srv struct {
+		Labels map[string]string `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &srv); err != nil {
+		return nil
+	}
+	if runID := srv.Labels["dispatcher-run-id"]; runID != "" {
+		_ = exec.CommandContext(ctx, "hcloud", "ssh-key", "delete", "dispatcher-"+runID).Run()
+	}
 	return nil
 }
 
 func (h *HetznerProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {
+	if err := validateLabels(tags); err != nil {
+		return nil, fmt.Errorf("hetzner selector: %w", err)
+	}
 	args := []string{"server", "list", "-o", "json"}
 	for k, v := range tags {
 		args = append(args, "--selector", fmt.Sprintf("%s=%s", k, v))
@@ -179,11 +278,11 @@ func (h *HetznerProvider) ListVMs(ctx context.Context, tags map[string]string) (
 	}
 
 	var servers []struct {
-		ID     int               `json:"id"`
-		Name   string            `json:"name"`
-		Status string            `json:"status"`
-		Labels map[string]string `json:"labels"`
-		Created string           `json:"created"`
+		ID      int               `json:"id"`
+		Name    string            `json:"name"`
+		Status  string            `json:"status"`
+		Labels  map[string]string `json:"labels"`
+		Created string            `json:"created"`
 	}
 	if err := json.Unmarshal(output, &servers); err != nil {
 		return nil, fmt.Errorf("cannot parse hcloud output: %w", err)

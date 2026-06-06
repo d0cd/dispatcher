@@ -12,8 +12,8 @@ import (
 
 // mockSerializableState implements adapter.SerializableState for testing.
 type mockSerializableState struct {
-	VMID  string `json:"vmId"`
-	IP    string `json:"ip"`
+	VMID    string `json:"vmId"`
+	IP      string `json:"ip"`
 	KeyPath string `json:"keyPath"`
 }
 

@@ -17,7 +17,7 @@ func TestBuild_PythonScript(t *testing.T) {
 
 	p, err := Build(dir, types.PlanConstraints{
 		OptimizeFor: types.OptimizeCost,
-	})
+	}, nil)
 	require.NoError(t, err)
 	require.NotNil(t, p.Recommendation)
 
@@ -44,7 +44,7 @@ func TestBuild_DockerizedService(t *testing.T) {
 
 	p, err := Build(dir, types.PlanConstraints{
 		OptimizeFor: types.OptimizeCost,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, types.WorkloadKindService, p.Workload.DetectedKind)
@@ -60,7 +60,7 @@ func TestBuild_GPUJob(t *testing.T) {
 
 	p, err := Build(dir, types.PlanConstraints{
 		OptimizeFor: types.OptimizeCost,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, types.WorkloadKindGPUJob, p.Workload.DetectedKind)
@@ -89,7 +89,7 @@ func TestBuild_SpecificTarget(t *testing.T) {
 	p, err := Build(dir, types.PlanConstraints{
 		OptimizeFor: types.OptimizeCost,
 		TargetName:  "kubernetes",
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	assert.Equal(t, "kubernetes", p.Recommendation.Target)
@@ -101,7 +101,7 @@ func TestBuild_SpecificTargetNotFound(t *testing.T) {
 
 	_, err := Build(dir, types.PlanConstraints{
 		TargetName: "nonexistent",
-	})
+	}, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -114,7 +114,7 @@ func TestBuild_MaxCostFilter(t *testing.T) {
 	p, err := Build(dir, types.PlanConstraints{
 		OptimizeFor:         types.OptimizeCost,
 		MaxEstimatedCostUSD: 1.0,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// All recommended/alternative costs should be within budget
@@ -130,7 +130,7 @@ func TestBuild_OptimizeSpeed(t *testing.T) {
 
 	p, err := Build(dir, types.PlanConstraints{
 		OptimizeFor: types.OptimizeSpeed,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	// Should prefer local targets for speed
@@ -144,7 +144,7 @@ func TestBuild_ExecutionSteps(t *testing.T) {
 
 	p, err := Build(dir, types.PlanConstraints{
 		OptimizeFor: types.OptimizeCost,
-	})
+	}, nil)
 	require.NoError(t, err)
 
 	assert.Contains(t, p.ExecutionSteps, "build-image")

@@ -25,6 +25,42 @@ func TestInspectPythonScript(t *testing.T) {
 	assert.Equal(t, "python:3.11-slim", spec.Package.BaseImage)
 }
 
+// TestInspectDefaultsOutputsWhenDirectoryExists verifies that an `outputs/`
+// directory in the workload is picked up as a default artifact path without
+// requiring a dispatcher.yaml entry. This is the data-preservation default
+// — without it, users have to know about the feature to benefit from it.
+func TestInspectDefaultsOutputsWhenDirectoryExists(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "main.py", `print("hi")`)
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "outputs"), 0o755))
+
+	spec, err := InspectCodebase(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"outputs/"}, spec.Outputs,
+		"existing outputs/ dir should be auto-detected")
+}
+
+func TestInspectNoDefaultOutputsWhenAbsent(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "main.py", `print("hi")`)
+
+	spec, err := InspectCodebase(dir)
+	require.NoError(t, err)
+	assert.Empty(t, spec.Outputs, "no outputs/ dir → no auto-detection")
+}
+
+func TestInspectExplicitOutputsBeatsAutoDetect(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "main.py", `print("hi")`)
+	// dispatcher.yaml specifies explicit outputs — should win over auto.
+	writeFile(t, dir, "dispatcher.yaml", "outputs:\n  - results/\n  - model.bin\n")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "outputs"), 0o755))
+
+	spec, err := InspectCodebase(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"results/", "model.bin"}, spec.Outputs)
+}
+
 func TestInspectDockerizedService(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "Dockerfile", "FROM python:3.11\nEXPOSE 8080\nCMD [\"python\", \"app.py\"]")

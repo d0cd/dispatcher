@@ -29,7 +29,7 @@ func DetectDataRequirements(path string) []types.DataRequirement {
 		".env", ".env.example",
 		"docker-compose.yml", "docker-compose.yaml",
 		"compose.yml", "compose.yaml",
-		"dispatch.yaml",
+		"dispatcher.yaml",
 	}
 	for _, name := range configFiles {
 		full := filepath.Join(path, name)

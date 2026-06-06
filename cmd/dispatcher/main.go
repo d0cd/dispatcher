@@ -1,13 +1,29 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"syscall"
 
 	"github.com/d0cd/dispatcher/internal/cli"
 )
 
 func main() {
-	if err := cli.Execute(); err != nil {
-		os.Exit(1)
+	// Tighten the file-creation mask so every os.OpenFile/os.WriteFile that
+	// doesn't pass an explicit-perm flag still produces a 0600 file rather
+	// than inheriting whatever loose umask the parent shell set (`umask 022`
+	// is common; `umask 0` exists). Every sensitive write in dispatcher
+	// already passes 0600 explicitly, but this is belt-and-braces against
+	// any future caller that forgets.
+	syscall.Umask(0o077)
+
+	err := cli.Execute()
+	if err == nil {
+		return
 	}
+	var ee *cli.ExitError
+	if errors.As(err, &ee) {
+		os.Exit(ee.Code)
+	}
+	os.Exit(1)
 }

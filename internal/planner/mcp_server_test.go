@@ -96,7 +96,7 @@ func TestMCPServer_ToolsList(t *testing.T) {
 	assert.Nil(t, resp["error"])
 	result := resp["result"].(map[string]any)
 	toolList := result["tools"].([]any)
-	assert.Len(t, toolList, 4)
+	assert.Len(t, toolList, 5)
 
 	names := make(map[string]bool)
 	for _, raw := range toolList {
@@ -110,6 +110,7 @@ func TestMCPServer_ToolsList(t *testing.T) {
 	assert.True(t, names["evaluate_all_targets"])
 	assert.True(t, names["find_cheapest_instances"])
 	assert.True(t, names["get_run_history"])
+	assert.True(t, names["inspect_run"])
 }
 
 func TestMCPServer_ToolsCall_InspectWorkload(t *testing.T) {

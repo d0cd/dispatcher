@@ -70,16 +70,16 @@ var targetsAddCmd = &cobra.Command{
 		kind := types.TargetKind(addFlags.kind)
 		switch kind {
 		case types.TargetKindDocker, types.TargetKindSSH, types.TargetKindKubernetes,
-			types.TargetKindCloudVM, types.TargetKindModal, types.TargetKindE2B:
+			types.TargetKindCloudVM:
 			// valid
 		default:
-			return fmt.Errorf("unknown target kind %q (valid: docker, ssh, kubernetes, cloud-vm, modal, e2b)", addFlags.kind)
+			return fmt.Errorf("unknown target kind %q (valid: docker, ssh, kubernetes, cloud-vm)", addFlags.kind)
 		}
 
 		t := types.TargetConfig{
-			ID:      id,
-			Kind:    kind,
-			Enabled: addFlags.enabled,
+			ID:           id,
+			Kind:         kind,
+			Enabled:      addFlags.enabled,
 			Capabilities: defaultCapabilitiesForKind(kind),
 		}
 
@@ -248,10 +248,22 @@ func checkKubernetes(ctx context.Context) []doctorCheck {
 
 func checkLima(ctx context.Context) []doctorCheck {
 	var checks []doctorCheck
-	cmd := exec.CommandContext(ctx, "limactl", "version")
-	output, err := cmd.Output()
-	if err != nil {
+	// Distinguish "binary missing" (truly skip) from "binary present but
+	// failing" (real problem worth surfacing as a fail).
+	if _, err := exec.LookPath("limactl"); err != nil {
 		checks = append(checks, doctorCheck{"Lima", "skip", "limactl not installed"})
+		return checks
+	}
+	// Modern limactl (>=1.0) uses `--version`; older builds used `version`
+	// as a subcommand. Try the new form first, fall back so we don't
+	// false-fail on older installs.
+	output, err := exec.CommandContext(ctx, "limactl", "--version").Output()
+	if err != nil {
+		output, err = exec.CommandContext(ctx, "limactl", "version").Output()
+	}
+	if err != nil {
+		checks = append(checks, doctorCheck{"Lima", "fail",
+			"limactl present but neither --version nor version subcommand worked: " + err.Error()})
 		return checks
 	}
 	version := strings.TrimSpace(string(output))
@@ -325,7 +337,7 @@ func defaultCapabilitiesForKind(kind types.TargetKind) types.Capabilities {
 }
 
 func init() {
-	targetsAddCmd.Flags().StringVar(&addFlags.kind, "kind", "docker", "target kind: docker, ssh, kubernetes, cloud-vm, modal, e2b")
+	targetsAddCmd.Flags().StringVar(&addFlags.kind, "kind", "docker", "target kind: docker, ssh, kubernetes, cloud-vm")
 	targetsAddCmd.Flags().StringVar(&addFlags.host, "host", "", "hostname for SSH targets")
 	targetsAddCmd.Flags().StringVar(&addFlags.user, "user", "", "username for SSH targets")
 	targetsAddCmd.Flags().IntVar(&addFlags.port, "port", 22, "port for SSH targets")

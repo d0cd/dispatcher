@@ -78,7 +78,7 @@ func IsTransient(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	for _, m := range []string{
-		"throttl",          // throttled, throttling
+		"throttl", // throttled, throttling
 		"too many requests",
 		"timeout",
 		"timed out",

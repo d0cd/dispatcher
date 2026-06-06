@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/approval"
 	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -44,14 +45,27 @@ type Run struct {
 	Logs       []adapter.LogEvent
 	Artifacts  []adapter.ArtifactRef
 	Cost       types.CostEstimate
+	// Failure carries exit code / signal / OOM detail when the run ended
+	// in ExecutionFailed. Populated from adapter.FailureReporter when the
+	// adapter implements it. Zero-value when the run succeeded.
+	Failure adapter.FailureDetails
+	// RetryCount is the number of times this workload has been
+	// re-executed via the transient-failure retry path. Capped at 1 today.
+	RetryCount int
 
 	// Durable execution fields
-	HandleID      string            // persisted handle identifier
-	HandleState   json.RawMessage   // serialized adapter state for reconnection
-	Lifecycle     LifecycleMode     // ephemeral or long-running
-	WatchdogTTL   time.Duration     // cloud-init self-destruct TTL
-	LastHeartbeat time.Time         // last watchdog extension
-	LogFile       string            // path to local log cache
+	HandleID      string          // persisted handle identifier
+	HandleState   json.RawMessage // serialized adapter state for reconnection
+	Lifecycle     LifecycleMode   // ephemeral or long-running
+	WatchdogTTL   time.Duration   // cloud-init self-destruct TTL
+	LastHeartbeat time.Time       // last watchdog extension
+	LogFile       string          // path to local log cache
+
+	// Approval is the audit record produced by the gate when the plan
+	// required approvals. Nil when no approval was needed. Set by the
+	// executor after Gate.Wait returns — persisted as part of the run
+	// record so audits survive process exit.
+	Approval *approval.Record
 }
 
 // NewRun creates a run in the Created state.

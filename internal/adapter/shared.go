@@ -1,15 +1,18 @@
 package adapter
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/d0cd/dispatcher/internal/workload"
 )
 
-// SanitizeName normalizes a name for use in resource identifiers.
-// Replaces special characters with hyphens, lowercases, and truncates.
+// SanitizeName lowercases, replaces /._<space> with `-`, and caps at 40 chars.
 func SanitizeName(name string) string {
 	r := strings.NewReplacer("/", "-", ".", "-", " ", "-", "_", "-")
 	s := strings.ToLower(r.Replace(name))
@@ -19,9 +22,8 @@ func SanitizeName(name string) string {
 	return s
 }
 
-// RuntimeCommand returns the command to run an entrypoint for a given runtime.
-// Use forContainer=true for container environments (uses "python"),
-// forContainer=false for local environments (prefers "python3").
+// RuntimeCommand returns the argv to invoke entrypoint under rt. forContainer
+// switches python3 → python (containers ship `python` as the executable).
 func RuntimeCommand(rt types.Runtime, entrypoint string, forContainer bool) []string {
 	switch rt {
 	case types.RuntimePython:
@@ -89,23 +91,75 @@ func injectDotEnv(base []string, dir string) ([]string, error) {
 	return out, nil
 }
 
-// DotEnvArgs returns "-e KEY=VAL" pairs for any .env entries in dir, suitable
-// for `docker run` / `docker exec` etc.
-func DotEnvArgs(dir string) ([]string, error) {
+// WriteDotEnvFile writes the workload's .env values to a 0600 temp file
+// and returns the path plus a cleanup func. Empty .env returns ("", noop, nil).
+// Values stay off argv (where `ps` could see them); the file is the standard
+// way to feed env into docker --env-file or similar.
+func WriteDotEnvFile(dir string) (path string, cleanup func(), err error) {
+	noop := func() {}
 	kv, err := workload.LoadDotEnv(dir)
 	if err != nil {
-		return nil, err
+		return "", noop, err
 	}
-	args := make([]string, 0, 2*len(kv))
+	if len(kv) == 0 {
+		return "", noop, nil
+	}
+	var buf strings.Builder
 	for k, v := range kv {
-		args = append(args, "-e", k+"="+v)
+		fmt.Fprintf(&buf, "%s=%s\n", k, v)
 	}
-	return args, nil
+	name, err := WriteSecureTempFile("dispatcher-env-*.env", []byte(buf.String()))
+	if err != nil {
+		return "", noop, fmt.Errorf("write env file: %w", err)
+	}
+	return name, func() { _ = os.Remove(name) }, nil
 }
 
-// DotEnvShellPrefix returns a "K1=V1 K2=V2 " string (note trailing space) so
-// callers can prepend it to a shell command for inline env injection.
-// Returns the empty string when no .env is present.
+// WriteSecureTempFile creates a tempfile mode 0600 atomically: O_CREATE|
+// O_EXCL|O_WRONLY with explicit perm bits, no create-then-chmod TOCTOU.
+// pattern follows os.CreateTemp's "*" convention. Caller owns Remove.
+func WriteSecureTempFile(pattern string, contents []byte) (string, error) {
+	for attempt := 0; attempt < 10; attempt++ {
+		name, err := expandTempPattern(pattern)
+		if err != nil {
+			return "", err
+		}
+		path := filepath.Join(os.TempDir(), name)
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+		if err != nil {
+			if os.IsExist(err) {
+				continue
+			}
+			return "", err
+		}
+		if _, err := f.Write(contents); err != nil {
+			f.Close()
+			_ = os.Remove(path)
+			return "", err
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(path)
+			return "", err
+		}
+		return path, nil
+	}
+	return "", fmt.Errorf("could not allocate unique tempfile after 10 attempts")
+}
+
+func expandTempPattern(p string) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("entropy unavailable: %w", err)
+	}
+	rnd := hex.EncodeToString(b[:])
+	if strings.Contains(p, "*") {
+		return strings.Replace(p, "*", rnd, 1), nil
+	}
+	return p + rnd, nil
+}
+
+// DotEnvShellPrefix returns "K1=V1 K2=V2 " for inline shell env injection.
+// Values leak to `ps`; prefer DotEnvExportScript whenever stdin works.
 func DotEnvShellPrefix(dir string) (string, error) {
 	kv, err := workload.LoadDotEnv(dir)
 	if err != nil {
@@ -119,6 +173,27 @@ func DotEnvShellPrefix(dir string) (string, error) {
 		parts = append(parts, k+"="+ShellQuote(v))
 	}
 	return strings.Join(parts, " ") + " ", nil
+}
+
+// DotEnvExportScript renders .env as `export K='V'` lines for stdin-piped
+// bash; values stay off argv. Empty string when no .env.
+func DotEnvExportScript(dir string) (string, error) {
+	kv, err := workload.LoadDotEnv(dir)
+	if err != nil {
+		return "", err
+	}
+	if len(kv) == 0 {
+		return "", nil
+	}
+	var b strings.Builder
+	for k, v := range kv {
+		b.WriteString("export ")
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(ShellQuote(v))
+		b.WriteByte('\n')
+	}
+	return b.String(), nil
 }
 
 // DefaultValidationResult returns a ValidationResult with sensible defaults.

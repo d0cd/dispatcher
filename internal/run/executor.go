@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
@@ -12,34 +13,29 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// ApprovalFunc is called when a plan requires approvals.
-// It receives the list of required approvals and returns nil if approved,
-// or an error (typically ErrApprovalDenied) if denied.
-type ApprovalFunc func(approvals []types.PolicyRequirement) error
+// ApprovalFunc / ErrApprovalDenied alias the approval package for callers
+// that key off the run package's symbols.
+type ApprovalFunc = approval.ApprovalFunc
 
-// ErrApprovalDenied is returned when the user denies a required approval.
-var ErrApprovalDenied = fmt.Errorf("approval denied by user")
+var ErrApprovalDenied = approval.ErrDenied
 
-// Executor orchestrates run lifecycle using a target adapter.
 type Executor struct {
 	adapter    adapter.TargetAdapter
 	approvalFn ApprovalFunc
 }
 
-// NewExecutor creates an executor for the given adapter.
 func NewExecutor(a adapter.TargetAdapter) *Executor {
 	return &Executor{adapter: a}
 }
 
-// SetApprovalFunc configures the function called for interactive approvals.
-// If nil, approvals are auto-granted (default for backward compat).
+// SetApprovalFunc installs an in-process approver. Nil means the executor
+// only resolves via an external `dispatcher approve <id>` socket.
 func (e *Executor) SetApprovalFunc(fn ApprovalFunc) {
 	e.approvalFn = fn
 }
 
 // Execute runs the full lifecycle with guaranteed cleanup and panic recovery.
 func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) error {
-	// Panic recovery: catch panics, persist error state, attempt cleanup.
 	defer func() {
 		if rec := recover(); rec != nil {
 			r.SetError(types.RunStateExecutionFailed,
@@ -68,36 +64,28 @@ func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) err
 		return err
 	}
 
-	// Check approvals
 	if len(r.Plan.RequiredApprovals) > 0 {
 		if err := r.Transition(types.RunStateAwaitingApproval); err != nil {
 			return err
 		}
+		gate, err := approval.NewGate(r.ID, r.Plan.RequiredApprovals)
+		if err != nil {
+			r.SetError(types.RunStateApprovalDenied, err)
+			return fmt.Errorf("open approval gate: %w", err)
+		}
+		defer gate.Close()
 
-		preApproved := false
-		if existing, err := approval.Load(r.ID); err == nil {
-			switch existing.Decision {
-			case approval.DecisionApproved:
-				preApproved = true
-				dlog.L().Info("approval.preapproved", "run", r.ID, "decider", existing.Decider)
-			case approval.DecisionDenied:
-				r.SetError(types.RunStateApprovalDenied, ErrApprovalDenied)
-				return fmt.Errorf("approval previously denied")
-			}
+		if e.approvalFn == nil {
+			dlog.L().Info("approval.awaiting_external", "run", r.ID)
 		}
 
-		if !preApproved {
-			_, _, _ = approval.RequestPending(r.ID, r.Plan.RequiredApprovals)
-			if e.approvalFn != nil {
-				if err := e.approvalFn(r.Plan.RequiredApprovals); err != nil {
-					_, _ = approval.Resolve(r.ID, approval.DecisionDenied, "interactive")
-					r.SetError(types.RunStateApprovalDenied, err)
-					return fmt.Errorf("approval denied: %w", err)
-				}
-				_, _ = approval.Resolve(r.ID, approval.DecisionApproved, "interactive")
-			}
-			// If no approvalFn set, the pending record sits for `dispatcher approve` to resolve.
+		rec, err := gate.Wait(ctx, e.approvalFn)
+		r.Approval = &rec // stamp record on both approve and deny paths
+		if err != nil {
+			r.SetError(types.RunStateApprovalDenied, err)
+			return fmt.Errorf("approval denied: %w", err)
 		}
+		dlog.L().Info("approval.granted", "run", r.ID, "decider", rec.Decider)
 	}
 
 	// Prepare
@@ -120,6 +108,10 @@ func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) err
 		r.SetError(types.RunStateExecutionFailed, err)
 		return fmt.Errorf("execution failed: %w", err)
 	}
+	// Stamp the run id onto the handle so adapters that need it (e.g.
+	// CloudVMAdapter.Artifacts placing files under runs/<run-id>/) can
+	// reach it without parsing handle.ID — which is provider-specific.
+	handle.RunID = r.ID
 	r.Handle = handle
 
 	// Persist handle immediately — if CLI crashes after this point,
@@ -171,21 +163,78 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 
 	// Check final status
 	state, err := e.adapter.Status(ctx, handle)
+
+	// Collect artifacts BEFORE we transition to a terminal state — even on
+	// failure. Crash dumps and partial outputs are usually exactly what the
+	// user wants; losing them to cleanup defeats the point. Failure is
+	// logged but non-fatal so cleanup still runs.
+	if tErr := r.Transition(types.RunStateCollectingArtifacts); tErr == nil {
+		if artifacts, aErr := e.adapter.Artifacts(ctx, handle); aErr == nil {
+			r.Artifacts = artifacts
+		} else if logWriter != nil {
+			fmt.Fprintf(logWriter, "[dispatcher] warning: artifact collection failed: %v\n", aErr)
+		}
+	}
+
+	// Capture failure details from the adapter if it supports rich reporting.
+	// Always do this — we want the data on the run record for diagnose, even
+	// if retry is disabled. classification gates the optional retry below.
+	if err != nil || state == types.RunStateExecutionFailed {
+		if fr, ok := e.adapter.(adapter.FailureReporter); ok {
+			r.Failure = fr.FailureDetails(handle)
+		}
+	}
+
 	if err != nil {
 		r.SetError(types.RunStateExecutionFailed, err)
 		return fmt.Errorf("status check failed: %w", err)
 	}
 	if state == types.RunStateExecutionFailed {
-		r.SetError(types.RunStateExecutionFailed, fmt.Errorf("workload execution failed"))
-		return fmt.Errorf("workload execution failed")
-	}
-
-	// Collect artifacts (failure is non-fatal for cleanup)
-	if err := r.Transition(types.RunStateCollectingArtifacts); err == nil {
-		if artifacts, err := e.adapter.Artifacts(ctx, handle); err == nil {
-			r.Artifacts = artifacts
-		} else if logWriter != nil {
-			fmt.Fprintf(logWriter, "[dispatcher] warning: artifact collection failed: %v\n", err)
+		kind := adapter.ClassifyFailure(r.Failure)
+		if logWriter != nil {
+			fmt.Fprintf(logWriter, "[dispatcher] failure classified as %s: %s\n", kind, r.Failure.Message)
+		}
+		// Opt-in retry: only when the user explicitly asked AND the failure
+		// looks transient AND we haven't already retried.
+		retrySucceeded := false
+		if r.Plan.Constraints.RetryTransientFailures &&
+			kind == adapter.FailureTransient &&
+			r.RetryCount == 0 {
+			if logWriter != nil {
+				fmt.Fprintf(logWriter, "[dispatcher] retrying transient failure once\n")
+			}
+			r.RetryCount++
+			r.Failure = adapter.FailureDetails{}
+			// A retry is a fresh run from the adapter's perspective. The
+			// previous handle is dead; ask the adapter for a new one. Cloud
+			// VM re-provisioning lives behind adapter.Execute, so this path
+			// "just works" wherever Execute is itself safe to call twice
+			// (local, docker today; cloud-vm would re-provision a new VM).
+			if retryHandle, retryErr := e.adapter.Execute(ctx, r.Plan); retryErr == nil {
+				retryHandle.RunID = r.ID
+				handle = retryHandle
+				r.Handle = retryHandle
+				_ = r.PersistHandle()
+				// Status the new run. We deliberately don't re-stream logs
+				// here to keep the retry path narrow — the original log
+				// writer is closed.
+				state, err = e.adapter.Status(ctx, handle)
+				if err == nil && state != types.RunStateExecutionFailed {
+					retrySucceeded = true
+				} else if fr, ok := e.adapter.(adapter.FailureReporter); ok {
+					// Retry also failed — capture details for the final
+					// run record. ClassifyFailure on the post-retry detail
+					// will say "permanent" by definition (we already gave
+					// it one shot).
+					r.Failure = fr.FailureDetails(handle)
+				}
+			} else if logWriter != nil {
+				fmt.Fprintf(logWriter, "[dispatcher] retry execute failed: %v\n", retryErr)
+			}
+		}
+		if !retrySucceeded {
+			r.SetError(types.RunStateExecutionFailed, fmt.Errorf("workload execution failed"))
+			return fmt.Errorf("workload execution failed")
 		}
 	}
 
@@ -233,9 +282,26 @@ func (e *Executor) startLongRunning(ctx context.Context, r *Run, logWriter io.Wr
 	return nil
 }
 
-// attemptCleanup tries cleanup with retries. Never panics.
-// CostSampleInterval is exposed so tests can shorten it.
-var CostSampleInterval = 5 * time.Second
+// costSampleInterval is the cost-sampling period. Accessed atomically because
+// tests temporarily shorten it (via SetCostSampleInterval); the sampler
+// goroutine reads it while the test goroutine writes. Stored as nanoseconds
+// to fit atomic.Int64.
+var costSampleInterval atomic.Int64
+
+func init() {
+	costSampleInterval.Store(int64(5 * time.Second))
+}
+
+// SetCostSampleInterval changes the cost-sampling period. Test-only; returns
+// the previous value so the caller can restore it.
+func SetCostSampleInterval(d time.Duration) time.Duration {
+	return time.Duration(costSampleInterval.Swap(int64(d)))
+}
+
+// CostSampleInterval returns the current sampling period.
+func CostSampleInterval() time.Duration {
+	return time.Duration(costSampleInterval.Load())
+}
 
 // startCostSampler periodically computes the run's live cost and terminates
 // the workload if PlanConstraints.MaxEstimatedCostUSD is breached. Returns a
@@ -251,7 +317,12 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter
 
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(CostSampleInterval)
+		// Adaptive sampling: start at the configured interval (5s default),
+		// but tighten as we approach the budget. At >80% of budget we sample
+		// every 500ms so the trip fires within ~500ms of the threshold,
+		// keeping cost overshoot in the cents not the dollars.
+		base := CostSampleInterval()
+		ticker := time.NewTicker(base)
 		defer ticker.Stop()
 
 		for {
@@ -261,16 +332,26 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter
 			case <-ticker.C:
 				live := r.ComputeLiveCost()
 				if live.Value <= budget {
+					adjustSamplerRate(ticker, live.Value, budget, base)
 					continue
 				}
+				overshoot := live.Value - budget
 				if logWriter != nil {
-					fmt.Fprintf(logWriter, "[dispatcher] budget exceeded: $%.2f > $%.2f — terminating\n",
-						live.Value, budget)
+					fmt.Fprintf(logWriter, "[dispatcher] budget exceeded: $%.4f > $%.2f (overshoot $%.4f) — terminating\n",
+						live.Value, budget, overshoot)
 				}
-				dlog.L().Warn("budget.exceeded", "run", r.ID, "actual", live.Value, "budget", budget)
+				dlog.L().Warn("budget.exceeded",
+					"run", r.ID,
+					"actual_usd", live.Value,
+					"budget_usd", budget,
+					"overshoot_usd", overshoot,
+					"confidence", string(live.Confidence))
 				if err := r.Transition(types.RunStateBudgetExceeded); err == nil {
 					r.Cost = live
-					_ = e.adapter.Terminate(context.Background(), handle)
+					if termErr := e.adapter.Terminate(context.Background(), handle); termErr != nil {
+						dlog.L().Error("budget.terminate.failed",
+							"run", r.ID, "err", termErr.Error())
+					}
 				}
 				return
 			}
@@ -281,6 +362,35 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter
 		cancel()
 		<-done
 	}
+}
+
+// adjustSamplerRate tightens the sampling interval as the live cost
+// approaches the budget. Three tiers:
+//   - <50%: baseline (e.g. 5s)
+//   - 50-80%: half-baseline
+//   - >80%: 500ms (cap)
+//
+// Re-tickering on each call would churn; instead we only Reset when the
+// current rate is out of sync with the desired tier.
+func adjustSamplerRate(ticker *time.Ticker, live, budget float64, base time.Duration) {
+	if budget <= 0 {
+		return
+	}
+	ratio := live / budget
+	var want time.Duration
+	switch {
+	case ratio >= 0.8:
+		want = 500 * time.Millisecond
+	case ratio >= 0.5:
+		want = base / 2
+	default:
+		want = base
+	}
+	// Floor so we don't sample faster than 100ms regardless of base.
+	if want < 100*time.Millisecond {
+		want = 100 * time.Millisecond
+	}
+	ticker.Reset(want)
 }
 
 func (e *Executor) attemptCleanup(ctx context.Context, r *Run) {
@@ -310,4 +420,3 @@ func (e *Executor) attemptCleanup(ctx context.Context, r *Run) {
 	}
 	r.SetError(types.RunStateCleanupFailed, fmt.Errorf("cleanup failed after %d retries", maxRetries))
 }
-

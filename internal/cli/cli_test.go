@@ -10,6 +10,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestMain disables the live pricing fetch for the whole CLI test suite.
+// Without this, every plan/run/audit/diagnose test would hit the real public
+// AWS/Azure pricing endpoints, gating CI on outbound network and adding tens
+// of seconds per test. Production callers still get live pricing.
+func TestMain(m *testing.M) {
+	_ = os.Setenv("DISPATCHER_DISABLE_LIVE_PRICING", "1")
+	os.Exit(m.Run())
+}
+
 // executeCommand runs a CLI command and captures stdout/stderr.
 func executeCommand(args ...string) (string, string, error) {
 	stdout := &bytes.Buffer{}
@@ -87,9 +96,9 @@ func TestCLI_Init(t *testing.T) {
 
 	_, _, err := executeCommand("init", dir)
 	require.NoError(t, err)
-	assert.FileExists(t, filepath.Join(dir, "dispatch.yaml"))
+	assert.FileExists(t, filepath.Join(dir, "dispatcher.yaml"))
 
-	content, err := os.ReadFile(filepath.Join(dir, "dispatch.yaml"))
+	content, err := os.ReadFile(filepath.Join(dir, "dispatcher.yaml"))
 	require.NoError(t, err)
 	assert.Contains(t, string(content), "name:")
 	assert.Contains(t, string(content), "command:")
@@ -98,7 +107,7 @@ func TestCLI_Init(t *testing.T) {
 func TestCLI_Init_AlreadyExists(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.py"), []byte(`print("hello")`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatch.yaml"), []byte("existing"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatcher.yaml"), []byte("existing"), 0o644))
 
 	_, _, err := executeCommand("init", dir)
 	assert.Error(t, err)
@@ -108,12 +117,12 @@ func TestCLI_Init_AlreadyExists(t *testing.T) {
 func TestCLI_Init_Force(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.py"), []byte(`print("hello")`), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatch.yaml"), []byte("old"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatcher.yaml"), []byte("old"), 0o644))
 
 	_, _, err := executeCommand("init", dir, "--force")
 	require.NoError(t, err)
 
-	content, err := os.ReadFile(filepath.Join(dir, "dispatch.yaml"))
+	content, err := os.ReadFile(filepath.Join(dir, "dispatcher.yaml"))
 	require.NoError(t, err)
 	assert.NotEqual(t, "old", string(content))
 }
