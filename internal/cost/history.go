@@ -107,6 +107,25 @@ func (h *HistoryStore) Record(entry RunHistory) error {
 	return nil
 }
 
+// SpendSince sums ActualCost across runs targeting targetID that
+// completed at or after `since`. Returns the total and run count.
+// Used by `dispatcher bill` for providers without a billing API.
+func (h *HistoryStore) SpendSince(targetID string, since time.Time) (total float64, runs int) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, e := range h.entries {
+		if e.TargetID != targetID {
+			continue
+		}
+		if e.CompletedAt.Before(since) {
+			continue
+		}
+		total += e.ActualCost
+		runs++
+	}
+	return total, runs
+}
+
 // EstimateDuration returns the average duration for similar runs.
 // Returns 0 if no historical data is available.
 func (h *HistoryStore) EstimateDuration(targetID, workloadKind string) time.Duration {

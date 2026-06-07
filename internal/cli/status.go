@@ -8,6 +8,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
+	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -30,15 +31,28 @@ func runStatusByID(id string) error {
 		return err
 	}
 
-	// For non-terminal runs with durable state, try live status
+	// For non-terminal runs with durable state, try live status — and
+	// persist any terminal state we discover so the next `dispatcher list`
+	// doesn't show "running" forever for a VM that's gone.
 	if !record.State.IsTerminal() && record.HandleState != nil {
 		ctx := context.Background()
 		r, a, reconnErr := run.ReconnectToRun(ctx, id, adapterForTarget)
 		if reconnErr == nil && a != nil && r.Handle != nil {
 			if liveState, err := a.Status(ctx, r.Handle); err == nil {
-				record.State = liveState
+				if liveState != record.State {
+					record.State = liveState
+					if liveState.IsTerminal() {
+						msg := "state refreshed via live status check"
+						if fr, ok := a.(adapter.FailureReporter); ok {
+							if fd := fr.FailureDetails(r.Handle); fd.Message != "" {
+								msg = fd.Message
+							}
+						}
+						r.SetError(liveState, fmt.Errorf("%s", msg))
+						_, _ = r.Save()
+					}
+				}
 			}
-			// Compute live cost
 			liveCost := r.ComputeLiveCost()
 			if liveCost.Value > 0 {
 				record.Cost = liveCost
@@ -80,8 +94,8 @@ func runStatusByID(id string) error {
 		color.New(color.FgRed).Fprintf(os.Stdout, "Error:      %s\n", record.Error)
 	}
 	if record.Cost.Value > 0 {
-		fmt.Fprintf(os.Stdout, "Cost:       $%.2f %s (%s)\n",
-			record.Cost.Value, record.Cost.Currency, record.Cost.Confidence)
+		fmt.Fprintf(os.Stdout, "Cost:       %s %s (%s)\n",
+			formatCost(record.Cost.Value), record.Cost.Currency, record.Cost.Confidence)
 	}
 
 	return nil

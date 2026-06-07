@@ -259,7 +259,11 @@ func durationLabel(hours float64) string {
 	return fmt.Sprintf("%.0fh", hours)
 }
 
-func roundCents(v float64) float64 { return float64(int(v*100)) / 100 }
+// roundCents rounds to four decimal places (1/100 of a cent) so the stored
+// value preserves sub-cent runs — a 90-second cax11 run at €0.005/h is
+// real money to track, even if it displays as <$0.01. Whole-cent truncation
+// (the previous behavior) was silently zeroing every cheap Hetzner run.
+func roundCents(v float64) float64 { return float64(int(v*10000)) / 10000 }
 
 func parseCPU(cpu string) int {
 	if cpu == "" {

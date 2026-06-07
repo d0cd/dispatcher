@@ -11,6 +11,8 @@ import (
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+
+	"github.com/d0cd/dispatcher/internal/cost"
 )
 
 var billCmd = &cobra.Command{
@@ -63,14 +65,20 @@ func runBill(cmd *cobra.Command, args []string) error {
 		awsSpend(ctx, monthStart, monthEnd),
 		azureSpend(ctx, monthStart, monthEnd),
 		gcpSpend(),
-		hetznerSpend(),
+		hetznerSpend(monthStart),
 	}
 
 	for _, r := range results {
 		fmt.Fprintf(os.Stdout, "%-10s ", r.provider)
 		switch {
 		case r.amount >= 0:
-			green.Fprintf(os.Stdout, "%6.2f %s", r.amount, r.currency)
+			// bill explicitly shows $0.00 rather than blank — "free this
+			// month" is a real, useful answer distinct from "unavailable".
+			disp := formatCost(r.amount)
+			if disp == "" {
+				disp = "$0.00"
+			}
+			green.Fprintf(os.Stdout, "%-8s %s", disp, r.currency)
 			if r.note != "" {
 				dim.Fprintf(os.Stdout, "  (%s)", r.note)
 			}
@@ -200,14 +208,22 @@ func gcpSpend() providerSpend {
 	}
 }
 
-// hetznerSpend: hcloud has no billing endpoint. The current invoice lives
-// in https://accounts.hetzner.com/.
-func hetznerSpend() providerSpend {
-	return providerSpend{
-		provider: "hetzner",
-		amount:   -1,
-		note:     "no billing API; see https://accounts.hetzner.com/",
+// hetznerSpend: hcloud has no public billing endpoint (the cloud API only
+// exposes /v1/pricing, not invoices). Fall back to dispatcher's own
+// per-run sampling for runs that targeted hetzner-vm this month. The
+// authoritative invoice lives in the Hetzner console.
+func hetznerSpend(monthStart time.Time) providerSpend {
+	out := providerSpend{provider: "hetzner", currency: "USD"}
+	hist, err := cost.NewHistoryStore()
+	if err != nil {
+		out.amount = -1
+		out.note = fmt.Sprintf("history unavailable: %v", err)
+		return out
 	}
+	total, n := hist.SpendSince("hetzner-vm", monthStart)
+	out.amount = total
+	out.note = fmt.Sprintf("dispatcher-tracked estimate over %d run(s) this month; authoritative: https://console.hetzner.cloud/", n)
+	return out
 }
 
 // trimCmdErr trims the noisy stderr-in-error-message that exec.ExitError

@@ -47,8 +47,11 @@ func (r *Run) ComputeLiveCost() types.CostEstimate {
 	}
 
 	scaledValue := baseEst.Value * (elapsedHours / assumedHours)
-	// Round to 2 decimal places
-	scaledValue = float64(int(scaledValue*100)) / 100
+	// Round to 4 decimal places so sub-cent runs (cheap cloud VMs for a
+	// minute or two) aren't silently truncated to zero in the persisted
+	// history record. The display layer (cli/list.go formatCost) decides
+	// how many decimals to actually show.
+	scaledValue = float64(int(scaledValue*10000)) / 10000
 
 	return types.CostEstimate{
 		Value:      scaledValue,
