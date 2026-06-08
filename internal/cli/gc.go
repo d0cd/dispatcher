@@ -20,7 +20,11 @@ var gcFlags struct {
 var gcCmd = &cobra.Command{
 	Use:   "gc",
 	Short: "Find and destroy orphaned cloud resources",
-	Long:  "Scans all configured cloud providers for VMs tagged by Dispatcher that no longer have an active run.",
+	Long: `Scans all configured cloud providers for VMs tagged by Dispatcher that no
+longer have an active run, and destroys them.
+
+Use --dry-run to preview what would be destroyed without acting — recommended
+before running for real, especially with long-lived state directories.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 

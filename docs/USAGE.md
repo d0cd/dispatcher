@@ -44,20 +44,21 @@ dispatcher stop <run-id>       # Stop and clean up
 
 | Command | Purpose |
 |---|---|
-| `status <run-id>` | Run state (reconnects to live VMs). |
+| `status <run-id>` | Run state (reconnects to live VMs; persists discovered terminal states). |
 | `logs <run-id>` | Stream logs (reconnects to live VMs). |
 | `cost <run-id>` | Realized cost, broken down. |
-| `list` | All runs with status / cost / duration. |
+| `list [--refresh]` | All runs with status / cost / duration. `--refresh` reconnects to non-terminal runs and updates state. Idle non-terminal runs (>6h) are flagged `STALE` so you can spot orphans. |
 | `history` | Per-target historical statistics. |
 | `diagnose <run-id>` | Explain why a run failed, stalled, or overran. |
+| `bill` | Per-cloud dispatcher-tagged spend month-to-date (AWS Cost Explorer, Azure Consumption; GCP requires BigQuery export; Hetzner falls back to dispatcher's tracking since no public billing API). |
 
 ### Lifecycle
 
 | Command | Purpose |
 |---|---|
 | `stop <run-id>` | Terminate and clean up a running workload. |
-| `gc [--dry-run]` | Find and destroy orphaned cloud VMs. |
-| `recover` | Inventory cloud VMs whose local run record is missing. |
+| `gc [--dry-run]` | Find and destroy orphaned cloud VMs (`--dry-run` previews without destroying). |
+| `recover [--attach]` | Inventory cloud VMs whose local run record is missing. `--attach` runs `status` against each recoverable run to refresh and persist live state. |
 
 ### Policy
 
@@ -115,6 +116,16 @@ watchdogTtl: 30m              # Cloud VM self-destruct timer (default 30m)
 ```
 
 State lives in `.dispatcher/` (per-project, found by walking up from cwd) or `~/.dispatcher/` (fallback). Override with `$DISPATCHER_HOME`.
+
+## Cost display
+
+Cost values display with adaptive precision:
+
+- `<$0.01` → 4 decimals (`$0.0007` for a sub-cent cax11 run).
+- `≥$0.01` → 2 decimals.
+- Zero or unknown → blank.
+
+This is uniform across `list`, `status`, `cost`, `history`, `run`, `plan`, and `bill`. Sub-cent values are *stored* at full precision in `history.jsonl`; only display rounds.
 
 ## Live pricing
 

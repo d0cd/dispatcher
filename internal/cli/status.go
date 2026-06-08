@@ -2,13 +2,16 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -34,8 +37,11 @@ func runStatusByID(id string) error {
 	// For non-terminal runs with durable state, try live status — and
 	// persist any terminal state we discover so the next `dispatcher list`
 	// doesn't show "running" forever for a VM that's gone.
+	// Per-run timeout matters because `dispatcher recover --attach` loops
+	// over many runs; one hung provider must not block the rest.
 	if !record.State.IsTerminal() && record.HandleState != nil {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
 		r, a, reconnErr := run.ReconnectToRun(ctx, id, adapterForTarget)
 		if reconnErr == nil && a != nil && r.Handle != nil {
 			if liveState, err := a.Status(ctx, r.Handle); err == nil {
@@ -48,8 +54,10 @@ func runStatusByID(id string) error {
 								msg = fd.Message
 							}
 						}
-						r.SetError(liveState, fmt.Errorf("%s", msg))
-						_, _ = r.Save()
+						r.SetError(liveState, errors.New(msg))
+						if _, err := r.Save(); err != nil {
+							dlog.L().Warn("status.refresh_save_failed", "run", id, "err", err.Error())
+						}
 					}
 				}
 			}
@@ -173,7 +181,7 @@ var costCmd = &cobra.Command{
 		fmt.Fprintf(os.Stdout, "State:          %s\n", record.State)
 
 		est := record.Cost
-		fmt.Fprintf(os.Stdout, "Estimated cost: $%.2f %s\n", est.Value, est.Currency)
+		fmt.Fprintf(os.Stdout, "Estimated cost: %s %s\n", formatCost(est.Value), est.Currency)
 		fmt.Fprintf(os.Stdout, "Confidence:     %s\n", est.Confidence)
 
 		if !record.StartedAt.IsZero() && !record.FinishedAt.IsZero() {

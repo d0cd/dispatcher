@@ -190,6 +190,42 @@ func (a *K8sAdapter) Terminate(ctx context.Context, h *adapter.RunHandle) error 
 	return a.provider.DestroyVM(ctx, state.JobName)
 }
 
+// FailureDetails reads exit code and termination signal from the pod's
+// container status. Without this, k8s failures classify as "unknown" and
+// the retry-transient logic never fires for them.
+func (a *K8sAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails {
+	state, ok := h.State.(*K8sState)
+	if !ok {
+		return adapter.FailureDetails{Message: "no k8s state"}
+	}
+	cmd := exec.Command("kubectl", "get", "pod", state.PodName,
+		"-n", state.Namespace,
+		"-o", "jsonpath={.status.containerStatuses[0].state.terminated}")
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return adapter.FailureDetails{Message: "pod state unavailable (pod already gc'd or kubectl unreachable)"}
+	}
+	var term struct {
+		ExitCode int    `json:"exitCode"`
+		Reason   string `json:"reason"`
+		Signal   int    `json:"signal"`
+	}
+	if err := json.Unmarshal(out, &term); err != nil {
+		return adapter.FailureDetails{Message: fmt.Sprintf("parse pod state: %v", err)}
+	}
+	fd := adapter.FailureDetails{ExitCode: term.ExitCode}
+	if term.Reason == "OOMKilled" {
+		fd.OOMKilled = true
+		fd.Message = "container OOMKilled"
+	} else if term.Signal != 0 {
+		fd.Signal = fmt.Sprintf("signal-%d", term.Signal)
+		fd.Message = fmt.Sprintf("container killed by signal %d", term.Signal)
+	} else if term.ExitCode != 0 {
+		fd.Message = fmt.Sprintf("container exited with code %d (%s)", term.ExitCode, term.Reason)
+	}
+	return fd
+}
+
 func (a *K8sAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
 	state := h.State.(*K8sState)
 	if err := a.provider.DestroyVM(ctx, state.JobName); err != nil {

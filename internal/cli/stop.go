@@ -62,7 +62,7 @@ var stopCmd = &cobra.Command{
 		color.New(color.FgGreen).Fprintf(os.Stderr, "Run %s stopped successfully.\n", r.ID)
 		fmt.Fprintf(os.Stderr, "Final state: %s\n", r.GetState())
 		if r.Cost.Value > 0 {
-			fmt.Fprintf(os.Stderr, "Final cost:  $%.2f %s\n", r.Cost.Value, r.Cost.Currency)
+			fmt.Fprintf(os.Stderr, "Final cost:  %s %s\n", formatCost(r.Cost.Value), r.Cost.Currency)
 		}
 
 		return nil

@@ -11,15 +11,18 @@ import (
 const DefaultWatchdogTTL = 30 * time.Minute
 
 // WatchdogCloudInit returns a cloud-init user-data script that installs
-// a self-destruct watchdog. If the deadline is not extended, the VM shuts down.
+// a self-destruct watchdog. The initial deadline is computed at VM boot
+// time, not at script-generation time — slow provisioning (cloud-init
+// taking minutes) previously caused the VM to boot already past the
+// deadline and shut itself down before dispatcher could ever reconnect.
 func WatchdogCloudInit(initialTTL time.Duration) string {
-	deadline := time.Now().Add(initialTTL).Unix()
+	ttlSeconds := int(initialTTL.Seconds())
 	return fmt.Sprintf(`#!/bin/sh
-# Dispatcher watchdog: self-destruct if deadline not extended
-echo %d > /var/run/dispatcher-watchdog-deadline
+# Dispatcher watchdog: self-destruct if deadline not extended.
+# Deadline is computed at boot so provisioning delays don't pre-expire it.
 mkdir -p /var/log/dispatcher
+echo $(($(date +%%s) + %d)) > /var/run/dispatcher-watchdog-deadline
 
-# Background watchdog loop — works on any distro (no cron dependency)
 (
   while true; do
     DEADLINE=$(cat /var/run/dispatcher-watchdog-deadline 2>/dev/null || echo 0)
@@ -31,7 +34,7 @@ mkdir -p /var/log/dispatcher
     sleep 60
   done
 ) &
-`, deadline)
+`, ttlSeconds)
 }
 
 // ExtendWatchdogViaSSH updates the deadline file on the remote VM.

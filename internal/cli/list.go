@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -81,7 +83,6 @@ func runList(cmd *cobra.Command, args []string) error {
 
 		stateStr := string(rec.State)
 		var stateColor *color.Color
-		isStale := false
 		switch {
 		case types.RunState(rec.State).IsFailure():
 			stateColor = red
@@ -90,8 +91,8 @@ func runList(cmd *cobra.Command, args []string) error {
 		default:
 			stateColor = yellow
 			// Flag stale: non-terminal AND no progress for staleThreshold.
-			// Reference point is StartedAt for ephemeral, LastHeartbeat for
-			// long-running. Either way, no signal in N hours = orphaned.
+			// Reference point is LastHeartbeat for long-running, StartedAt
+			// for ephemeral. No reference = no signal = don't flag.
 			ref := rec.LastHeartbeat
 			if ref.IsZero() {
 				ref = rec.StartedAt
@@ -99,7 +100,6 @@ func runList(cmd *cobra.Command, args []string) error {
 			if !ref.IsZero() && time.Since(ref) > staleThreshold {
 				stateStr = "STALE: " + stateStr
 				stateColor = red
-				isStale = true
 				stale++
 			}
 		}
@@ -131,7 +131,6 @@ func runList(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stdout, "%-14s %-16s ", rec.ID, rec.TargetID)
 		stateColor.Fprintf(os.Stdout, "%-16s", stateStr)
 		fmt.Fprintf(os.Stdout, " %-10s %10s %10s\n", lifecycle, costStr, duration)
-		_ = isStale
 	}
 
 	if stale > 0 && !listFlags.refresh {
@@ -170,21 +169,9 @@ func refreshNonTerminal(ids []string) {
 				msg = fd.Message
 			}
 		}
-		r.SetError(liveState, fmt.Errorf("%s", msg))
-		_, _ = r.Save()
-	}
-}
-
-// formatCost prints sub-cent values with 4 decimals so a real "<$0.01"
-// run isn't indistinguishable from "$0.00 unknown". Hetzner cax11 runs
-// of a few minutes routinely fall in this range.
-func formatCost(v float64) string {
-	switch {
-	case v == 0:
-		return ""
-	case v < 0.01:
-		return fmt.Sprintf("$%.4f", v)
-	default:
-		return fmt.Sprintf("$%.2f", v)
+		r.SetError(liveState, errors.New(msg))
+		if _, err := r.Save(); err != nil {
+			dlog.L().Warn("list.refresh_save_failed", "run", id, "err", err.Error())
+		}
 	}
 }

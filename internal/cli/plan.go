@@ -146,8 +146,8 @@ func runAIPlan(path string, constraints types.PlanConstraints) error {
 	if result.Recommendation != nil {
 		bold.Fprintln(os.Stdout, "Recommended:")
 		fmt.Fprintf(os.Stdout, "  Target: %s\n", result.Recommendation.Target)
-		fmt.Fprintf(os.Stdout, "  Cost:   $%.2f %s (%s)\n",
-			result.Recommendation.EstimatedCost.Value,
+		fmt.Fprintf(os.Stdout, "  Cost:   %s %s (%s)\n",
+			formatCost(result.Recommendation.EstimatedCost.Value),
 			result.Recommendation.EstimatedCost.Currency,
 			result.Recommendation.EstimatedCost.Confidence)
 	}
@@ -156,7 +156,7 @@ func runAIPlan(path string, constraints types.PlanConstraints) error {
 		fmt.Fprintln(os.Stdout)
 		bold.Fprintln(os.Stdout, "Alternatives:")
 		for _, alt := range result.Alternatives {
-			fmt.Fprintf(os.Stdout, "  %s: $%.2f %s\n", alt.Target, alt.EstimatedCost.Value, alt.EstimatedCost.Currency)
+			fmt.Fprintf(os.Stdout, "  %s: %s %s\n", alt.Target, formatCost(alt.EstimatedCost.Value), alt.EstimatedCost.Currency)
 		}
 	}
 

@@ -135,15 +135,25 @@ func awsSpend(ctx context.Context, start, end time.Time) providerSpend {
 		return out
 	}
 	var total float64
+	skipped := 0
 	out.currency = "USD"
 	for _, r := range parsed.ResultsByTime {
-		v, _ := strconv.ParseFloat(r.Total.UnblendedCost.Amount, 64)
+		v, err := strconv.ParseFloat(r.Total.UnblendedCost.Amount, 64)
+		if err != nil {
+			// A malformed Amount means we're undercounting. Surface it
+			// rather than silently rounding the bill down to zero.
+			skipped++
+			continue
+		}
 		total += v
 		if r.Total.UnblendedCost.Unit != "" {
 			out.currency = r.Total.UnblendedCost.Unit
 		}
 	}
 	out.amount = total
+	if skipped > 0 {
+		out.note = fmt.Sprintf("warning: %d malformed cost entries skipped", skipped)
+	}
 	return out
 }
 
@@ -183,18 +193,26 @@ func azureSpend(ctx context.Context, start, end time.Time) providerSpend {
 		return out
 	}
 	var total float64
+	skipped := 0
 	out.currency = "USD"
 	for _, r := range rows {
 		if r.Tags["dispatcher"] != "true" {
 			continue
 		}
-		v, _ := strconv.ParseFloat(r.PretaxCost, 64)
+		v, err := strconv.ParseFloat(r.PretaxCost, 64)
+		if err != nil {
+			skipped++
+			continue
+		}
 		total += v
 		if r.Currency != "" {
 			out.currency = r.Currency
 		}
 	}
 	out.amount = total
+	if skipped > 0 {
+		out.note = fmt.Sprintf("warning: %d malformed cost entries skipped", skipped)
+	}
 	return out
 }
 

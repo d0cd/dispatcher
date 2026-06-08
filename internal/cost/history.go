@@ -35,6 +35,11 @@ type RunHistory struct {
 	Confidence     string        `json:"confidence"`
 	CompletedAt    time.Time     `json:"completedAt"`
 	Success        bool          `json:"success"`
+	// FinalState and FailureMessage are populated for failed runs so
+	// post-hoc analysis ("why does target X fail so much?") can attribute
+	// without re-loading the run record.
+	FinalState     string `json:"finalState,omitempty"`
+	FailureMessage string `json:"failureMessage,omitempty"`
 }
 
 // HistoryStore manages historical run data.
@@ -109,7 +114,9 @@ func (h *HistoryStore) Record(entry RunHistory) error {
 
 // SpendSince sums ActualCost across runs targeting targetID that
 // completed at or after `since`. Returns the total and run count.
-// Used by `dispatcher bill` for providers without a billing API.
+// Negative per-entry costs (a sign of clock skew or arithmetic bugs
+// upstream) are clamped to zero so a single bad entry can't make the
+// month look free.
 func (h *HistoryStore) SpendSince(targetID string, since time.Time) (total float64, runs int) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -120,7 +127,11 @@ func (h *HistoryStore) SpendSince(targetID string, since time.Time) (total float
 		if e.CompletedAt.Before(since) {
 			continue
 		}
-		total += e.ActualCost
+		c := e.ActualCost
+		if c < 0 {
+			c = 0
+		}
+		total += c
 		runs++
 	}
 	return total, runs

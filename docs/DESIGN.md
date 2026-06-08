@@ -26,7 +26,7 @@ The reconciler audits what happened.
 
 ## What's Built
 
-### CLI Commands (17)
+### CLI Commands (19)
 
 ```bash
 dispatcher init [path]              # Scaffold dispatcher.yaml from workload inspection

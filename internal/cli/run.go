@@ -127,7 +127,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Show summary
 	fmt.Fprintf(os.Stderr, "Using plan:        %s\n", p.Metadata.ID)
 	fmt.Fprintf(os.Stderr, "Target:            %s\n", p.Recommendation.Target)
-	fmt.Fprintf(os.Stderr, "Estimated cost:    $%.2f %s\n", p.Recommendation.EstimatedCost.Value, p.Recommendation.EstimatedCost.Currency)
+	fmt.Fprintf(os.Stderr, "Estimated cost:    %s %s\n", formatCost(p.Recommendation.EstimatedCost.Value), p.Recommendation.EstimatedCost.Currency)
 
 	if len(p.RequiredApprovals) > 0 {
 		color.New(color.FgYellow).Fprintln(os.Stderr, "Approvals required:")
@@ -186,15 +186,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 		if _, saveErr := r.Save(); saveErr != nil {
 			dim.Fprintf(os.Stderr, "warning: could not save run: %v\n", saveErr)
 		}
+		// Record failed runs in history too, so `dispatcher bill` and
+		// historical-confidence tracking don't undercount. Without this,
+		// every failed cloud run silently dropped its spend.
+		recordRunHistory(r, p)
 		color.New(color.FgRed).Fprintf(os.Stderr, "\nRun failed: %v\n", err)
 		fmt.Fprintf(os.Stderr, "State: %s\n", r.GetState())
 		if r.Error != "" {
 			fmt.Fprintf(os.Stderr, "Error: %s\n", r.Error)
 		}
-		// Distinct exit codes so CI / wrappers can tell failure modes apart.
-		// See `dispatcher run --help` for the documented codes. We return a
-		// typed error rather than calling os.Exit so tests don't kill the
-		// runner process.
 		switch r.GetState() {
 		case types.RunStateApprovalDenied:
 			return &ExitError{Code: 2, Err: err}
@@ -215,9 +215,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stderr, "Run: %s\n", r.ID)
 	fmt.Fprintf(os.Stderr, "State: %s\n", r.GetState())
 
-	// Record history for future estimates
 	recordRunHistory(r, p)
-
 	return nil
 }
 
@@ -266,6 +264,7 @@ func recordRunHistory(r *run.Run, p *types.Plan) {
 	if p.Recommendation != nil {
 		estCost = p.Recommendation.EstimatedCost.Value
 	}
+	state := r.GetState()
 	_ = history.Record(cost.RunHistory{
 		RunID:          r.ID,
 		TargetID:       r.TargetID,
@@ -277,7 +276,9 @@ func recordRunHistory(r *run.Run, p *types.Plan) {
 		ActualCost:     r.Cost.Value,
 		Confidence:     string(r.Cost.Confidence),
 		CompletedAt:    r.FinishedAt,
-		Success:        r.GetState() == types.RunStateCompleted,
+		Success:        state == types.RunStateCompleted,
+		FinalState:     string(state),
+		FailureMessage: r.Failure.Message,
 	})
 }
 

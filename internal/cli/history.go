@@ -50,12 +50,9 @@ var historyCmd = &cobra.Command{
 				}
 			}
 			costStr := "-"
-			switch {
-			case s.AvgCost >= 0.01:
-				costStr = fmt.Sprintf("$%.2f", s.AvgCost)
-			case s.AvgCost > 0:
-				costStr = fmt.Sprintf("$%.4f", s.AvgCost)
-			case s.SuccessRuns > 0:
+			if s.AvgCost > 0 {
+				costStr = formatCost(s.AvgCost)
+			} else if s.SuccessRuns > 0 {
 				costStr = "$0.00"
 			}
 			fmt.Fprintf(os.Stdout, "%-18s %6d %6d %10s %12s\n",

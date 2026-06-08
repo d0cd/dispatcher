@@ -19,7 +19,10 @@ func (r *Run) ComputeLiveCost() types.CostEstimate {
 	// Get the rate-based estimate for 1 hour
 	baseEst := r.Plan.Recommendation.EstimatedCost
 
-	// Compute actual elapsed hours
+	// Compute actual elapsed hours. Clamp negative durations to zero —
+	// clock skew (NTP jumping the wall clock backward, FinishedAt being
+	// set before StartedAt by some adapter bug) would otherwise produce
+	// a negative cost and silently corrupt history.
 	var elapsed time.Duration
 	if !r.StartedAt.IsZero() {
 		if r.FinishedAt.IsZero() {
@@ -27,6 +30,9 @@ func (r *Run) ComputeLiveCost() types.CostEstimate {
 		} else {
 			elapsed = r.FinishedAt.Sub(r.StartedAt)
 		}
+	}
+	if elapsed < 0 {
+		elapsed = 0
 	}
 
 	if elapsed == 0 {
