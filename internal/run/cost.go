@@ -73,6 +73,13 @@ func (r *Run) ComputeLiveCost() types.CostEstimate {
 // FinalizeCost computes the final cost and stores it on the run.
 func (r *Run) FinalizeCost() {
 	est := r.ComputeLiveCost()
+	r.setCost(est)
+}
+
+// setCost stores a cost estimate under the run lock. All writes to r.Cost
+// must go through here (or FinalizeCost) so they stay synchronized with the
+// locked readers in ToRecord/ComputeLiveCost.
+func (r *Run) setCost(est types.CostEstimate) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.Cost = est

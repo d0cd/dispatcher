@@ -37,7 +37,7 @@ dispatcher stop <run-id>       # Stop and clean up
 | `init [path]` | Scaffold `dispatcher.yaml` from workload inspection. |
 | `plan <path> [--ai]` | Generate execution plan with cost / risk analysis. `--ai` uses the LLM-driven planner. |
 | `audit <path>` | Pre-run risk audit: cost surprises, missing secrets, missing Dockerfile, no-feasible-target. |
-| `run <path>` | Plan and execute. See *Exit codes* below. |
+| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; Hetzner/GCP only — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
 | `explain <plan-id>` | Verbose recommendation for a saved plan. |
 
 ### Observability
@@ -56,8 +56,8 @@ dispatcher stop <run-id>       # Stop and clean up
 
 | Command | Purpose |
 |---|---|
-| `stop <run-id>` | Terminate and clean up a running workload. |
-| `gc [--dry-run]` | Find and destroy orphaned cloud VMs (`--dry-run` previews without destroying). |
+| `stop <run-id> [--force]` | Terminate and clean up a running workload. `--force` finalizes a stranded run whose record can no longer be reconnected (no handle state, provider unreachable), marking it terminal without cleanup — reclaim any leftover resources with `gc`. |
+| `gc [--dry-run] [--yes]` | Find and destroy orphaned cloud VMs. Prompts for confirmation before destroying; `--dry-run` previews without destroying, `--yes`/`-y` skips the prompt. |
 | `recover [--attach]` | Inventory cloud VMs whose local run record is missing. `--attach` runs `status` against each recoverable run to refresh and persist live state. |
 
 ### Policy
@@ -113,9 +113,20 @@ outputs:                      # Workload-relative paths to retrieve before clean
   - results/
   - model.bin
 watchdogTtl: 30m              # Cloud VM self-destruct timer (default 30m)
+retryTransientFailures: true  # Retry once on transient failure (OOM/SIGKILL); CLI --retry-transient wins
 ```
 
-State lives in `.dispatcher/` (per-project, found by walking up from cwd) or `~/.dispatcher/` (fallback). Override with `$DISPATCHER_HOME`.
+State lives in `.dispatcher/` (per-project, found by walking up from cwd) or `~/.dispatcher/` (fallback). Override with `$DISPATCHER_HOME` or the global `--state-dir` flag.
+
+## Global flags
+
+Available on every command:
+
+| Flag | Purpose |
+|---|---|
+| `--output text\|json` (`--json`) | Emit machine-readable JSON instead of prose. Supported on `plan`, `audit`, `status`, `list`, `cost`, `bill`. |
+| `--no-color` | Disable colored output (also honors `$NO_COLOR` and non-TTY). |
+| `--state-dir <path>` | Override the state directory (equivalent to `$DISPATCHER_HOME`); useful for `recover`/`gc` against a restored backup. |
 
 ## Cost display
 

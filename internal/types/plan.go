@@ -51,6 +51,11 @@ type PlanConstraints struct {
 	// the failure is classified as transient (OOM kill, network glitch).
 	// Default false — most workloads aren't idempotent.
 	RetryTransientFailures bool `yaml:"retryTransientFailures,omitempty" json:"retryTransientFailures,omitempty"`
+	// AllowSSHFrom, when set to a CIDR (e.g. 203.0.113.4/32), attaches a
+	// per-run firewall to the provisioned cloud VM allowing inbound SSH only
+	// from that range. Empty = no per-run firewall (provider defaults apply).
+	// Supported on Hetzner and GCP; other providers reject a non-empty value.
+	AllowSSHFrom string `yaml:"allowSshFrom,omitempty" json:"allowSshFrom,omitempty"`
 }
 
 // Recommendation is the primary target recommendation.

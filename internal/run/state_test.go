@@ -9,6 +9,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestNoTerminalStateHasOutgoingTransitions ensures validTransitions carries
+// no dead entries: Transition() rejects any move out of a terminal state
+// before consulting the table, so a terminal key with outgoing edges is
+// unreachable by construction.
+func TestNoTerminalStateHasOutgoingTransitions(t *testing.T) {
+	for from := range validTransitions {
+		assert.Falsef(t, from.IsTerminal(),
+			"validTransitions has unreachable entry for terminal state %s", from)
+	}
+}
+
 func testPlan() *types.Plan {
 	return &types.Plan{
 		APIVersion: "dispatcher.dev/v1",

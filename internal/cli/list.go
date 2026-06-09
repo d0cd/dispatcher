@@ -55,8 +55,23 @@ func runList(cmd *cobra.Command, args []string) error {
 	}
 
 	if len(ids) == 0 {
+		if jsonOutput() {
+			return emitJSON([]run.RunRecord{})
+		}
 		fmt.Fprintln(os.Stdout, "No runs found.")
 		return nil
+	}
+
+	if jsonOutput() {
+		records := make([]run.RunRecord, 0, len(ids))
+		for _, id := range ids {
+			rec, err := run.LoadRecord(id)
+			if err != nil {
+				continue
+			}
+			records = append(records, *rec)
+		}
+		return emitJSON(records)
 	}
 
 	bold := color.New(color.Bold)
@@ -137,7 +152,7 @@ func runList(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stdout)
 		dim.Fprintf(os.Stdout, "%d run(s) appear stale (no progress in %s).\n",
 			stale, staleThreshold)
-		dim.Fprintln(os.Stdout, "Run `dispatcher list --refresh` to reconnect and update, or `dispatcher stop <id>` to force-cleanup.")
+		dim.Fprintln(os.Stdout, "Run `dispatcher list --refresh` to reconnect and update, or `dispatcher stop <id> --force` to finalize a stranded record.")
 	}
 
 	return nil

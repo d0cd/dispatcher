@@ -24,10 +24,10 @@ dispatcher stop <id>
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher
-go test ./...                # ~512 tests across 15 packages
+go test ./...                # ~575 tests across 15 packages
 go vet ./...
 ```
 
 ## License
 
-Not yet decided.
+Released under the [MIT License](LICENSE).

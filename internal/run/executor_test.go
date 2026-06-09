@@ -1,6 +1,7 @@
 package run
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -8,10 +9,25 @@ import (
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestSaveRunLogsFailure covers C5: a failed persist at an executor call site
+// must surface a warning rather than being silently dropped.
+func TestSaveRunLogsFailure(t *testing.T) {
+	var buf bytes.Buffer
+	dlog.SetOutput(&buf)
+
+	r := NewRun(testPlan())
+	r.ID = "bad/id" // invalid run id → Save() returns an error immediately
+	saveRun(r)
+
+	assert.Contains(t, buf.String(), "run.save.failed")
+	assert.Contains(t, buf.String(), "bad/id")
+}
 
 // mockAdapter is a configurable adapter for executor testing.
 type mockAdapter struct {

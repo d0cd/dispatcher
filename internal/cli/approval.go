@@ -17,6 +17,12 @@ import (
 // captures the OS username so multi-operator shared terminals can't
 // produce indistinguishable audit records.
 func terminalApproval(approvals []types.PolicyRequirement) (string, error) {
+	if fi, err := os.Stdin.Stat(); err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+		fmt.Fprintln(os.Stderr, "stdin is not a terminal; cannot prompt for approval. "+
+			"Re-run with --yes to auto-approve, or approve out-of-band from another terminal with: dispatcher approve <run-id>")
+		return interactiveDecider(), approval.ErrDenied
+	}
+
 	bold := color.New(color.Bold)
 	yellow := color.New(color.FgYellow)
 

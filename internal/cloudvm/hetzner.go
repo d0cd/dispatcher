@@ -61,6 +61,9 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 		// by the planner from the live pricing catalog.
 		instanceType = "cax11"
 	}
+	if err := validateVMArgs(region, instanceType, image); err != nil {
+		return nil, fmt.Errorf("hetzner: %w", err)
+	}
 
 	args := []string{
 		"server", "create",
@@ -104,6 +107,26 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 		args = append(args, "--label", fmt.Sprintf("%s=%s", k, v))
 	}
 
+	// Per-run firewall: create it (+ inbound-SSH rule) before the server and
+	// attach via --firewall, so SSH is restricted to opts.AllowSSHFrom from
+	// the moment the VM boots. If we can't secure it, fail rather than create
+	// an unrestricted VM.
+	fwName := ""
+	if opts.AllowSSHFrom != "" {
+		if err := validateFirewallCIDR(opts.AllowSSHFrom); err != nil {
+			return nil, err
+		}
+		fwName = firewallName(opts)
+		if out, e := exec.CommandContext(ctx, "hcloud", hetznerFirewallCreateArgs(fwName)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already") {
+			return nil, fmt.Errorf("hcloud firewall create: %s: %w", string(out), e)
+		}
+		if out, e := exec.CommandContext(ctx, "hcloud", hetznerFirewallRuleArgs(fwName, opts.AllowSSHFrom)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already") {
+			_ = exec.CommandContext(context.Background(), "hcloud", "firewall", "delete", fwName).Run()
+			return nil, fmt.Errorf("hcloud firewall add-rule: %s: %w", string(out), e)
+		}
+		args = append(args, "--firewall", fwName)
+	}
+
 	var output []byte
 	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
 		var runErr error
@@ -114,10 +137,13 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 		return nil
 	})
 	if err != nil {
-		// VM creation failed but we may have already uploaded the SSH key.
-		// Best-effort cleanup so we don't leak Hetzner ssh-keys on errors.
+		// VM creation failed but we may have already uploaded the SSH key and
+		// created the firewall. Best-effort cleanup so we don't leak them.
 		if sshKeyName != "" {
 			_ = exec.CommandContext(context.Background(), "hcloud", "ssh-key", "delete", sshKeyName).Run()
+		}
+		if fwName != "" {
+			_ = exec.CommandContext(context.Background(), "hcloud", "firewall", "delete", fwName).Run()
 		}
 		return nil, err
 	}
@@ -193,15 +219,40 @@ func (h *HetznerProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, erro
 }
 
 func (h *HetznerProvider) DestroyVM(ctx context.Context, vmID string) error {
+	// Recover the run id from the server's labels BEFORE deletion so we can
+	// delete the per-run firewall afterward (it can't be deleted while still
+	// attached to the server).
+	runID := h.runIDForServer(ctx, vmID)
+
 	cmd := exec.CommandContext(ctx, "hcloud", "server", "delete", vmID)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("hcloud server delete failed: %w", err)
+	}
+	if runID != "" {
+		// Best-effort: the firewall only exists when --allow-ssh-from was set.
+		_ = exec.CommandContext(ctx, "hcloud", "firewall", "delete", firewallNameFromString(runID)).Run()
 	}
 	// Best-effort: clean up any dispatcher-managed SSH keys for this VM.
 	// We don't know the run ID from vmID alone, so list and delete by
 	// label match. Errors are non-fatal — `dispatcher gc` is the backstop.
 	_ = cleanupHetznerSSHKeysForVM(ctx, vmID)
 	return nil
+}
+
+// runIDForServer reads the dispatcher-run-id label off a server before it is
+// deleted. Best-effort: returns "" if the server is already gone.
+func (h *HetznerProvider) runIDForServer(ctx context.Context, vmID string) string {
+	out, err := exec.CommandContext(ctx, "hcloud", "server", "describe", vmID, "-o", "json").Output()
+	if err != nil {
+		return ""
+	}
+	var srv struct {
+		Labels map[string]string `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &srv); err != nil {
+		return ""
+	}
+	return srv.Labels["dispatcher-run-id"]
 }
 
 // hetznerSSHKeyName derives a stable per-run name for the SSH key dispatcher

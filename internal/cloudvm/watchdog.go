@@ -10,37 +10,67 @@ import (
 // DefaultWatchdogTTL is the default self-destruct timer for cloud VMs.
 const DefaultWatchdogTTL = 30 * time.Minute
 
+// watchdogDeadlinePath is the durable deadline file. It lives under
+// /var/lib (on-disk) rather than /var/run (tmpfs) so the deadline survives a
+// reboot — otherwise a kernel panic / OOM reboot / provider maintenance would
+// wipe it and the cost-cap backstop would silently never fire again.
+const watchdogDeadlinePath = "/var/lib/dispatcher/watchdog-deadline"
+
 // WatchdogCloudInit returns a cloud-init user-data script that installs
 // a self-destruct watchdog. The initial deadline is computed at VM boot
 // time, not at script-generation time — slow provisioning (cloud-init
 // taking minutes) previously caused the VM to boot already past the
 // deadline and shut itself down before dispatcher could ever reconnect.
+//
+// The poll loop is installed as a systemd service (Restart=always, enabled
+// for multi-user.target) rather than a bare backgrounded subshell, so it is
+// re-launched after a reboot and re-reads the persisted deadline — shutting
+// down immediately if the deadline already passed.
 func WatchdogCloudInit(initialTTL time.Duration) string {
 	ttlSeconds := int(initialTTL.Seconds())
 	return fmt.Sprintf(`#!/bin/sh
 # Dispatcher watchdog: self-destruct if deadline not extended.
 # Deadline is computed at boot so provisioning delays don't pre-expire it.
-mkdir -p /var/log/dispatcher
-echo $(($(date +%%s) + %d)) > /var/run/dispatcher-watchdog-deadline
+mkdir -p /var/log/dispatcher /var/lib/dispatcher
+echo $(($(date +%%s) + %d)) > %s
 
-(
-  while true; do
-    DEADLINE=$(cat /var/run/dispatcher-watchdog-deadline 2>/dev/null || echo 0)
-    NOW=$(date +%%s)
-    if [ "$NOW" -gt "$DEADLINE" ]; then
-      logger "dispatcher-watchdog: TTL expired, shutting down" 2>/dev/null || true
-      shutdown -h now 2>/dev/null || poweroff 2>/dev/null || kill 1
-    fi
-    sleep 60
-  done
-) &
-`, ttlSeconds)
+cat > /usr/local/bin/dispatcher-watchdog.sh <<'WATCHDOG_EOF'
+#!/bin/sh
+while true; do
+  DEADLINE=$(cat %s 2>/dev/null || echo 0)
+  NOW=$(date +%%s)
+  if [ "$NOW" -gt "$DEADLINE" ]; then
+    logger "dispatcher-watchdog: TTL expired, shutting down" 2>/dev/null || true
+    shutdown -h now 2>/dev/null || poweroff 2>/dev/null || kill 1
+  fi
+  sleep 60
+done
+WATCHDOG_EOF
+chmod +x /usr/local/bin/dispatcher-watchdog.sh
+
+cat > /etc/systemd/system/dispatcher-watchdog.service <<'UNIT_EOF'
+[Unit]
+Description=Dispatcher self-destruct watchdog
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/dispatcher-watchdog.sh
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT_EOF
+
+systemctl daemon-reload
+systemctl enable --now dispatcher-watchdog.service
+`, ttlSeconds, watchdogDeadlinePath, watchdogDeadlinePath)
 }
 
 // ExtendWatchdogViaSSH updates the deadline file on the remote VM.
 func ExtendWatchdogViaSSH(ctx context.Context, state *CloudVMState, ttl time.Duration) (time.Time, error) {
 	newDeadline := time.Now().Add(ttl)
-	remoteCmd := fmt.Sprintf("echo %d > /var/run/dispatcher-watchdog-deadline", newDeadline.Unix())
+	remoteCmd := fmt.Sprintf("echo %d > %s", newDeadline.Unix(), watchdogDeadlinePath)
 
 	args := sshCmdArgs(state, remoteCmd)
 	if err := exec.CommandContext(ctx, "ssh", args...).Run(); err != nil {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -75,13 +76,34 @@ func scanFileForSecrets(path, location string) []types.SecretRef {
 		for _, sp := range secretPatterns {
 			matches := sp.pattern.FindStringSubmatch(line)
 			if len(matches) >= 2 {
+				name := matches[1]
+				if id := identifierFromLine(line); id != "" {
+					name = id
+				}
 				refs = append(refs, types.SecretRef{
 					Kind:     sp.kind,
 					Location: location,
-					Name:     matches[1],
+					Name:     name,
 				})
 			}
 		}
 	}
 	return refs
+}
+
+// identifierFromLine extracts the declared variable name to the left of the
+// first ':' or '=' delimiter, mirroring LoadDotEnv's parsing: list prefixes
+// ("- ") and surrounding quotes/whitespace are trimmed. Returns "" when the
+// line has no such delimiter (e.g. the aws-credential pattern), so callers
+// fall back to the matched keyword.
+func identifierFromLine(line string) string {
+	i := strings.IndexAny(line, ":=")
+	if i <= 0 {
+		return ""
+	}
+	id := strings.TrimSpace(line[:i])
+	id = strings.TrimPrefix(id, "- ")
+	id = strings.TrimSpace(id)
+	id = strings.Trim(id, `"'`)
+	return id
 }

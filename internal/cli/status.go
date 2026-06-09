@@ -68,6 +68,10 @@ func runStatusByID(id string) error {
 		}
 	}
 
+	if jsonOutput() {
+		return emitJSON(record)
+	}
+
 	bold := color.New(color.Bold)
 	bold.Fprintf(os.Stdout, "Run: %s\n", record.ID)
 	fmt.Fprintf(os.Stdout, "Plan:       %s\n", record.PlanID)
@@ -173,6 +177,10 @@ var costCmd = &cobra.Command{
 			if reconnErr == nil && r.Plan != nil {
 				record.Cost = r.ComputeLiveCost()
 			}
+		}
+
+		if jsonOutput() {
+			return emitJSON(record.Cost)
 		}
 
 		bold := color.New(color.Bold)

@@ -82,7 +82,13 @@ func runAudit(cmd *cobra.Command, args []string) error {
 		result = r
 	}
 
-	printAuditResult(result)
+	if jsonOutput() {
+		if err := emitJSON(result); err != nil {
+			return err
+		}
+	} else {
+		printAuditResult(result)
+	}
 	switch result.Verdict {
 	case "blocked":
 		return &ExitError{Code: 2, Err: fmt.Errorf("audit verdict: blocked")}

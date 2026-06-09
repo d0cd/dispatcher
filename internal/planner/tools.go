@@ -382,18 +382,12 @@ func (tr *ToolRegistry) execInspectRun(input json.RawMessage) ToolResult {
 		return ToolResult{Name: "inspect_run", Error: err.Error()}
 	}
 
-	// Lower-bound at 1 (the upstream code historically clamped only the
-	// upper bound, allowing the LLM to request 0 or negative lines and
-	// receive nothing or odd behavior).
 	lines := params.LogLines
 	if lines <= 0 {
 		lines = defaultInspectRunLogLines
 	}
 	if lines > maxInspectRunLogLines {
 		lines = maxInspectRunLogLines
-	}
-	if lines < 1 {
-		lines = 1
 	}
 	tail, truncated := readLogTail(rec.LogFile, lines)
 

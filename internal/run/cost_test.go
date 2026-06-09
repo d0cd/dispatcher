@@ -1,6 +1,7 @@
 package run
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -8,6 +9,29 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// TestSetCostNoRace exercises the locked cost setter against a concurrent
+// reader (ToRecord), the exact interleaving the budget sampler creates during
+// teardown. Run with -race: the previous unlocked `r.Cost = live` write would
+// be flagged here; setCost holds r.mu and keeps it clean.
+func TestSetCostNoRace(t *testing.T) {
+	r := NewRun(testPlan())
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			r.setCost(types.CostEstimate{Value: float64(i), Currency: "USD"})
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 2000; i++ {
+			_ = r.ToRecord()
+		}
+	}()
+	wg.Wait()
+}
 
 func TestComputeLiveCost_NotStarted(t *testing.T) {
 	r := NewRun(testPlan())

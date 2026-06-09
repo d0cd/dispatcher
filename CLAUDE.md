@@ -19,7 +19,7 @@ go build -o dispatcher ./cmd/dispatcher
 cmd/
   dispatcher/         # CLI entry point (main.go)
 internal/
-  cli/                # Cobra command definitions (19 commands)
+  cli/                # Cobra command definitions (18 top-level + 3 targets subcommands)
   workload/           # Workload inspection, config loading, recursive scanning
   target/             # Target registry, builtins, YAML config, feasibility matching
   plan/               # Plan generation, validation, formatting, persistence
@@ -41,7 +41,7 @@ docs/                 # Design doc, implementation plan
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher   # Build binary
-go test ./...                         # Run all tests (~512 tests, 15 packages)
+go test ./...                         # Run all tests (~575 tests, 15 packages)
 go vet ./...                          # Lint
 gofmt -l .                            # Find unformatted files
 ```
@@ -67,7 +67,7 @@ gofmt -l .                            # Find unformatted files
 - `TargetConfig` — target definition with capabilities (internal/types)
 - `Plan` — structured recommendation per design doc section 10 (internal/types)
 - `CostEstimate` — cost with confidence and assumptions (internal/types)
-- `RunState` — 18-state machine for execution (internal/types)
+- `RunState` — 22-state machine for execution (internal/types)
 - `TargetAdapter` — execution interface every target implements (internal/adapter)
 - `DurableAdapter` — extends TargetAdapter with reconnection/watchdog/GC (internal/adapter)
 - `CloudProvider` — cloud VM lifecycle interface (internal/cloudvm)

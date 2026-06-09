@@ -152,6 +152,36 @@ func TestBuild_ExecutionSteps(t *testing.T) {
 	assert.Contains(t, p.ExecutionSteps, "register-cleanup")
 }
 
+func TestApplyGPUOverride(t *testing.T) {
+	invalid := []string{"h100:abc", "h100:0", "0"}
+	for _, gpu := range invalid {
+		t.Run("invalid/"+gpu, func(t *testing.T) {
+			var spec types.WorkloadSpec
+			err := applyGPUOverride(&spec, gpu)
+			assert.Error(t, err)
+		})
+	}
+
+	valid := []struct {
+		gpu   string
+		count int
+		model string
+	}{
+		{"h100:2", 2, "h100"},
+		{"2", 2, ""},
+		{"h100:1", 1, "h100"},
+	}
+	for _, tc := range valid {
+		t.Run("valid/"+tc.gpu, func(t *testing.T) {
+			var spec types.WorkloadSpec
+			err := applyGPUOverride(&spec, tc.gpu)
+			require.NoError(t, err)
+			assert.Equal(t, tc.count, spec.Requirements.GPU.Count)
+			assert.Equal(t, tc.model, spec.Requirements.GPU.Model)
+		})
+	}
+}
+
 func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	// Support nested paths

@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/d0cd/dispatcher/internal/workload"
@@ -115,6 +117,33 @@ func WriteDotEnvFile(dir string) (path string, cleanup func(), err error) {
 	return name, func() { _ = os.Remove(name) }, nil
 }
 
+// staleEnvFileThreshold is how old a dispatcher-env tempfile must be before
+// SweepStaleEnvFiles will remove it. Older-than-threshold avoids racing a
+// sibling dispatcher process that just wrote one.
+const staleEnvFileThreshold = time.Hour
+
+// SweepStaleEnvFiles best-effort removes orphaned dispatcher-env tempfiles
+// (plaintext secrets) left behind by a crash between Execute and Cleanup.
+// Only files older than staleEnvFileThreshold are removed so a freshly
+// written sibling file is never deleted out from under another process.
+func SweepStaleEnvFiles() error {
+	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "dispatcher-env-*.env"))
+	if err != nil {
+		return nil
+	}
+	cutoff := time.Now().Add(-staleEnvFileThreshold)
+	for _, m := range matches {
+		info, err := os.Stat(m)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(m)
+		}
+	}
+	return nil
+}
+
 // WriteSecureTempFile creates a tempfile mode 0600 atomically: O_CREATE|
 // O_EXCL|O_WRONLY with explicit perm bits, no create-then-chmod TOCTOU.
 // pattern follows os.CreateTemp's "*" convention. Caller owns Remove.
@@ -158,23 +187,6 @@ func expandTempPattern(p string) (string, error) {
 	return p + rnd, nil
 }
 
-// DotEnvShellPrefix returns "K1=V1 K2=V2 " for inline shell env injection.
-// Values leak to `ps`; prefer DotEnvExportScript whenever stdin works.
-func DotEnvShellPrefix(dir string) (string, error) {
-	kv, err := workload.LoadDotEnv(dir)
-	if err != nil {
-		return "", err
-	}
-	if len(kv) == 0 {
-		return "", nil
-	}
-	parts := make([]string, 0, len(kv))
-	for k, v := range kv {
-		parts = append(parts, k+"="+ShellQuote(v))
-	}
-	return strings.Join(parts, " ") + " ", nil
-}
-
 // DotEnvExportScript renders .env as `export K='V'` lines for stdin-piped
 // bash; values stay off argv. Empty string when no .env.
 func DotEnvExportScript(dir string) (string, error) {
@@ -191,6 +203,44 @@ func DotEnvExportScript(dir string) (string, error) {
 		b.WriteString(k)
 		b.WriteByte('=')
 		b.WriteString(ShellQuote(v))
+		b.WriteByte('\n')
+	}
+	return b.String(), nil
+}
+
+// dotEnvHeredocTerminator is the heredoc token used to feed docker
+// --env-file /dev/stdin over SSH. A value containing it (or a newline) would
+// terminate the heredoc early and corrupt the env stream, so DotEnvFileLines
+// rejects such values.
+const dotEnvHeredocTerminator = "DISPATCHER_ENV_EOF"
+
+// DotEnvFileLines renders .env as sorted bare "K=V\n" lines suitable for
+// docker's --env-file format (no `export`, no shell quoting; values are read
+// literally). It returns an error if any value contains a newline or the
+// heredoc terminator token, which would corrupt a `--env-file /dev/stdin`
+// heredoc. Empty string when no .env.
+func DotEnvFileLines(dir string) (string, error) {
+	kv, err := workload.LoadDotEnv(dir)
+	if err != nil {
+		return "", err
+	}
+	if len(kv) == 0 {
+		return "", nil
+	}
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		v := kv[k]
+		if strings.ContainsRune(v, '\n') || strings.Contains(v, dotEnvHeredocTerminator) {
+			return "", fmt.Errorf("env value for %q cannot contain a newline or %q", k, dotEnvHeredocTerminator)
+		}
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(v)
 		b.WriteByte('\n')
 	}
 	return b.String(), nil

@@ -123,9 +123,11 @@ type azureRetailItem struct {
 }
 
 // azureItemToInstance converts a retail-price row into an InstanceType. Azure's
-// API doesn't return vCPU/memory per SKU — those come from a separate compute
-// SKUs API. For the catalog we surface SKU name + price; vCPU/memory are filled
-// in later from the static lookup. Items we can't map cleanly are dropped.
+// Retail Prices API does not return vCPU/memory per SKU (those live in a
+// separate compute SKUs API we don't query), so VCPUs/MemoryGB are left zero.
+// Catalog.FindCheapest treats a zero spec as "unknown" and skips the
+// size filters rather than discarding the row. Items we can't map cleanly are
+// dropped.
 func azureItemToInstance(item azureRetailItem) (InstanceType, bool) {
 	if item.ArmSkuName == "" || item.RetailPrice <= 0 {
 		return InstanceType{}, false

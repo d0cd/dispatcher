@@ -42,7 +42,7 @@ The pinned `known_hosts` file is written with `O_EXCL` to refuse following a pla
 
 **rsync invocation** is the historical attack surface: rsync re-parses the `-e` value with shell-like splitting, so naively building `fmt.Sprintf("ssh -i %s -p %d -o UserKnownHostsFile=%s", ...)` is an injection vector. Dispatcher writes a **per-run SSH wrapper script** (`<state-dir>/keys/ssh-wrapper-<run-id>.sh`, mode `0700`) with every embedded value shell-quoted **once at write time**. Every rsync call is `-e <wrapper>` — a single filesystem path, no runtime interpolation.
 
-Rsync also uses `--protect-args` to disable remote-shell re-tokenization of paths, and `--safe-links` to refuse symlinks pointing outside the transferred tree.
+Both directions use `--protect-args` to disable remote-shell re-tokenization of paths. `--safe-links` is applied on artifact **retrieval** (download from the VM), where a malicious workload could plant a symlink escaping the transferred tree into the local filesystem; the upload path (trusted local source) uses `--protect-args` only.
 
 ## Cloud CLI argument discipline
 
@@ -55,6 +55,20 @@ Tag and label keys/values are validated at the boundary: `[a-zA-Z0-9_.-]` only. 
 
 Tempfiles holding sensitive content use `WriteSecureTempFile` (O_CREATE|O_EXCL|O_WRONLY|0600) — atomic, no create-then-chmod TOCTOU.
 
+## Network exposure
+
+Dispatcher-provisioned cloud VMs are created with the **provider's default network posture**: dispatcher does not attach a per-run firewall or security group. In practice that means SSH (port 22) and any port the workload itself binds are reachable from wherever the provider's defaults allow — typically the public internet (Hetzner and AWS attach no firewall unless one is configured on the account/VPC; GCP assigns an external IP; Azure auto-creates an NSG that commonly allows SSH from any source).
+
+SSH access is gated by a **per-run ed25519 key with no password** and host-key pinning (see above), so the open SSH port is not brute-forceable. The residual exposure is defense-in-depth: SSH-daemon attack surface for the VM's lifetime, and **any workload-bound port (dev server, debugger, datastore) is world-reachable with no network-layer restriction**.
+
+**Per-run firewall (opt-in).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to attach a least-privilege firewall that permits inbound SSH only from that range:
+
+- **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule and attaches it at create time; deleted on teardown.
+- **GCP** — creates a network-level INGRESS rule scoped to the CIDR plus a matching target tag on the instance; deleted on teardown.
+- **AWS / Azure** — not yet implemented; a non-empty `--allow-ssh-from` is **rejected** (no silent fallback). Restrict SSH at the account/VPC level (security group / NSG) instead.
+
+The CIDR is validated (`net.ParseCIDR`) before use and passed as a standalone argv token. *Note: the Hetzner/GCP firewall create/attach/delete lifecycle is covered by argv-level unit tests but has not been smoke-tested against live cloud APIs.* When `--allow-ssh-from` is unset, no firewall is attached and provider defaults apply — operators remain responsible for account- or VPC-level firewalls, and for any non-SSH workload-bound ports.
+
 ## LLM trust boundary
 
 Workload-controlled data flows into the LLM via tool results (filenames, log tails, error messages, secret keys, etc.). Two defenses:
@@ -66,7 +80,9 @@ User-supplied strings (workload path, target name, run ID) flowing into LLM mess
 
 ## Cloud VM watchdog
 
-Cloud VMs created by dispatcher run a cloud-init watchdog script that polls a deadline file. If dispatcher fails to extend the deadline (because the CLI crashed, or the laptop went to sleep), the VM self-destructs.
+Cloud VMs created by dispatcher run a watchdog that polls a deadline file. If dispatcher fails to extend the deadline (because the CLI crashed, or the laptop went to sleep), the VM self-destructs.
+
+The watchdog is installed by cloud-init as a `systemd` service (`Restart=always`, enabled for `multi-user.target`) with its deadline persisted under `/var/lib/dispatcher` (on-disk, not tmpfs). This means the backstop survives a VM reboot — after a reboot systemd re-launches it and it re-reads the persisted deadline, shutting down immediately if the deadline already passed.
 
 Default TTL is 30 minutes; tune via `watchdogTtl` in `dispatcher.yaml` or `--watchdog-ttl`.
 

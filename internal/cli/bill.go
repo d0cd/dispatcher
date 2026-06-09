@@ -68,6 +68,27 @@ func runBill(cmd *cobra.Command, args []string) error {
 		hetznerSpend(monthStart),
 	}
 
+	if jsonOutput() {
+		type spendJSON struct {
+			Provider  string  `json:"provider"`
+			Amount    float64 `json:"amount"`
+			Currency  string  `json:"currency"`
+			Available bool    `json:"available"`
+			Note      string  `json:"note,omitempty"`
+		}
+		rows := make([]spendJSON, 0, len(results))
+		for _, r := range results {
+			rows = append(rows, spendJSON{
+				Provider:  r.provider,
+				Amount:    r.amount,
+				Currency:  r.currency,
+				Available: r.amount >= 0,
+				Note:      r.note,
+			})
+		}
+		return emitJSON(rows)
+	}
+
 	for _, r := range results {
 		fmt.Fprintf(os.Stdout, "%-10s ", r.provider)
 		switch {

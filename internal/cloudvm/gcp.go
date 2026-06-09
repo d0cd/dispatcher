@@ -52,6 +52,9 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if image == "" {
 		image = "ubuntu-2404-lts"
 	}
+	if err := validateVMArgs(zone, instanceType, image); err != nil {
+		return nil, fmt.Errorf("gcp: %w", err)
+	}
 
 	args := []string{
 		"compute", "instances", "create", opts.Name,
@@ -91,10 +94,35 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		args = append(args, "--labels", strings.Join(pairs, ","))
 	}
 
-	cmd := exec.CommandContext(ctx, "gcloud", args...)
-	output, err := cmd.Output()
+	// Per-run firewall: a network-level INGRESS rule scoped to opts.AllowSSHFrom
+	// and a matching target tag on the instance. The rule is created before the
+	// instance so SSH is restricted from boot; the instance carries the tag.
+	fwName := ""
+	if opts.AllowSSHFrom != "" {
+		if err := validateFirewallCIDR(opts.AllowSSHFrom); err != nil {
+			return nil, err
+		}
+		fwName = firewallNameFromString(opts.Name)
+		if out, e := exec.CommandContext(ctx, "gcloud", gcpFirewallCreateArgs(fwName, opts.AllowSSHFrom, g.project)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already exists") {
+			return nil, fmt.Errorf("gcloud firewall-rules create: %s: %w", string(out), e)
+		}
+		args = append(args, "--tags", fwName)
+	}
+
+	var output []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		var runErr error
+		output, runErr = exec.CommandContext(ctx, "gcloud", args...).Output()
+		if runErr != nil {
+			return wrapExecError("gcloud compute instances create", runErr)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, wrapExecError("gcloud compute instances create", err)
+		if fwName != "" {
+			_ = exec.CommandContext(context.Background(), "gcloud", g.firewallDeleteArgs(fwName)...).Run()
+		}
+		return nil, err
 	}
 
 	var instances []struct {
@@ -177,7 +205,19 @@ func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("gcloud compute instances delete failed: %w", err)
 	}
+	// Best-effort: delete the per-run firewall rule. It only exists when
+	// --allow-ssh-from was set; its name is derived from the instance name.
+	_ = exec.CommandContext(ctx, "gcloud", g.firewallDeleteArgs(firewallNameFromString(vmID))...).Run()
 	return nil
+}
+
+// firewallDeleteArgs builds `gcloud compute firewall-rules delete <name>`.
+func (g *GCPProvider) firewallDeleteArgs(name string) []string {
+	args := []string{"compute", "firewall-rules", "delete", name, "--quiet"}
+	if g.project != "" {
+		args = append(args, "--project", g.project)
+	}
+	return args
 }
 
 func (g *GCPProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {

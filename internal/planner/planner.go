@@ -246,8 +246,10 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 
 	best := feasible[0]
 	costVal := 0.0
+	conf := types.ConfidenceUnknown
 	if best.eval.Cost != nil {
 		costVal = best.eval.Cost.Value
+		conf = best.eval.Cost.Confidence
 		result.Recommendation = &types.Recommendation{
 			Target:        best.eval.TargetID,
 			Runtime:       target.RuntimeForTarget(best.cfg),
@@ -276,7 +278,7 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 	result.Explanation = fmt.Sprintf(
 		"Recommended: %s at $%.2f (%s confidence). %d alternative(s), %d rejected, %d risk(s).",
 		best.eval.TargetID, costVal,
-		best.eval.Cost.Confidence,
+		conf,
 		len(result.Alternatives), len(result.Rejected), len(result.Risks),
 	)
 

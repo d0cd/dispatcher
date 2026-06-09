@@ -137,7 +137,7 @@ func (h *HistoryStore) SpendSince(targetID string, since time.Time) (total float
 	return total, runs
 }
 
-// EstimateDuration returns the average duration for similar runs.
+// EstimateDuration returns the median duration for similar runs.
 // Returns 0 if no historical data is available.
 func (h *HistoryStore) EstimateDuration(targetID, workloadKind string) time.Duration {
 	h.mu.RLock()

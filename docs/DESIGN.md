@@ -26,7 +26,7 @@ The reconciler audits what happened.
 
 ## What's Built
 
-### CLI Commands (19)
+### CLI Commands (18 top-level + 3 `targets` subcommands)
 
 ```bash
 dispatcher init [path]              # Scaffold dispatcher.yaml from workload inspection
@@ -48,6 +48,7 @@ dispatcher targets add <id>         # Add a new target
 dispatcher targets doctor <id>      # Health check a target
 dispatcher gc [--dry-run]           # Find and destroy orphaned cloud resources
 dispatcher recover                  # Inventory cloud VMs whose local record is missing
+dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to-date
 ```
 
 ### Execution Targets (9 with adapters)
@@ -69,7 +70,7 @@ dispatcher recover                  # Inventory cloud VMs whose local record is 
 - **Workload inspection**: Recursive scanning for runtime, entrypoints, ports, GPU, secrets, data deps, monorepo detection
 - **dispatcher.yaml**: Declarative config that overrides auto-detection (name, command, GPU, service port, budget, timeout, target)
 - **Cost estimation**: Per-target rate cards, historical run data, instance catalog with ~50 cloud VM types
-- **Risk analysis**: 7 risk categories (cost uncertainty, capacity, credentials, data egress, public endpoint, network, packaging)
+- **Risk analysis**: 9 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, credentials, data egress, public endpoint, network, packaging)
 - **Policy gates**: Per-run Unix-socket approval gate. In-process approver (terminal / `--yes`) races an external `dispatcher approve <id>`; filesystem perms (0700 dir, 0600 socket) are the auth boundary.
 - **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer
 - **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits

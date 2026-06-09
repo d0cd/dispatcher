@@ -231,9 +231,20 @@ func TestCloudVMState_Serialization(t *testing.T) {
 
 func TestWatchdogCloudInit(t *testing.T) {
 	script := WatchdogCloudInit(30 * time.Minute)
-	assert.Contains(t, script, "dispatcher-watchdog-deadline")
+	assert.Contains(t, script, "watchdog-deadline")
 	assert.Contains(t, script, "shutdown -h now")
 	assert.Contains(t, script, "sleep 60")
+
+	// The deadline must live on durable storage, not tmpfs, so it survives
+	// a reboot.
+	assert.Contains(t, script, "/var/lib/dispatcher")
+	assert.NotContains(t, script, "/var/run/")
+
+	// The poll loop must be installed under systemd (Restart=always, enabled)
+	// so it is re-launched after a reboot rather than dying with the boot
+	// shell.
+	assert.Contains(t, script, "systemctl enable")
+	assert.Contains(t, script, "Restart=always")
 }
 
 func TestProviderBaseRates(t *testing.T) {

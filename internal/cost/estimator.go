@@ -122,6 +122,9 @@ func estimateFromRateCard(spec types.WorkloadSpec, t types.TargetConfig) types.C
 		cpuCount := parseCPU(spec.Requirements.CPU)
 		total += card.CPUPerHour * float64(cpuCount) * hours
 	}
+	if card.MemoryPerHour > 0 {
+		total += card.MemoryPerHour * parseMemoryGB(spec.Requirements.Memory) * hours
+	}
 	if spec.Requirements.GPU.Required && card.GPUPerHour > 0 {
 		gpuCount := spec.Requirements.GPU.Count
 		if gpuCount == 0 {
@@ -201,6 +204,9 @@ func scaleEstimateToHours(spec types.WorkloadSpec, t types.TargetConfig, catalog
 	total := card.BasePerHour * hours
 	if card.CPUPerHour > 0 {
 		total += card.CPUPerHour * float64(parseCPU(spec.Requirements.CPU)) * hours
+	}
+	if card.MemoryPerHour > 0 {
+		total += card.MemoryPerHour * parseMemoryGB(spec.Requirements.Memory) * hours
 	}
 	if spec.Requirements.GPU.Required && card.GPUPerHour > 0 {
 		count := spec.Requirements.GPU.Count

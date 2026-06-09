@@ -52,6 +52,28 @@ func TestEstimateCost_KubernetesService(t *testing.T) {
 	assert.Contains(t, est.Assumptions[0], "24h")
 }
 
+func TestEstimateCost_IncludesMemory(t *testing.T) {
+	target := types.TargetConfig{
+		Capabilities: types.Capabilities{
+			Accounting: types.AccountingCapability{RateCard: "internal"},
+		},
+	}
+
+	// internal rate card: Base 0.02 + CPU 0.04*2 + Mem 0.005*4 = 0.12 for 1h.
+	withMem := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindJob,
+		Requirements: types.ResourceRequirements{CPU: "2", Memory: "4G"},
+	}
+	assert.InDelta(t, 0.12, EstimateCost(withMem, target, nil).Value, 0.0001)
+
+	// Unspecified memory adds nothing (no memory term).
+	noMem := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindJob,
+		Requirements: types.ResourceRequirements{CPU: "2"},
+	}
+	assert.InDelta(t, 0.10, EstimateCost(noMem, target, nil).Value, 0.0001)
+}
+
 func TestEstimateCost_GPUJob(t *testing.T) {
 	w := types.WorkloadSpec{
 		DetectedKind: types.WorkloadKindGPUJob,

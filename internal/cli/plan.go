@@ -55,9 +55,9 @@ func runPlan(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("path %s is not a valid directory", path)
 	}
 
-	optimizeFor := types.OptimizeCost
-	if planFlags.optimize == "speed" {
-		optimizeFor = types.OptimizeSpeed
+	optimizeFor, err := parseOptimize(planFlags.optimize)
+	if err != nil {
+		return err
 	}
 
 	constraints := types.PlanConstraints{
@@ -78,6 +78,13 @@ func runPlan(cmd *cobra.Command, args []string) error {
 	result, err := plan.Build(path, constraints, catalog)
 	if err != nil {
 		return fmt.Errorf("plan failed: %w", err)
+	}
+
+	if jsonOutput() {
+		if _, err := plan.Save(result); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not save plan: %v\n", err)
+		}
+		return emitJSON(result)
 	}
 
 	plan.Print(result, color.Output)

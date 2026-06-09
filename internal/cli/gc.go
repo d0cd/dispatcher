@@ -1,10 +1,12 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -15,6 +17,7 @@ import (
 
 var gcFlags struct {
 	dryRun bool
+	force  bool
 }
 
 var gcCmd = &cobra.Command{
@@ -39,7 +42,7 @@ before running for real, especially with long-lived state directories.`,
 		}
 
 		// Get all durable adapters
-		adapters := durableAdapters()
+		adapters := durableAdaptersFn()
 		if len(adapters) == 0 {
 			fmt.Fprintln(os.Stderr, "No cloud VM adapters configured.")
 			return nil
@@ -48,10 +51,12 @@ before running for real, especially with long-lived state directories.`,
 		bold := color.New(color.Bold)
 		red := color.New(color.FgRed)
 		green := color.New(color.FgGreen)
-		dim := color.New(color.Faint)
 
-		totalOrphans := 0
-		totalDestroyed := 0
+		type orphan struct {
+			adapter adapter.DurableAdapter
+			res     adapter.ResourceInfo
+		}
+		var orphans []orphan
 
 		for _, a := range adapters {
 			resources, err := a.ListResources(ctx)
@@ -65,7 +70,7 @@ before running for real, especially with long-lived state directories.`,
 					continue // active run, not an orphan
 				}
 
-				totalOrphans++
+				orphans = append(orphans, orphan{adapter: a, res: res})
 				bold.Fprintf(os.Stderr, "  Orphan: ")
 				fmt.Fprintf(os.Stderr, "%s (%s", res.ResourceID, res.Provider)
 				if !res.CreatedAt.IsZero() {
@@ -75,37 +80,61 @@ before running for real, especially with long-lived state directories.`,
 					fmt.Fprintf(os.Stderr, ", run %s", res.RunID)
 				}
 				fmt.Fprintln(os.Stderr, ")")
-
-				if gcFlags.dryRun {
-					dim.Fprintln(os.Stderr, "    (dry run, not destroying)")
-					continue
-				}
-
-				if err := a.DestroyResource(ctx, res.ResourceID); err != nil {
-					red.Fprintf(os.Stderr, "    destroy failed: %v\n", err)
-				} else {
-					green.Fprintln(os.Stderr, "    destroyed")
-					totalDestroyed++
-				}
 			}
 		}
 
-		if totalOrphans == 0 {
+		if len(orphans) == 0 {
 			green.Fprintln(os.Stderr, "No orphaned resources found.")
-		} else if gcFlags.dryRun {
-			fmt.Fprintf(os.Stderr, "\n%d orphan(s) found. Run without --dry-run to destroy.\n", totalOrphans)
-		} else {
-			fmt.Fprintf(os.Stderr, "\n%d orphan(s) found, %d destroyed.\n", totalOrphans, totalDestroyed)
+			return nil
 		}
 
+		if gcFlags.dryRun {
+			fmt.Fprintf(os.Stderr, "\n%d orphan(s) found. Run without --dry-run to destroy.\n", len(orphans))
+			return nil
+		}
+
+		if !gcFlags.force && !confirmDestroy(len(orphans)) {
+			fmt.Fprintln(os.Stderr, "Aborted; nothing destroyed.")
+			return nil
+		}
+
+		totalDestroyed := 0
+		for _, o := range orphans {
+			if err := o.adapter.DestroyResource(ctx, o.res.ResourceID); err != nil {
+				red.Fprintf(os.Stderr, "  destroy %s failed: %v\n", o.res.ResourceID, err)
+			} else {
+				green.Fprintf(os.Stderr, "  destroyed %s\n", o.res.ResourceID)
+				totalDestroyed++
+			}
+		}
+
+		fmt.Fprintf(os.Stderr, "\n%d orphan(s) found, %d destroyed.\n", len(orphans), totalDestroyed)
 		return nil
 	},
 }
 
+// confirmDestroy prompts once on stdin before gc destroys orphans. Returns
+// true only on an explicit y/yes; an empty line, EOF, or anything else aborts.
+func confirmDestroy(n int) bool {
+	fmt.Fprintf(os.Stderr, "Destroy %d orphan(s)? [y/N] ", n)
+	reader := bufio.NewReader(os.Stdin)
+	input, err := reader.ReadString('\n')
+	if err != nil && input == "" {
+		return false
+	}
+	input = strings.TrimSpace(strings.ToLower(input))
+	return input == "y" || input == "yes"
+}
+
 func init() {
 	gcCmd.Flags().BoolVar(&gcFlags.dryRun, "dry-run", false, "list orphans without destroying them")
+	gcCmd.Flags().BoolVarP(&gcFlags.force, "yes", "y", false, "skip confirmation prompt")
 	rootCmd.AddCommand(gcCmd)
 }
+
+// durableAdaptersFn is the seam gc uses to discover durable adapters; tests
+// override it to inject fakes.
+var durableAdaptersFn = durableAdapters
 
 // durableAdapters returns cloud VM adapters whose CLIs are actually installed.
 func durableAdapters() []adapter.DurableAdapter {

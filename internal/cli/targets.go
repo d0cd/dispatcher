@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/fatih/color"
@@ -81,6 +82,17 @@ var targetsAddCmd = &cobra.Command{
 			Kind:         kind,
 			Enabled:      addFlags.enabled,
 			Capabilities: defaultCapabilitiesForKind(kind),
+		}
+
+		if kind == types.TargetKindSSH {
+			if addFlags.host == "" {
+				return fmt.Errorf("ssh target requires --host")
+			}
+			t.SSH = &types.SSHTargetConfig{
+				Host: addFlags.host,
+				User: addFlags.user,
+				Port: addFlags.port,
+			}
 		}
 
 		path, err := target.SaveTarget(t)
@@ -170,7 +182,7 @@ func runDoctorChecks(t types.TargetConfig) []doctorCheck {
 	case types.TargetKindLocalVM:
 		checks = append(checks, checkLima(ctx)...)
 	case types.TargetKindSSH:
-		checks = append(checks, doctorCheck{"SSH connectivity", "skip", "requires host configuration"})
+		checks = append(checks, checkSSH(ctx, t))
 	case types.TargetKindKubernetes:
 		checks = append(checks, checkKubernetes(ctx)...)
 	default:
@@ -222,6 +234,38 @@ func checkDocker(ctx context.Context) []doctorCheck {
 	}
 
 	return checks
+}
+
+// checkSSH probes connectivity to a configured SSH target. With no host it
+// stays a skip; with a host it runs a real non-interactive `ssh ... true`.
+func checkSSH(ctx context.Context, t types.TargetConfig) doctorCheck {
+	if t.SSH == nil || t.SSH.Host == "" {
+		return doctorCheck{"SSH connectivity", "skip", "requires host configuration"}
+	}
+
+	port := t.SSH.Port
+	if port == 0 {
+		port = 22
+	}
+	dest := t.SSH.Host
+	if t.SSH.User != "" {
+		dest = t.SSH.User + "@" + t.SSH.Host
+	}
+
+	args := []string{
+		"-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=5",
+		"-o", "StrictHostKeyChecking=accept-new",
+	}
+	if t.SSH.KeyFile != "" {
+		args = append(args, "-i", t.SSH.KeyFile)
+	}
+	args = append(args, "-p", strconv.Itoa(port), dest, "true")
+
+	if err := exec.CommandContext(ctx, "ssh", args...).Run(); err != nil {
+		return doctorCheck{"SSH connectivity", "fail", fmt.Sprintf("cannot reach %s: %v", dest, err)}
+	}
+	return doctorCheck{"SSH connectivity", "pass", "reachable at " + dest}
 }
 
 func checkKubernetes(ctx context.Context) []doctorCheck {

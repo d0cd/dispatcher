@@ -130,10 +130,11 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	vmName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
 
 	opts := VMOptions{
-		Name:       vmName,
-		Region:     a.config.Region,
-		SSHKeyPath: keyPath + ".pub",
-		UserData:   userData,
+		Name:         vmName,
+		Region:       a.config.Region,
+		SSHKeyPath:   keyPath + ".pub",
+		UserData:     userData,
+		AllowSSHFrom: p.Constraints.AllowSSHFrom,
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",

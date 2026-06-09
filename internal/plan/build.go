@@ -53,11 +53,16 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 				constraints.WatchdogTTL = d
 			}
 		}
+		if !constraints.RetryTransientFailures && cfg.RetryTransientFailures != nil {
+			constraints.RetryTransientFailures = *cfg.RetryTransientFailures
+		}
 	}
 
 	// Apply GPU override from constraints
 	if constraints.RequireGPU != "" {
-		applyGPUOverride(&spec, constraints.RequireGPU)
+		if err := applyGPUOverride(&spec, constraints.RequireGPU); err != nil {
+			return nil, err
+		}
 	}
 
 	// Load targets (builtins + user config)
@@ -323,20 +328,24 @@ func generatePlanID() string {
 
 // applyGPUOverride parses a GPU spec like "1", "h100:1", or "a100:2" and
 // overrides the workload's GPU requirements.
-func applyGPUOverride(spec *types.WorkloadSpec, gpu string) {
+func applyGPUOverride(spec *types.WorkloadSpec, gpu string) error {
 	count := 1
 	model := ""
 
 	parts := strings.SplitN(gpu, ":", 2)
 	if len(parts) == 2 {
 		model = parts[0]
-		if n, err := strconv.Atoi(parts[1]); err == nil && n > 0 {
-			count = n
+		n, err := strconv.Atoi(parts[1])
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid --gpu value %q: count must be a positive integer", gpu)
 		}
+		count = n
 	} else {
-		if n, err := strconv.Atoi(gpu); err == nil && n > 0 {
-			count = n
+		n, err := strconv.Atoi(gpu)
+		if err != nil || n <= 0 {
+			return fmt.Errorf("invalid --gpu value %q: count must be a positive integer", gpu)
 		}
+		count = n
 	}
 
 	spec.Requirements.GPU = types.GPURequirement{
@@ -347,4 +356,5 @@ func applyGPUOverride(spec *types.WorkloadSpec, gpu string) {
 	if spec.DetectedKind != types.WorkloadKindGPUJob {
 		spec.DetectedKind = types.WorkloadKindGPUJob
 	}
+	return nil
 }

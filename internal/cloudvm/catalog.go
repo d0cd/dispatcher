@@ -37,10 +37,15 @@ func NewCatalog() *Catalog {
 func (c *Catalog) FindCheapest(req InstanceRequirements) []InstanceType {
 	var matches []InstanceType
 	for _, inst := range c.instances {
-		if inst.VCPUs < req.MinVCPUs {
+		// Some live price feeds (e.g. Azure's Retail Prices API) return a
+		// price with no per-SKU specs. Skip the vCPU/memory filters when the
+		// spec is unknown rather than rejecting the row — otherwise every
+		// spec-less instance is silently discarded and the stale rate card is
+		// used while we claim to be pricing live.
+		if inst.VCPUs > 0 && inst.VCPUs < req.MinVCPUs {
 			continue
 		}
-		if inst.MemoryGB < req.MinMemoryGB {
+		if inst.MemoryGB > 0 && inst.MemoryGB < req.MinMemoryGB {
 			continue
 		}
 		if req.GPUCount > 0 && inst.GPUCount < req.GPUCount {

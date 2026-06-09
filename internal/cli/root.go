@@ -1,7 +1,13 @@
 package cli
 
 import (
+	"encoding/json"
+	"os"
+
+	"github.com/fatih/color"
 	"github.com/spf13/cobra"
+
+	"github.com/d0cd/dispatcher/internal/adapter"
 )
 
 // Version is the dispatcher release tag. Overridden at build time via -ldflags
@@ -25,11 +31,32 @@ func (e *ExitError) Error() string {
 
 func (e *ExitError) Unwrap() error { return e.Err }
 
+var rootFlags struct {
+	noColor  bool
+	stateDir string
+	json     bool
+	output   string
+}
+
 var rootCmd = &cobra.Command{
 	Use:     "dispatcher",
 	Short:   "AI-assisted workload planner and runner",
-	Long:    "Dispatcher plans, prices, and runs workloads across configured execution targets.",
+	Long:    "Dispatcher plans, prices, and runs workloads across configured execution targets.\n\nRespects NO_COLOR and $DISPATCHER_HOME; --no-color and --state-dir override them.",
 	Version: Version,
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if rootFlags.noColor {
+			color.NoColor = true
+		}
+		if rootFlags.stateDir != "" {
+			os.Setenv("DISPATCHER_HOME", rootFlags.stateDir)
+		}
+		if rootFlags.json {
+			rootFlags.output = "json"
+		}
+		// Reap orphaned plaintext-secret tempfiles left by a crashed run.
+		_ = adapter.SweepStaleEnvFiles()
+		return nil
+	},
 }
 
 func Execute() error {
@@ -37,7 +64,23 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
+// emitJSON writes v as indented JSON to stdout. Used by commands in --json
+// mode to emit their existing structured domain value.
+func emitJSON(v any) error {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(v)
+}
+
+func jsonOutput() bool { return rootFlags.output == "json" }
+
 func init() {
+	rootCmd.PersistentFlags().BoolVar(&rootFlags.noColor, "no-color", false, "disable colored output")
+	rootCmd.PersistentFlags().StringVar(&rootFlags.stateDir, "state-dir", "",
+		"override state directory (default: $DISPATCHER_HOME or ~/.dispatcher)")
+	rootCmd.PersistentFlags().StringVar(&rootFlags.output, "output", "text", "output format: text, json")
+	rootCmd.PersistentFlags().BoolVar(&rootFlags.json, "json", false, "shorthand for --output json")
+
 	rootCmd.AddCommand(planCmd)
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(targetsCmd)

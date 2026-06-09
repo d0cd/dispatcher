@@ -39,6 +39,17 @@ func TestLoadConfig_NotFound(t *testing.T) {
 	assert.Nil(t, cfg)
 }
 
+func TestLoadConfig_RetryTransientFailures(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: my-app\nretryTransientFailures: true\n")
+
+	cfg, err := LoadConfig(dir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.NotNil(t, cfg.RetryTransientFailures)
+	assert.True(t, *cfg.RetryTransientFailures)
+}
+
 func TestLoadConfig_YmlExtension(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "dispatcher.yml", "name: yml-app\n")

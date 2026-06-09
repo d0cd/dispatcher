@@ -2,6 +2,7 @@ package run
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -149,7 +150,10 @@ func LoadRecord(id string) (*RunRecord, error) {
 	path := filepath.Join(dir, id+".json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("run %q not found: %w", id, err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("run %q not found — run `dispatcher list` to see available runs", id)
+		}
+		return nil, fmt.Errorf("cannot read run %q: %w", id, err)
 	}
 
 	var record RunRecord

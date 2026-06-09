@@ -34,6 +34,10 @@ type DispatcherConfig struct {
 	// shrink your worst-case bill if dispatcher dies; higher values give you
 	// more grace to reconnect.
 	WatchdogTTL string `yaml:"watchdogTtl,omitempty"`
+	// RetryTransientFailures, when set, retries workload execution once after a
+	// transient failure. Pointer so an unset value is distinguishable from
+	// false, letting the CLI flag take precedence during merge.
+	RetryTransientFailures *bool `yaml:"retryTransientFailures,omitempty"`
 }
 
 // DispatchGPUConfig describes GPU requirements in dispatcher.yaml.

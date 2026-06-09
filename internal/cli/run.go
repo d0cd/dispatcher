@@ -28,6 +28,7 @@ var runFlags struct {
 	yes            bool
 	retryTransient bool
 	watchdogTTL    string
+	allowSSHFrom   string
 }
 
 var runCmd = &cobra.Command{
@@ -49,7 +50,22 @@ func init() {
 		"retry once on environmental failures (OOM kill, SIGKILL, SIGTERM); does NOT retry workload bugs")
 	runCmd.Flags().StringVar(&runFlags.watchdogTTL, "watchdog-ttl", "",
 		"cloud VM self-destruct timer if dispatcher dies (e.g. 15m, 2h); default 30m")
+	runCmd.Flags().StringVar(&runFlags.allowSSHFrom, "allow-ssh-from", "",
+		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); Hetzner/GCP only")
 	rootCmd.AddCommand(runCmd)
+}
+
+// parseOptimize maps the --optimize flag value to an OptimizeGoal, rejecting
+// typos instead of silently downgrading to cost.
+func parseOptimize(s string) (types.OptimizeGoal, error) {
+	switch s {
+	case "cost":
+		return types.OptimizeCost, nil
+	case "speed":
+		return types.OptimizeSpeed, nil
+	default:
+		return "", fmt.Errorf("invalid --optimize %q: must be \"cost\" or \"speed\"", s)
+	}
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
@@ -70,9 +86,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("path must be a directory; %s is a file", path)
 	}
 
-	optimizeFor := types.OptimizeCost
-	if runFlags.optimize == "speed" {
-		optimizeFor = types.OptimizeSpeed
+	optimizeFor, err := parseOptimize(runFlags.optimize)
+	if err != nil {
+		return err
 	}
 
 	var maxDuration time.Duration
@@ -102,6 +118,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		TargetName:             runFlags.target,
 		WatchdogTTL:            watchdogTTL,
 		RetryTransientFailures: runFlags.retryTransient,
+		AllowSSHFrom:           runFlags.allowSSHFrom,
 	}
 
 	// Generate plan
@@ -326,19 +343,17 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 	}
 
 	if t.Kind == types.TargetKindSSH {
-		cfg := adapter.SSHConfig{Host: "localhost", User: "root", Port: 22}
-		if t.SSH != nil {
-			if t.SSH.Host != "" {
-				cfg.Host = t.SSH.Host
-			}
-			if t.SSH.User != "" {
-				cfg.User = t.SSH.User
-			}
-			if t.SSH.Port > 0 {
-				cfg.Port = t.SSH.Port
-			}
-			cfg.KeyFile = t.SSH.KeyFile
+		if t.SSH == nil || t.SSH.Host == "" {
+			return nil, fmt.Errorf("ssh target %q has no host configured; set ssh.host in its target YAML or recreate with dispatcher targets add %s --host ...", targetID, targetID)
 		}
+		cfg := adapter.SSHConfig{Host: t.SSH.Host, User: "root", Port: 22}
+		if t.SSH.User != "" {
+			cfg.User = t.SSH.User
+		}
+		if t.SSH.Port > 0 {
+			cfg.Port = t.SSH.Port
+		}
+		cfg.KeyFile = t.SSH.KeyFile
 		return adapter.NewSSHAdapter(cfg), nil
 	}
 

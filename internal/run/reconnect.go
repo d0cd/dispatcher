@@ -74,11 +74,14 @@ func RunFromRecord(rec *RunRecord) *Run {
 		FinishedAt:    rec.FinishedAt,
 		Error:         rec.Error,
 		Cost:          rec.Cost,
+		Failure:       rec.Failure,
+		RetryCount:    rec.RetryCount,
 		HandleID:      rec.HandleID,
 		HandleState:   json.RawMessage(rec.HandleState),
 		Lifecycle:     rec.Lifecycle,
 		WatchdogTTL:   rec.WatchdogTTL,
 		LastHeartbeat: rec.LastHeartbeat,
 		LogFile:       rec.LogFile,
+		Approval:      rec.Approval,
 	}
 }

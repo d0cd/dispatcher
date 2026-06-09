@@ -55,6 +55,12 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if instanceType == "" {
 		instanceType = "t3.micro"
 	}
+	if err := validateVMArgs(region, instanceType, image); err != nil {
+		return nil, fmt.Errorf("aws: %w", err)
+	}
+	if opts.AllowSSHFrom != "" {
+		return nil, errFirewallUnsupported("aws")
+	}
 
 	// Build tag specifications. AWS uses commas to separate tag KV pairs
 	// inside the --tag-specifications value, so a label value with a comma
@@ -91,10 +97,17 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		args = append(args, "--user-data", "file://"+f)
 	}
 
-	cmd := exec.CommandContext(ctx, "aws", args...)
-	output, err := cmd.Output()
+	var output []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		var runErr error
+		output, runErr = exec.CommandContext(ctx, "aws", args...).Output()
+		if runErr != nil {
+			return wrapExecError("aws ec2 run-instances", runErr)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, wrapExecError("aws ec2 run-instances", err)
+		return nil, err
 	}
 
 	var result struct {

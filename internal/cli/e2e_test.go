@@ -346,7 +346,7 @@ func TestE2E_ExplainAfterPlan(t *testing.T) {
 func TestE2E_TargetsAddAndList(t *testing.T) {
 	setupE2E(t)
 
-	_, _, err := executeCommand("targets", "add", "test-box", "--kind", "ssh")
+	_, _, err := executeCommand("targets", "add", "test-box", "--kind", "ssh", "--host", "example.com")
 	require.NoError(t, err)
 
 	_, _, err = executeCommand("targets", "list")

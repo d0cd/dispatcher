@@ -34,13 +34,23 @@ func (e *Executor) SetApprovalFunc(fn ApprovalFunc) {
 	e.approvalFn = fn
 }
 
+// saveRun persists the run, logging a warning if the write fails. Used at
+// call sites that cannot propagate the error (deferred cleanup, panic
+// recovery, post-detach heartbeat) so a failed persist is surfaced rather
+// than silently dropped.
+func saveRun(r *Run) {
+	if _, err := r.Save(); err != nil {
+		dlog.L().Warn("run.save.failed", "run", r.ID, "err", err.Error())
+	}
+}
+
 // Execute runs the full lifecycle with guaranteed cleanup and panic recovery.
 func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) error {
 	defer func() {
 		if rec := recover(); rec != nil {
 			r.SetError(types.RunStateExecutionFailed,
 				fmt.Errorf("executor panic: %v", rec))
-			r.Save()
+			saveRun(r)
 			e.attemptCleanup(context.Background(), r)
 		}
 	}()
@@ -124,7 +134,7 @@ func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) err
 
 	// Determine lifecycle
 	r.Lifecycle = LifecycleForWorkload(r.Plan.Workload.DetectedKind)
-	r.Save()
+	saveRun(r)
 
 	// For long-running workloads on durable adapters, detach and return.
 	if r.Lifecycle == LifecycleLongRunning {
@@ -147,7 +157,7 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	defer func() {
 		if !cleanupDone {
 			e.attemptCleanup(context.Background(), r)
-			r.Save()
+			saveRun(r)
 		}
 	}()
 
@@ -245,7 +255,7 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 
 	// Explicit cleanup path (prevents the deferred cleanup from firing twice)
 	e.attemptCleanup(context.Background(), r)
-	r.Save()
+	saveRun(r)
 	cleanupDone = true
 
 	if r.GetState() == types.RunStateCleanupFailed {
@@ -270,7 +280,7 @@ func (e *Executor) startLongRunning(ctx context.Context, r *Run, logWriter io.Wr
 		}
 	}
 	r.LastHeartbeat = time.Now().UTC()
-	r.Save()
+	saveRun(r)
 
 	if logWriter != nil {
 		fmt.Fprintf(logWriter, "[dispatcher] Workload running on %s.\n", r.TargetID)
@@ -347,7 +357,7 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter
 					"overshoot_usd", overshoot,
 					"confidence", string(live.Confidence))
 				if err := r.Transition(types.RunStateBudgetExceeded); err == nil {
-					r.Cost = live
+					r.setCost(live)
 					if termErr := e.adapter.Terminate(context.Background(), handle); termErr != nil {
 						dlog.L().Error("budget.terminate.failed",
 							"run", r.ID, "err", termErr.Error())

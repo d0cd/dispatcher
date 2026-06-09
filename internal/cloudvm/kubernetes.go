@@ -42,6 +42,17 @@ func (k *KubernetesProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMI
 		image = "ubuntu:24.04"
 	}
 
+	// The manifest is built by string interpolation, so every interpolated
+	// value must be validated at the boundary — an unvalidated image ref or
+	// tag containing a newline could inject arbitrary Pod spec (privileged,
+	// hostPath, hostNetwork) into the operator's cluster.
+	if !isSafeArg(image) {
+		return nil, fmt.Errorf("kubernetes image %q contains characters outside [a-zA-Z0-9_.:/@-] or is empty/flag-like", image)
+	}
+	if err := validateLabels(opts.Tags); err != nil {
+		return nil, fmt.Errorf("kubernetes labels: %w", err)
+	}
+
 	// Build a Job manifest
 	jobName := opts.Name
 	manifest := k.buildJobManifest(jobName, image, opts)

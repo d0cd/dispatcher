@@ -54,6 +54,12 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 	if image == "" {
 		image = "Canonical:ubuntu-24_04-lts:server:latest"
 	}
+	if err := validateVMArgs(location, instanceType, image); err != nil {
+		return nil, fmt.Errorf("azure: %w", err)
+	}
+	if opts.AllowSSHFrom != "" {
+		return nil, errFirewallUnsupported("azure")
+	}
 
 	args := []string{
 		"vm", "create",
@@ -94,10 +100,17 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		}
 	}
 
-	cmd := exec.CommandContext(ctx, "az", args...)
-	output, err := cmd.Output()
+	var output []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		var runErr error
+		output, runErr = exec.CommandContext(ctx, "az", args...).Output()
+		if runErr != nil {
+			return wrapExecError("az vm create", runErr)
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, wrapExecError("az vm create", err)
+		return nil, err
 	}
 
 	var result struct {

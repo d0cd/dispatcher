@@ -10,6 +10,11 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
+// strictHostKeyChecking pins ssh's StrictHostKeyChecking mode. `accept-new`
+// trusts a host's key on first contact (so legitimate first connections work)
+// but refuses if a known key later changes — matching internal/cli/recover.go.
+const strictHostKeyChecking = "StrictHostKeyChecking=accept-new"
+
 // SSHConfig holds connection details for an SSH target.
 type SSHConfig struct {
 	Host      string
@@ -89,11 +94,8 @@ func (s *SSHAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	// is an int and safe as-is.
 	dest := fmt.Sprintf("%s@%s:%s/", s.config.User, s.config.Host, s.config.RemoteDir)
 	rsyncArgs := []string{"-az", "--delete"}
-	if s.config.KeyFile != "" {
-		rsyncArgs = append(rsyncArgs, "-e",
-			fmt.Sprintf("ssh -i %s -p %d", ShellQuote(s.config.KeyFile), s.config.Port))
-	} else if s.config.Port != 22 {
-		rsyncArgs = append(rsyncArgs, "-e", fmt.Sprintf("ssh -p %d", s.config.Port))
+	if e := rsyncSSHCmd(s.config); e != "" {
+		rsyncArgs = append(rsyncArgs, "-e", e)
 	}
 	rsyncArgs = append(rsyncArgs, w.Source.Path+"/", dest)
 
@@ -124,13 +126,17 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 		// We construct two stdin scripts — outer for cd+build, inner for
 		// docker via heredoc — keeping all secret material off any argv.
 		image := ShellQuote("dispatcher-" + tag + ":latest")
+		envFileLines, err := DotEnvFileLines(w.Source.Path)
+		if err != nil {
+			return nil, err
+		}
 		commandLine = fmt.Sprintf(
 			"cd %s\n"+
 				"docker build -t %s .\n"+
 				"docker run --rm --env-file /dev/stdin %s <<DISPATCHER_ENV_EOF\n"+
 				"%s"+
 				"DISPATCHER_ENV_EOF\n",
-			dir, image, image, dotEnvKVLines(envExports),
+			dir, image, image, envFileLines,
 		)
 	} else if len(w.Command) > 0 {
 		commandLine = fmt.Sprintf("cd %s\n%sexec %s\n", dir, envExports, ShellQuoteArgs(w.Command))
@@ -161,39 +167,6 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 		TargetID: "ssh",
 		State:    &sshState{cmd: cmd},
 	}, nil
-}
-
-// dotEnvKVLines converts the "export K='V'\n..." form produced by
-// DotEnvExportScript into bare "K=V\n..." lines suitable for docker's
-// --env-file format (which expects no `export` keyword and no shell quoting).
-func dotEnvKVLines(exportScript string) string {
-	if exportScript == "" {
-		return ""
-	}
-	var out strings.Builder
-	for _, line := range strings.Split(exportScript, "\n") {
-		line = strings.TrimPrefix(line, "export ")
-		if line == "" {
-			continue
-		}
-		// Strip the single-quotes ShellQuote added: KEY='value' → KEY=value
-		if eq := strings.IndexByte(line, '='); eq > 0 {
-			key := line[:eq]
-			val := line[eq+1:]
-			val = strings.TrimPrefix(val, "'")
-			val = strings.TrimSuffix(val, "'")
-			// Re-escape any embedded "'\''" (ShellQuote's escape) → literal "'"
-			val = strings.ReplaceAll(val, `'\''`, "'")
-			out.WriteString(key)
-			out.WriteByte('=')
-			out.WriteString(val)
-			out.WriteByte('\n')
-			continue
-		}
-		out.WriteString(line)
-		out.WriteByte('\n')
-	}
-	return out.String()
 }
 
 func (s *SSHAdapter) Status(_ context.Context, h *RunHandle) (types.RunState, error) {
@@ -316,9 +289,24 @@ func (s *SSHAdapter) sshArgs(extraArgs ...string) []string {
 		args = append(args, "-i", s.config.KeyFile)
 	}
 	args = append(args, "-p", fmt.Sprintf("%d", s.config.Port))
+	args = append(args, "-o", strictHostKeyChecking)
 	args = append(args, fmt.Sprintf("%s@%s", s.config.User, s.config.Host))
 	args = append(args, extraArgs...)
 	return args
+}
+
+// rsyncSSHCmd builds the `ssh ...` command string for rsync's `-e` option.
+// KeyFile is ShellQuoted because rsync re-parses the value with shell-like
+// splitting; port is an int and safe as-is. Returns "" when neither a key
+// nor a non-default port needs to be specified.
+func rsyncSSHCmd(cfg SSHConfig) string {
+	if cfg.KeyFile != "" {
+		return fmt.Sprintf("ssh -o %s -i %s -p %d", strictHostKeyChecking, ShellQuote(cfg.KeyFile), cfg.Port)
+	}
+	if cfg.Port != 22 {
+		return fmt.Sprintf("ssh -o %s -p %d", strictHostKeyChecking, cfg.Port)
+	}
+	return ""
 }
 
 type sshState struct {

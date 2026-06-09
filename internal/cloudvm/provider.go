@@ -27,6 +27,9 @@ type VMOptions struct {
 	SSHKeyPath   string
 	UserData     string            // cloud-init script
 	Tags         map[string]string // must include dispatcher-run-id
+	// AllowSSHFrom, when a non-empty CIDR, requests a per-run firewall that
+	// permits inbound SSH only from that range. Empty = no firewall.
+	AllowSSHFrom string
 }
 
 // VMInfo describes a provisioned VM.

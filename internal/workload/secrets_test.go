@@ -39,6 +39,21 @@ PASSWORD=
 	assert.Contains(t, kinds, "password")
 }
 
+func TestDetectSecrets_NameIsFullIdentifier(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, ".env", "STRIPE_API_KEY=x\n")
+
+	refs := DetectSecrets(dir)
+	var found bool
+	for _, r := range refs {
+		if r.Kind == "api-key" {
+			assert.Equal(t, "STRIPE_API_KEY", r.Name)
+			found = true
+		}
+	}
+	assert.True(t, found, "expected an api-key ref")
+}
+
 func TestDetectSecrets_AWSCredentials(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, ".env", `

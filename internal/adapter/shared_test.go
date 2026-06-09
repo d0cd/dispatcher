@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,16 +78,26 @@ func TestDotEnvExportScript_FormatsAsBashExports(t *testing.T) {
 	assert.Contains(t, script, "WITH_SPACE='hello world'\n")
 }
 
-// TestDotEnvKVLines_StripsExportPrefixAndQuotes verifies the helper that
-// converts the bash-export form into docker --env-file form (used for SSH
-// remote docker runs). The two formats are subtly different — this test
-// pins the conversion behavior.
-func TestDotEnvKVLines_StripsExportPrefixAndQuotes(t *testing.T) {
-	in := "export API_KEY='hunter2'\nexport WITH_SPACE='hello world'\n"
-	out := dotEnvKVLines(in)
-	assert.Equal(t, "API_KEY=hunter2\nWITH_SPACE=hello world\n", out)
-}
+func TestSweepStaleEnvFiles_RemovesOnlyStaleEnvFiles(t *testing.T) {
+	tmp := os.TempDir()
 
-func TestDotEnvKVLines_EmptyInputReturnsEmpty(t *testing.T) {
-	assert.Empty(t, dotEnvKVLines(""))
+	stale := filepath.Join(tmp, "dispatcher-env-stale-test.env")
+	fresh := filepath.Join(tmp, "dispatcher-env-fresh-test.env")
+	unrelated := filepath.Join(tmp, "dispatcher-unrelated-test.txt")
+	for _, p := range []string{stale, fresh, unrelated} {
+		require.NoError(t, os.WriteFile(p, []byte("X=1\n"), 0o600))
+		defer os.Remove(p)
+	}
+
+	old := time.Now().Add(-2 * staleEnvFileThreshold)
+	require.NoError(t, os.Chtimes(stale, old, old))
+
+	require.NoError(t, SweepStaleEnvFiles())
+
+	_, err := os.Stat(stale)
+	assert.True(t, os.IsNotExist(err), "stale dispatcher-env file must be removed")
+	_, err = os.Stat(fresh)
+	assert.NoError(t, err, "fresh dispatcher-env file must remain")
+	_, err = os.Stat(unrelated)
+	assert.NoError(t, err, "unrelated file must remain")
 }

@@ -29,6 +29,14 @@ func L() *slog.Logger {
 	return logger
 }
 
+// SetOutput redirects the structured logger to w, primarily so tests can
+// assert on emitted records. It marks the lazy initializer done so a later
+// first L() call does not overwrite the redirection.
+func SetOutput(w io.Writer) {
+	once.Do(func() {})
+	logger = slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
 // maxLogBytes is the rotation threshold for dispatcher.log. When the file
 // exceeds this size at startup, it's renamed to dispatcher.log.1 (overwriting
 // any prior rotation) and a fresh file is opened. One generation of history
