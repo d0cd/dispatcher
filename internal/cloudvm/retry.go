@@ -67,7 +67,7 @@ func wrapExecError(label string, err error) error {
 }
 
 // IsTransient classifies HTTP/CLI errors that are safe to retry. Matches on
-// stringy markers (no provider-specific exception types) since dispatch
+// stringy markers (no provider-specific exception types) since dispatcher
 // shells out to cloud CLIs and parses their stderr.
 func IsTransient(err error) bool {
 	if err == nil {
