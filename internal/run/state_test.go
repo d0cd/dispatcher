@@ -20,6 +20,23 @@ func TestNoTerminalStateHasOutgoingTransitions(t *testing.T) {
 	}
 }
 
+// TestSetErrorNoOpWhenTerminal guards the cost-cap race: once the sampler has
+// set BudgetExceeded (terminal), a later SetError from the main goroutine must
+// not relabel it as execution-failed.
+func TestSetErrorNoOpWhenTerminal(t *testing.T) {
+	r := NewRun(testPlan())
+	require.NoError(t, r.Transition(types.RunStatePlanning))
+	require.NoError(t, r.Transition(types.RunStateValidated))
+	require.NoError(t, r.Transition(types.RunStatePreparing))
+	require.NoError(t, r.Transition(types.RunStateRunning))
+	require.NoError(t, r.Transition(types.RunStateBudgetExceeded))
+
+	r.SetError(types.RunStateExecutionFailed, assert.AnError)
+
+	assert.Equal(t, types.RunStateBudgetExceeded, r.GetState())
+	assert.Empty(t, r.Error)
+}
+
 func testPlan() *types.Plan {
 	return &types.Plan{
 		APIVersion: "dispatcher.dev/v1",

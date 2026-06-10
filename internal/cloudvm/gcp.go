@@ -94,19 +94,13 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		args = append(args, "--labels", strings.Join(pairs, ","))
 	}
 
-	// Per-run firewall: a network-level INGRESS rule scoped to opts.AllowSSHFrom
-	// and a matching target tag on the instance. The rule is created before the
-	// instance so SSH is restricted from boot; the instance carries the tag.
-	fwName := ""
+	// A per-run firewall is not yet implementable correctly on GCP: instances
+	// land on the project's default network, whose built-in default-allow-ssh
+	// rule permits tcp:22 from 0.0.0.0/0, and an additive ALLOW rule cannot
+	// subtract that access. Rejecting (rather than attaching a no-op rule that
+	// implies SSH is locked down) avoids false confidence.
 	if opts.AllowSSHFrom != "" {
-		if err := validateFirewallCIDR(opts.AllowSSHFrom); err != nil {
-			return nil, err
-		}
-		fwName = firewallNameFromString(opts.Name)
-		if out, e := exec.CommandContext(ctx, "gcloud", gcpFirewallCreateArgs(fwName, opts.AllowSSHFrom, g.project)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already exists") {
-			return nil, fmt.Errorf("gcloud firewall-rules create: %s: %w", string(out), e)
-		}
-		args = append(args, "--tags", fwName)
+		return nil, errFirewallUnsupported("gcp")
 	}
 
 	var output []byte
@@ -119,9 +113,6 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		return nil
 	})
 	if err != nil {
-		if fwName != "" {
-			_ = exec.CommandContext(context.Background(), "gcloud", g.firewallDeleteArgs(fwName)...).Run()
-		}
 		return nil, err
 	}
 
@@ -205,19 +196,7 @@ func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("gcloud compute instances delete failed: %w", err)
 	}
-	// Best-effort: delete the per-run firewall rule. It only exists when
-	// --allow-ssh-from was set; its name is derived from the instance name.
-	_ = exec.CommandContext(ctx, "gcloud", g.firewallDeleteArgs(firewallNameFromString(vmID))...).Run()
 	return nil
-}
-
-// firewallDeleteArgs builds `gcloud compute firewall-rules delete <name>`.
-func (g *GCPProvider) firewallDeleteArgs(name string) []string {
-	args := []string{"compute", "firewall-rules", "delete", name, "--quiet"}
-	if g.project != "" {
-		args = append(args, "--project", g.project)
-	}
-	return args
 }
 
 func (g *GCPProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {

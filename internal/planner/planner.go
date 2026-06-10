@@ -300,13 +300,43 @@ func mergeStructuredOutput(res *PlanResult, content string) {
 	if parsed.Explanation != "" {
 		res.Explanation = parsed.Explanation
 	}
-	res.Recommendation = parsed.Recommendation
-	res.Alternatives = parsed.Alternatives
-	res.Rejected = parsed.Rejected
-	res.Risks = parsed.Risks
-	res.Approvals = parsed.Approvals
-	res.Suggestions = parsed.Suggestions
-	for _, name := range parsed.ToolsUsed {
-		res.ToolsUsed = append(res.ToolsUsed, StripMCPPrefix(name))
+	// Only overwrite fields the structured message actually populated, so a
+	// partial JSON payload can't blank out values gathered during the run.
+	if parsed.Recommendation != nil {
+		res.Recommendation = parsed.Recommendation
 	}
+	if len(parsed.Alternatives) > 0 {
+		res.Alternatives = parsed.Alternatives
+	}
+	if len(parsed.Rejected) > 0 {
+		res.Rejected = parsed.Rejected
+	}
+	if len(parsed.Risks) > 0 {
+		res.Risks = parsed.Risks
+	}
+	if len(parsed.Approvals) > 0 {
+		res.Approvals = parsed.Approvals
+	}
+	if len(parsed.Suggestions) > 0 {
+		res.Suggestions = parsed.Suggestions
+	}
+	res.ToolsUsed = appendToolsUsed(res.ToolsUsed, parsed.ToolsUsed)
+}
+
+// appendToolsUsed merges tool names (each stripped of its MCP prefix) into
+// existing, skipping any already present. ToolsUsed is often pre-populated
+// during the agent loop, so a naive append would duplicate names the
+// structured output repeats.
+func appendToolsUsed(existing, names []string) []string {
+	seen := make(map[string]bool, len(existing))
+	for _, n := range existing {
+		seen[n] = true
+	}
+	for _, name := range names {
+		if n := StripMCPPrefix(name); !seen[n] {
+			seen[n] = true
+			existing = append(existing, n)
+		}
+	}
+	return existing
 }

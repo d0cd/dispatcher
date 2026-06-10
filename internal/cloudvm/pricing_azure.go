@@ -129,7 +129,11 @@ type azureRetailItem struct {
 // size filters rather than discarding the row. Items we can't map cleanly are
 // dropped.
 func azureItemToInstance(item azureRetailItem) (InstanceType, bool) {
-	if item.ArmSkuName == "" || item.RetailPrice <= 0 {
+	// Reject implausible prices for the same reason AWS does: a poisoned or
+	// hijacked pricing response with a near-zero rate would steer the planner
+	// (which sorts ascending and gates on the estimate) onto a runaway-cost
+	// target. See isPlausibleHourlyPrice.
+	if item.ArmSkuName == "" || !isPlausibleHourlyPrice(item.RetailPrice) {
 		return InstanceType{}, false
 	}
 	// Skip low-priority/spot meters and Windows VMs (we only run Linux workloads).

@@ -17,9 +17,9 @@ func TestLogger_EmitsStructuredJSON(t *testing.T) {
 
 	// Force L() into a known state, then override.
 	_ = L()
-	old := logger
-	defer func() { logger = old }()
-	logger = test
+	old := logger.Load()
+	defer logger.Store(old)
+	logger.Store(test)
 
 	L().Info("run.transition", "run", "run_abc", "from", "preparing", "to", "running")
 

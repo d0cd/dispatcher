@@ -48,13 +48,17 @@ func runStatusByID(id string) error {
 				if liveState != record.State {
 					record.State = liveState
 					if liveState.IsTerminal() {
-						msg := "state refreshed via live status check"
-						if fr, ok := a.(adapter.FailureReporter); ok {
-							if fd := fr.FailureDetails(r.Handle); fd.Message != "" {
-								msg = fd.Message
+						if liveState.IsFailure() {
+							msg := "state refreshed via live status check"
+							if fr, ok := a.(adapter.FailureReporter); ok {
+								if fd := fr.FailureDetails(r.Handle); fd.Message != "" {
+									msg = fd.Message
+								}
 							}
+							r.SetError(liveState, errors.New(msg))
+						} else {
+							r.MarkTerminal(liveState)
 						}
-						r.SetError(liveState, errors.New(msg))
 						if _, err := r.Save(); err != nil {
 							dlog.L().Warn("status.refresh_save_failed", "run", id, "err", err.Error())
 						}

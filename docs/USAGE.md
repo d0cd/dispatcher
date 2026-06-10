@@ -34,10 +34,10 @@ dispatcher stop <run-id>       # Stop and clean up
 
 | Command | Purpose |
 |---|---|
-| `init [path]` | Scaffold `dispatcher.yaml` from workload inspection. |
-| `plan <path> [--ai]` | Generate execution plan with cost / risk analysis. `--ai` uses the LLM-driven planner. |
+| `init [path] [--force]` | Scaffold `dispatcher.yaml` from workload inspection. `--force`/`-f` overwrites an existing file. |
+| `plan <path>` | Generate execution plan with cost / risk analysis. Flags: `--ai` (LLM-driven planner), `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--gpu <spec>`. |
 | `audit <path>` | Pre-run risk audit: cost surprises, missing secrets, missing Dockerfile, no-feasible-target. |
-| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; Hetzner/GCP only — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
+| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; Hetzner only — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
 | `explain <plan-id>` | Verbose recommendation for a saved plan. |
 
 ### Observability
@@ -157,12 +157,16 @@ When [aitelier](https://github.com/aitelier/aitelier) is reachable, `plan --ai`,
 
 ## Exit codes
 
+For `dispatcher run`:
+
 | Code | Meaning |
 |---|---|
 | 0 | Success. |
 | 1 | Setup / plan / cleanup failure (no feasible target, validation error, etc.). |
 | 2 | Approval denied. |
 | 3 | Workload-level failure (non-zero exit, OOM, budget exceeded). |
+
+`dispatcher audit` reuses codes 2 and 3 with audit-specific meanings (2 = blocked by a risk finding, 3 = AI produced non-conforming output); see `dispatcher audit --help`.
 
 ## Approval flow
 

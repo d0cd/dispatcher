@@ -134,13 +134,19 @@ func mergeDiagnoseStructured(res *DiagnoseResult, content string) {
 	if parsed.Explanation != "" {
 		res.Explanation = parsed.Explanation
 	}
-	res.LikelyCause = parsed.LikelyCause
-	res.Severity = parsed.Severity
-	res.Recommendation = parsed.Recommendation
-	res.NextSteps = parsed.NextSteps
-	for _, name := range parsed.ToolsUsed {
-		res.ToolsUsed = append(res.ToolsUsed, StripMCPPrefix(name))
+	if parsed.LikelyCause != "" {
+		res.LikelyCause = parsed.LikelyCause
 	}
+	if parsed.Severity != "" {
+		res.Severity = parsed.Severity
+	}
+	if parsed.Recommendation != "" {
+		res.Recommendation = parsed.Recommendation
+	}
+	if len(parsed.NextSteps) > 0 {
+		res.NextSteps = parsed.NextSteps
+	}
+	res.ToolsUsed = appendToolsUsed(res.ToolsUsed, parsed.ToolsUsed)
 }
 
 func deterministicExplanation(i RunInspection) string {

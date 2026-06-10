@@ -29,6 +29,27 @@ QUOTED='single-quoted'
 	assert.True(t, hasEmpty)
 }
 
+func TestLoadDotEnv_RejectsInjectionKey(t *testing.T) {
+	dir := t.TempDir()
+	// A key carrying shell metacharacters would become command injection once
+	// rendered into `export <key>=...` and piped to a remote shell.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"),
+		[]byte("FOO; touch /tmp/pwned =bar\n"), 0o644))
+
+	_, err := LoadDotEnv(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid key")
+}
+
+func TestIsValidEnvKey(t *testing.T) {
+	for _, ok := range []string{"FOO", "_X", "A1_B2", "lower_case"} {
+		assert.Truef(t, isValidEnvKey(ok), "%q should be valid", ok)
+	}
+	for _, bad := range []string{"", "1FOO", "FOO BAR", "FOO;BAR", "FOO-BAR", "FOO.BAR"} {
+		assert.Falsef(t, isValidEnvKey(bad), "%q should be rejected", bad)
+	}
+}
+
 func TestLoadDotEnv_MissingFileReturnsEmpty(t *testing.T) {
 	dir := t.TempDir()
 	got, err := LoadDotEnv(dir)

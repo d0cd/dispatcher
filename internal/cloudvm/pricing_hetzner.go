@@ -66,7 +66,7 @@ func parseHetznerServerTypes(raw []byte, location string) ([]InstanceType, error
 			continue
 		}
 		price, ok := cheapestHetznerPrice(t.Prices, location)
-		if !ok {
+		if !ok || !isPlausibleHourlyPrice(price) {
 			continue
 		}
 		instances = append(instances, InstanceType{

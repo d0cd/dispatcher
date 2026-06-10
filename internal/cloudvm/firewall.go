@@ -75,21 +75,3 @@ func hetznerFirewallRuleArgs(name, cidr string) []string {
 		"--source-ips", cidr,
 	}
 }
-
-// gcpFirewallCreateArgs builds `gcloud compute firewall-rules create` for a
-// network-level INGRESS rule scoped to cidr and the per-run target tag.
-func gcpFirewallCreateArgs(name, cidr, project string) []string {
-	args := []string{
-		"compute", "firewall-rules", "create", name,
-		"--direction", "INGRESS",
-		"--action", "ALLOW",
-		"--rules", "tcp:" + sshPort,
-		"--source-ranges", cidr,
-		"--target-tags", name,
-		"--quiet",
-	}
-	if project != "" {
-		args = append(args, "--project", project)
-	}
-	return args
-}

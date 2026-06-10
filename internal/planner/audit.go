@@ -239,9 +239,7 @@ func mergeAuditStructured(res *AuditResult, content string) bool {
 	if len(parsed.Findings) > 0 {
 		res.Findings = parsed.Findings
 	}
-	for _, name := range parsed.ToolsUsed {
-		res.ToolsUsed = append(res.ToolsUsed, StripMCPPrefix(name))
-	}
+	res.ToolsUsed = appendToolsUsed(res.ToolsUsed, parsed.ToolsUsed)
 	return true
 }
 

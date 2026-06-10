@@ -9,13 +9,14 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 
 	"github.com/d0cd/dispatcher/internal/state"
 )
 
 var (
 	once   sync.Once
-	logger *slog.Logger
+	logger atomic.Pointer[slog.Logger]
 )
 
 // L returns the process-wide structured logger. The first call opens
@@ -24,17 +25,18 @@ var (
 // must never fail a real workload because logging broke.
 func L() *slog.Logger {
 	once.Do(func() {
-		logger = slog.New(slog.NewJSONHandler(openLogFile(), &slog.HandlerOptions{Level: slog.LevelInfo}))
+		logger.Store(slog.New(slog.NewJSONHandler(openLogFile(), &slog.HandlerOptions{Level: slog.LevelInfo})))
 	})
-	return logger
+	return logger.Load()
 }
 
 // SetOutput redirects the structured logger to w, primarily so tests can
 // assert on emitted records. It marks the lazy initializer done so a later
-// first L() call does not overwrite the redirection.
+// first L() call does not overwrite the redirection. The logger is stored
+// atomically so a concurrent L() reader never sees a torn pointer.
 func SetOutput(w io.Writer) {
 	once.Do(func() {})
-	logger = slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger.Store(slog.New(slog.NewJSONHandler(w, &slog.HandlerOptions{Level: slog.LevelInfo})))
 }
 
 // maxLogBytes is the rotation threshold for dispatcher.log. When the file

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"time"
@@ -36,7 +37,10 @@ var runCmd = &cobra.Command{
 	Short: "Plan and execute a workload (defaults to current directory)",
 	Long:  "Generates a plan for the workload at the given path, then executes it on the recommended target.\n\nIf path is omitted, the current directory is used.\n\nExit codes:\n  0  workload completed successfully\n  1  setup/plan/cleanup failure (no feasible target, validation error, cleanup error, anything before or after execution)\n  2  approval denied (a required policy gate was rejected)\n  3  workload-level failure (non-zero exit, OOM kill, budget exceeded)",
 	Args:  cobra.MaximumNArgs(1),
-	RunE:  runRun,
+	// runRun prints its own rich failure message and returns the error only to
+	// carry the exit code; silence cobra's duplicate "Error:" line.
+	SilenceErrors: true,
+	RunE:          runRun,
 }
 
 func init() {
@@ -51,7 +55,7 @@ func init() {
 	runCmd.Flags().StringVar(&runFlags.watchdogTTL, "watchdog-ttl", "",
 		"cloud VM self-destruct timer if dispatcher dies (e.g. 15m, 2h); default 30m")
 	runCmd.Flags().StringVar(&runFlags.allowSSHFrom, "allow-ssh-from", "",
-		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); Hetzner/GCP only")
+		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); Hetzner only")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -89,6 +93,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	optimizeFor, err := parseOptimize(runFlags.optimize)
 	if err != nil {
 		return err
+	}
+
+	if runFlags.allowSSHFrom != "" {
+		if _, _, err := net.ParseCIDR(runFlags.allowSSHFrom); err != nil {
+			return fmt.Errorf("invalid --allow-ssh-from %q: must be a CIDR like 203.0.113.4/32", runFlags.allowSSHFrom)
+		}
 	}
 
 	var maxDuration time.Duration
@@ -139,6 +149,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	if p.Recommendation == nil {
 		return fmt.Errorf("no recommendation in plan")
+	}
+
+	// Per-run firewall is only implemented for Hetzner; fail before creating a
+	// run/VM rather than deep inside provisioning.
+	if runFlags.allowSSHFrom != "" && p.Recommendation.Target != "hetzner-vm" {
+		return fmt.Errorf("--allow-ssh-from is only supported on hetzner-vm; recommended target is %s — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
 	}
 
 	// Show summary

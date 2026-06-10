@@ -33,6 +33,10 @@ func LoadDotEnv(dir string) (map[string]string, error) {
 				continue
 			}
 			key := strings.TrimSpace(line[:eq])
+			if !isValidEnvKey(key) {
+				f.Close()
+				return nil, fmt.Errorf("invalid key %q in %s: env var names must match [A-Za-z_][A-Za-z0-9_]*", key, path)
+			}
 			val := strings.TrimSpace(line[eq+1:])
 			val = strings.Trim(val, `"'`)
 			out[key] = val
@@ -44,4 +48,27 @@ func LoadDotEnv(dir string) (map[string]string, error) {
 		}
 	}
 	return out, nil
+}
+
+// isValidEnvKey reports whether k is a POSIX environment variable name
+// (^[A-Za-z_][A-Za-z0-9_]*$). Keys are written verbatim into `export <key>=...`
+// scripts piped to a remote shell, so a key with shell metacharacters (e.g.
+// "FOO; rm -rf /") would be command injection — it must be rejected here, since
+// value-quoting cannot protect the left-hand side of an assignment.
+func isValidEnvKey(k string) bool {
+	if k == "" {
+		return false
+	}
+	for i, r := range k {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '_':
+		case r >= '0' && r <= '9':
+			if i == 0 {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
 }

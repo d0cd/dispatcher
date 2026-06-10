@@ -140,20 +140,11 @@ func TestHetznerFirewallArgs(t *testing.T) {
 	assert.Equal(t, "203.0.113.4/32", rule[len(rule)-1])
 }
 
-func TestGCPFirewallArgs(t *testing.T) {
-	args := gcpFirewallCreateArgs("fw1", "203.0.113.4/32", "proj")
-	joined := strings.Join(args, " ")
-	assert.Contains(t, joined, "--source-ranges 203.0.113.4/32")
-	assert.Contains(t, joined, "--target-tags fw1")
-	assert.Contains(t, joined, "tcp:22")
-	assert.Contains(t, args, "proj")
-	// The rule is scoped to the operator CIDR, not wide-open by default.
-	assert.NotContains(t, joined, "0.0.0.0/0")
-}
-
-// TestFirewallUnsupportedProviders covers S7's no-silent-failure rule: AWS and
-// Azure reject a requested --allow-ssh-from (before any CLI call) rather than
-// provisioning a VM with the firewall silently ignored.
+// TestFirewallUnsupportedProviders covers the no-silent-failure rule: providers
+// without a working per-run firewall reject a requested --allow-ssh-from (before
+// any CLI call) rather than provisioning a VM with the firewall silently ignored
+// or a no-op rule that implies SSH is locked down. GCP is included because an
+// additive ALLOW rule cannot restrict the default network's default-allow-ssh.
 func TestFirewallUnsupportedProviders(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -161,6 +152,8 @@ func TestFirewallUnsupportedProviders(t *testing.T) {
 	}{
 		{"aws", NewAWSProvider("us-east-1")},
 		{"azure", NewAzureProvider("rg", "eastus")},
+		{"gcp", NewGCPProvider("proj", "us-central1-a")},
+		{"lima", NewLimaProvider()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -196,6 +189,14 @@ func TestKubernetesRejectsInjection(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "labels")
+
+	// The job name is also interpolated into the manifest and must be validated.
+	_, err = k.CreateVM(context.Background(), VMOptions{
+		Name:  "job1\n      hostNetwork: true",
+		Image: "ubuntu:24.04",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "job name")
 }
 
 // TestBuildJobManifestSafeImage confirms a clean image still produces a valid

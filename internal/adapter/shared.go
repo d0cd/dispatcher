@@ -14,12 +14,28 @@ import (
 	"github.com/d0cd/dispatcher/internal/workload"
 )
 
-// SanitizeName lowercases, replaces /._<space> with `-`, and caps at 40 chars.
+// SanitizeName lowercases and reduces a name to the strict charset [a-z0-9-],
+// trims leading/trailing dashes, and caps at 40 chars. The result is safe to
+// interpolate into VM names, container tags, Kubernetes object names, and cloud
+// CLI argv — any other character (including newlines and quotes) collapses to
+// `-` rather than surviving into a manifest or command. Falls back to
+// "workload" when nothing usable remains.
 func SanitizeName(name string) string {
-	r := strings.NewReplacer("/", "-", ".", "-", " ", "-", "_", "-")
-	s := strings.ToLower(r.Replace(name))
+	var b strings.Builder
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	s := strings.Trim(b.String(), "-")
 	if len(s) > 40 {
-		s = s[:40]
+		s = strings.Trim(s[:40], "-")
+	}
+	if s == "" {
+		s = "workload"
 	}
 	return s
 }

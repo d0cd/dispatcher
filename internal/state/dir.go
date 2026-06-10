@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 const dirName = ".dispatcher"
@@ -93,6 +94,13 @@ func ensureSecureDir(dir string) error {
 		return fmt.Errorf("%s exists but is not a directory", dir)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
+		// Refuse to chmod a directory we don't own. A pre-existing symlink in
+		// an attacker-writable parent could otherwise be aimed at a victim
+		// directory to have dispatcher tighten its permissions. Our own state
+		// dir (created here via MkdirAll) is always owned by the current user.
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+			return fmt.Errorf("%s is owned by uid %d, not the current user; refusing to chmod", dir, st.Uid)
+		}
 		if err := os.Chmod(dir, 0o700); err != nil {
 			return fmt.Errorf("%s has insecure perms %o and could not be chmodded: %w",
 				dir, info.Mode().Perm(), err)

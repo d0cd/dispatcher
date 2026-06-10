@@ -64,10 +64,9 @@ SSH access is gated by a **per-run ed25519 key with no password** and host-key p
 **Per-run firewall (opt-in).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to attach a least-privilege firewall that permits inbound SSH only from that range:
 
 - **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule and attaches it at create time; deleted on teardown.
-- **GCP** — creates a network-level INGRESS rule scoped to the CIDR plus a matching target tag on the instance; deleted on teardown.
-- **AWS / Azure** — not yet implemented; a non-empty `--allow-ssh-from` is **rejected** (no silent fallback). Restrict SSH at the account/VPC level (security group / NSG) instead.
+- **AWS / Azure / GCP** — not yet implemented; a non-empty `--allow-ssh-from` is **rejected** (no silent fallback). GCP in particular is rejected rather than approximated: instances land on the default network whose built-in `default-allow-ssh` rule permits tcp:22 from `0.0.0.0/0`, and an additive ALLOW rule cannot subtract that access — a per-run ALLOW rule would imply a restriction it does not enforce. Restrict SSH at the account/VPC level (security group / NSG / dedicated VPC) on those providers.
 
-The CIDR is validated (`net.ParseCIDR`) before use and passed as a standalone argv token. *Note: the Hetzner/GCP firewall create/attach/delete lifecycle is covered by argv-level unit tests but has not been smoke-tested against live cloud APIs.* When `--allow-ssh-from` is unset, no firewall is attached and provider defaults apply — operators remain responsible for account- or VPC-level firewalls, and for any non-SSH workload-bound ports.
+The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. `run` rejects `--allow-ssh-from` up front when the recommended target is not `hetzner-vm`. *Note: the Hetzner firewall create/attach/delete lifecycle is covered by argv-level unit tests but has not been smoke-tested against live cloud APIs.* When `--allow-ssh-from` is unset, no firewall is attached and provider defaults apply — operators remain responsible for account- or VPC-level firewalls, and for any non-SSH workload-bound ports.
 
 ## LLM trust boundary
 

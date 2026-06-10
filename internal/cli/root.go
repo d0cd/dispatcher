@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 
 	"github.com/fatih/color"
@@ -43,6 +44,9 @@ var rootCmd = &cobra.Command{
 	Short:   "AI-assisted workload planner and runner",
 	Long:    "Dispatcher plans, prices, and runs workloads across configured execution targets.\n\nRespects NO_COLOR and $DISPATCHER_HOME; --no-color and --state-dir override them.",
 	Version: Version,
+	// Runtime errors print their own actionable message; without this cobra
+	// also dumps the full usage block, burying it.
+	SilenceUsage: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		if rootFlags.noColor {
 			color.NoColor = true
@@ -52,6 +56,9 @@ var rootCmd = &cobra.Command{
 		}
 		if rootFlags.json {
 			rootFlags.output = "json"
+		}
+		if rootFlags.output != "text" && rootFlags.output != "json" {
+			return fmt.Errorf("invalid --output %q: must be \"text\" or \"json\"", rootFlags.output)
 		}
 		// Reap orphaned plaintext-secret tempfiles left by a crashed run.
 		_ = adapter.SweepStaleEnvFiles()

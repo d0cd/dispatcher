@@ -58,9 +58,6 @@ func runBill(cmd *cobra.Command, args []string) error {
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 	monthEnd := monthStart.AddDate(0, 1, 0)
 
-	bold.Fprintf(os.Stdout, "Dispatcher-tagged spend, %s – %s (UTC)\n\n",
-		monthStart.Format("2006-01-02"), now.Format("2006-01-02"))
-
 	results := []providerSpend{
 		awsSpend(ctx, monthStart, monthEnd),
 		azureSpend(ctx, monthStart, monthEnd),
@@ -89,17 +86,16 @@ func runBill(cmd *cobra.Command, args []string) error {
 		return emitJSON(rows)
 	}
 
+	bold.Fprintf(os.Stdout, "Dispatcher-tagged spend, %s – %s (UTC)\n\n",
+		monthStart.Format("2006-01-02"), now.Format("2006-01-02"))
+
 	for _, r := range results {
 		fmt.Fprintf(os.Stdout, "%-10s ", r.provider)
 		switch {
 		case r.amount >= 0:
-			// bill explicitly shows $0.00 rather than blank — "free this
-			// month" is a real, useful answer distinct from "unavailable".
-			disp := formatCost(r.amount)
-			if disp == "" {
-				disp = "$0.00"
-			}
-			green.Fprintf(os.Stdout, "%-8s %s", disp, r.currency)
+			// "free this month" is a real answer distinct from "unavailable";
+			// formatCost renders 0 as $0.00.
+			green.Fprintf(os.Stdout, "%-8s %s", formatCost(r.amount), r.currency)
 			if r.note != "" {
 				dim.Fprintf(os.Stdout, "  (%s)", r.note)
 			}

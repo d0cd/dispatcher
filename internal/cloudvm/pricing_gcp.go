@@ -389,7 +389,7 @@ func joinGCPSpecsAndPrices(specs []gcpMachineType, skus []gcpSKU, region string)
 		memGB := float64(s.MemoryMb) / 1024.0
 		gpuCount := gcpGPUCount(s.Name)
 		price := fp.cpu*float64(s.GuestCpus) + fp.ram*memGB + fp.gpu*float64(gpuCount)
-		if price <= 0 {
+		if !isPlausibleHourlyPrice(price) {
 			continue
 		}
 

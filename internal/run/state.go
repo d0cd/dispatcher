@@ -107,13 +107,35 @@ func (r *Run) Transition(to types.RunState) error {
 	return nil
 }
 
-// SetError records an error and transitions to a failure state.
+// SetError records an error and transitions to a failure state. It is a no-op
+// once the run is already terminal, so a late caller (e.g. the main goroutine
+// reacting to a workload exit) cannot relabel a state another path already
+// finalized — notably a budget-kill (BudgetExceeded) set by the cost sampler.
 func (r *Run) SetError(state types.RunState, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.State.IsTerminal() {
+		return
+	}
 	r.State = state
 	r.Error = err.Error()
 	r.FinishedAt = time.Now().UTC()
+}
+
+// MarkTerminal records a discovered terminal state (e.g. from a live status
+// refresh) without setting Error. Use SetError only for failure states; a
+// clean terminal state like Completed must not carry a spurious error string.
+// No-op if already terminal.
+func (r *Run) MarkTerminal(state types.RunState) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.State.IsTerminal() {
+		return
+	}
+	r.State = state
+	if r.FinishedAt.IsZero() {
+		r.FinishedAt = time.Now().UTC()
+	}
 }
 
 // GetState returns the current run state (thread-safe).

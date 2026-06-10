@@ -37,6 +37,9 @@ func (l *LimaProvider) CheckCLI(ctx context.Context) error {
 }
 
 func (l *LimaProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
+	if opts.AllowSSHFrom != "" {
+		return nil, errFirewallUnsupported("lima")
+	}
 	args := []string{
 		"create",
 		"--name", opts.Name,
