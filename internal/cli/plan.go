@@ -25,11 +25,12 @@ var planFlags struct {
 }
 
 var planCmd = &cobra.Command{
-	Use:   "plan [path]",
-	Short: "Generate an execution plan for a workload (defaults to current directory)",
-	Long:  "Inspects the workload at the given path, evaluates configured targets, and produces a structured plan with cost estimates, risks, and recommendations.\n\nIf path is omitted, the current directory is used.",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runPlan,
+	Use:         "plan [path]",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "Generate an execution plan for a workload (defaults to current directory)",
+	Long:        "Inspects the workload at the given path, evaluates configured targets, and produces a structured plan with cost estimates, risks, and recommendations.\n\nIf path is omitted, the current directory is used.",
+	Args:        cobra.MaximumNArgs(1),
+	RunE:        runPlan,
 }
 
 func init() {

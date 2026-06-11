@@ -387,6 +387,17 @@ func TestJSONOutput_Plan(t *testing.T) {
 	assert.NotEmpty(t, p.Metadata.ID)
 }
 
+// TestJSONUnsupportedCommandErrors covers the no-silent-failure rule: --json on
+// a command that doesn't emit JSON must error rather than print prose.
+func TestJSONUnsupportedCommandErrors(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	defer func() { rootFlags.output = "text"; rootFlags.json = false }()
+
+	_, _, err := executeCommand("history", "--json")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not supported")
+}
+
 // captureStdout redirects os.Stdout for the duration of fn and returns what
 // was written. emitJSON writes to os.Stdout directly, so the executeCommand
 // buffer doesn't see it.

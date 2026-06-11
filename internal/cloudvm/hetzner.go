@@ -127,15 +127,7 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 		args = append(args, "--firewall", fwName)
 	}
 
-	var output []byte
-	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
-		var runErr error
-		output, runErr = exec.CommandContext(ctx, "hcloud", args...).Output()
-		if runErr != nil {
-			return wrapExecError("hcloud server create", runErr)
-		}
-		return nil
-	})
+	output, err := retryCLIOutput(ctx, "hcloud", "hcloud server create", args...)
 	if err != nil {
 		// VM creation failed but we may have already uploaded the SSH key and
 		// created the firewall. Best-effort cleanup so we don't leak them.

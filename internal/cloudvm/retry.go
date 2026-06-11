@@ -56,6 +56,23 @@ func Retry(ctx context.Context, p RetryPolicy, classifier func(error) bool, op f
 	return err
 }
 
+// retryCLIOutput runs `bin args...`, capturing stdout, retrying transient
+// failures per DefaultRetry. label is used to wrap stderr so IsTransient can
+// classify on the CLI's actual complaint. Shared by every provider's CreateVM
+// so the retry/exec/error-wrap behavior stays identical across them.
+func retryCLIOutput(ctx context.Context, bin, label string, args ...string) ([]byte, error) {
+	var out []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		var runErr error
+		out, runErr = exec.CommandContext(ctx, bin, args...).Output()
+		if runErr != nil {
+			return wrapExecError(label, runErr)
+		}
+		return nil
+	})
+	return out, err
+}
+
 // wrapExecError appends stderr from an *exec.ExitError so the classifier can
 // see the cloud CLI's actual complaint, not just "exit status 1".
 func wrapExecError(label string, err error) error {

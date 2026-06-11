@@ -15,11 +15,12 @@ import (
 )
 
 var auditCmd = &cobra.Command{
-	Use:   "audit [path]",
-	Short: "Audit a workload for risks before running it (defaults to current directory)",
-	Long:  "Inspects the workload and surfaces concerns (cost, secrets, reliability, compliance) before execution. Uses the AI auditor when aitelier is available, otherwise a deterministic ruleset.\n\nIf path is omitted, the current directory is used.\n\nExit codes:\n  0  ready / concerns (no blockers)\n  2  blocked (one or more critical findings)\n  3  AI returned non-conforming output (re-run or use deterministic)",
-	Args:  cobra.MaximumNArgs(1),
-	RunE:  runAudit,
+	Use:         "audit [path]",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "Audit a workload for risks before running it (defaults to current directory)",
+	Long:        "Inspects the workload and surfaces concerns (cost, secrets, reliability, compliance) before execution. Uses the AI auditor when aitelier is available, otherwise a deterministic ruleset.\n\nIf path is omitted, the current directory is used.\n\nExit codes:\n  0  ready / concerns (no blockers)\n  2  blocked (one or more critical findings)\n  3  AI returned non-conforming output (re-run or use deterministic)",
+	Args:        cobra.MaximumNArgs(1),
+	RunE:        runAudit,
 }
 
 func init() {

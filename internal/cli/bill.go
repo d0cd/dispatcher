@@ -16,8 +16,9 @@ import (
 )
 
 var billCmd = &cobra.Command{
-	Use:   "bill",
-	Short: "Show dispatcher-tagged spend month-to-date across configured clouds",
+	Use:         "bill",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "Show dispatcher-tagged spend month-to-date across configured clouds",
 	Long: `Queries each cloud provider's billing API for resources tagged
 'dispatcher=true' in the current calendar month.
 

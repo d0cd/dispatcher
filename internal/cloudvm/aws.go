@@ -97,15 +97,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		args = append(args, "--user-data", "file://"+f)
 	}
 
-	var output []byte
-	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
-		var runErr error
-		output, runErr = exec.CommandContext(ctx, "aws", args...).Output()
-		if runErr != nil {
-			return wrapExecError("aws ec2 run-instances", runErr)
-		}
-		return nil
-	})
+	output, err := retryCLIOutput(ctx, "aws", "aws ec2 run-instances", args...)
 	if err != nil {
 		return nil, err
 	}

@@ -13,7 +13,6 @@ const (
 	ProviderAWS        ProviderID = "aws"
 	ProviderGCP        ProviderID = "gcp"
 	ProviderAzure      ProviderID = "azure"
-	ProviderMultipass  ProviderID = "multipass"
 	ProviderLima       ProviderID = "lima"
 	ProviderKubernetes ProviderID = "kubernetes"
 )

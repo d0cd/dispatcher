@@ -27,8 +27,9 @@ var listFlags struct {
 const staleThreshold = 6 * time.Hour
 
 var listCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all runs",
+	Use:         "list",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "List all runs",
 	Long: `Shows all saved runs with status, target, cost, and duration.
 
 By default, list reads only the persisted run records — fast, no network.

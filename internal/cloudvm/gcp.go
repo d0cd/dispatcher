@@ -103,15 +103,7 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		return nil, errFirewallUnsupported("gcp")
 	}
 
-	var output []byte
-	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
-		var runErr error
-		output, runErr = exec.CommandContext(ctx, "gcloud", args...).Output()
-		if runErr != nil {
-			return wrapExecError("gcloud compute instances create", runErr)
-		}
-		return nil
-	})
+	output, err := retryCLIOutput(ctx, "gcloud", "gcloud compute instances create", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -151,10 +143,41 @@ func (g *GCPProvider) WaitReady(ctx context.Context, _ string, ip string, _ stri
 	return WaitForSSH(ctx, ip, 5*time.Minute)
 }
 
+// resolveZone discovers the actual zone of an instance by name so GetVM and
+// DestroyVM act on a VM created in a non-default zone instead of assuming
+// g.zone (which would false-terminate its status and leak it on teardown).
+// Falls back to g.zone when discovery fails or the instance isn't found.
+func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
+	args := []string{
+		"compute", "instances", "list",
+		"--filter", "name=" + vmID,
+		"--format", "value(zone)",
+	}
+	if g.project != "" {
+		args = append(args, "--project", g.project)
+	}
+	out, err := exec.CommandContext(ctx, "gcloud", args...).Output()
+	if err != nil {
+		return g.zone
+	}
+	zone := strings.TrimSpace(string(out))
+	if i := strings.IndexByte(zone, '\n'); i >= 0 {
+		zone = zone[:i] // first match if a name somehow exists in two zones
+	}
+	// value(zone) may render as a full resource URL; keep the trailing segment.
+	if i := strings.LastIndexByte(zone, '/'); i >= 0 {
+		zone = zone[i+1:]
+	}
+	if zone == "" {
+		return g.zone
+	}
+	return zone
+}
+
 func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 	args := []string{
 		"compute", "instances", "describe", vmID,
-		"--zone", g.zone,
+		"--zone", g.resolveZone(ctx, vmID),
 		"--format", "json",
 	}
 	if g.project != "" {
@@ -186,7 +209,7 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
 	args := []string{
 		"compute", "instances", "delete", vmID,
-		"--zone", g.zone,
+		"--zone", g.resolveZone(ctx, vmID),
 		"--quiet",
 	}
 	if g.project != "" {

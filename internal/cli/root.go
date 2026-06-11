@@ -60,6 +60,9 @@ var rootCmd = &cobra.Command{
 		if rootFlags.output != "text" && rootFlags.output != "json" {
 			return fmt.Errorf("invalid --output %q: must be \"text\" or \"json\"", rootFlags.output)
 		}
+		if jsonOutput() && cmd.Annotations[supportsJSON] != "true" {
+			return fmt.Errorf("--json is not supported by %q (supported: plan, audit, status, cost, list, bill)", cmd.CommandPath())
+		}
 		// Reap orphaned plaintext-secret tempfiles left by a crashed run.
 		_ = adapter.SweepStaleEnvFiles()
 		return nil
@@ -80,6 +83,11 @@ func emitJSON(v any) error {
 }
 
 func jsonOutput() bool { return rootFlags.output == "json" }
+
+// supportsJSON is the command annotation marking commands that honor --json.
+// PersistentPreRunE rejects --json on any command without it, so the flag is
+// never silently ignored.
+const supportsJSON = "supportsJSON"
 
 func init() {
 	rootCmd.PersistentFlags().BoolVar(&rootFlags.noColor, "no-color", false, "disable colored output")

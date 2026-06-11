@@ -315,19 +315,6 @@ func checkLima(ctx context.Context) []doctorCheck {
 	return checks
 }
 
-func checkMultipass(ctx context.Context) []doctorCheck {
-	var checks []doctorCheck
-	cmd := exec.CommandContext(ctx, "multipass", "version")
-	output, err := cmd.Output()
-	if err != nil {
-		checks = append(checks, doctorCheck{"Multipass", "fail", "multipass not available"})
-		return checks
-	}
-	version := strings.TrimSpace(strings.Split(string(output), "\n")[0])
-	checks = append(checks, doctorCheck{"Multipass", "pass", version})
-	return checks
-}
-
 func statusIcon(status string) string {
 	switch status {
 	case "pass":

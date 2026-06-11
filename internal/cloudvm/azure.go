@@ -100,15 +100,7 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		}
 	}
 
-	var output []byte
-	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
-		var runErr error
-		output, runErr = exec.CommandContext(ctx, "az", args...).Output()
-		if runErr != nil {
-			return wrapExecError("az vm create", runErr)
-		}
-		return nil
-	})
+	output, err := retryCLIOutput(ctx, "az", "az vm create", args...)
 	if err != nil {
 		return nil, err
 	}

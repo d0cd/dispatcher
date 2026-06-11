@@ -17,9 +17,10 @@ import (
 )
 
 var statusCmd = &cobra.Command{
-	Use:   "status <run-id>",
-	Short: "Show the status of a run",
-	Args:  cobra.ExactArgs(1),
+	Use:         "status <run-id>",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "Show the status of a run",
+	Args:        cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runStatusByID(args[0])
 	},
@@ -165,9 +166,10 @@ var logsCmd = &cobra.Command{
 }
 
 var costCmd = &cobra.Command{
-	Use:   "cost <run-id>",
-	Short: "Show cost tracking for a run",
-	Args:  cobra.ExactArgs(1),
+	Use:         "cost <run-id>",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "Show cost tracking for a run",
+	Args:        cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		record, err := run.LoadRecord(args[0])
 		if err != nil {
