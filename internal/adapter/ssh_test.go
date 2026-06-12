@@ -42,6 +42,19 @@ func TestRsyncSSHCmd_SetsStrictHostKeyChecking(t *testing.T) {
 	assert.Contains(t, noKey, "StrictHostKeyChecking=accept-new")
 }
 
+// TestSSHDockerRunScript_QuotedHeredoc guards against remote command injection
+// via .env: the heredoc delimiter must be single-quoted so the remote shell
+// does not expand a value like FOO=$(cmd) before docker reads it.
+func TestSSHDockerRunScript_QuotedHeredoc(t *testing.T) {
+	script := sshDockerRunScript("'/tmp/dispatcher'", "'img:latest'", "FOO=$(id)\n")
+	assert.Contains(t, script, "<<'DISPATCHER_ENV_EOF'",
+		"heredoc delimiter must be single-quoted to prevent remote expansion")
+	assert.NotContains(t, script, "<<DISPATCHER_ENV_EOF",
+		"an unquoted heredoc delimiter would let the remote shell expand the env body")
+	// The value is passed through literally, not expanded away.
+	assert.Contains(t, script, "FOO=$(id)")
+}
+
 func TestDotEnvFileLines_PreservesRawValue(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"),

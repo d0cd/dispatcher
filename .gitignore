@@ -12,6 +12,13 @@ tmp/
 # Runtime state (created by `dispatcher run`)
 runs/
 
+# Local env files — may hold real secrets (.env.example is the tracked template)
+.env
+.env.local
+
+# Local-only editor/agent config
+.claude/settings.local.json
+
 # IDE
 .vscode/
 .idea/

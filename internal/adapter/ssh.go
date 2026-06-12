@@ -130,14 +130,7 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 		if err != nil {
 			return nil, err
 		}
-		commandLine = fmt.Sprintf(
-			"cd %s\n"+
-				"docker build -t %s .\n"+
-				"docker run --rm --env-file /dev/stdin %s <<DISPATCHER_ENV_EOF\n"+
-				"%s"+
-				"DISPATCHER_ENV_EOF\n",
-			dir, image, image, envFileLines,
-		)
+		commandLine = sshDockerRunScript(dir, image, envFileLines)
 	} else if len(w.Command) > 0 {
 		commandLine = fmt.Sprintf("cd %s\n%sexec %s\n", dir, envExports, ShellQuoteArgs(w.Command))
 	} else if len(w.Entrypoints) > 0 {
@@ -167,6 +160,25 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 		TargetID: "ssh",
 		State:    &sshState{cmd: cmd},
 	}, nil
+}
+
+// sshDockerRunScript builds the remote bash for the Dockerfile branch: build
+// the image, then run it feeding the workload .env via `--env-file /dev/stdin`
+// from a heredoc. The heredoc delimiter is SINGLE-QUOTED ('DISPATCHER_ENV_EOF')
+// so the remote shell performs no expansion on the env body — a value like
+// FOO=$(cmd) or FOO=`cmd` is handed to docker literally instead of executing
+// cmd on the host. DotEnvFileLines additionally guarantees no value contains a
+// newline or the terminator token. quotedDir and quotedImage must already be
+// shell-quoted by the caller.
+func sshDockerRunScript(quotedDir, quotedImage, envFileLines string) string {
+	return fmt.Sprintf(
+		"cd %s\n"+
+			"docker build -t %s .\n"+
+			"docker run --rm --env-file /dev/stdin %s <<'DISPATCHER_ENV_EOF'\n"+
+			"%s"+
+			"DISPATCHER_ENV_EOF\n",
+		quotedDir, quotedImage, quotedImage, envFileLines,
+	)
 }
 
 func (s *SSHAdapter) Status(_ context.Context, h *RunHandle) (types.RunState, error) {
