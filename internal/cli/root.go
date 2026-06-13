@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"runtime/debug"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -12,8 +13,23 @@ import (
 )
 
 // Version is the dispatcher release tag. Overridden at build time via -ldflags
-// (e.g. -X github.com/d0cd/dispatcher/internal/cli.Version=v0.1.0).
+// (e.g. -X github.com/d0cd/dispatcher/internal/cli.Version=v0.1.0). When left at
+// the default, resolveVersion recovers the tag from the module build info, so
+// `go install ...@v0.2.0` (which does not run ldflags) still reports v0.2.0.
 var Version = "dev"
+
+// resolveVersion picks the most specific version available: an explicit -ldflags
+// value wins; otherwise the module version embedded by `go install` is used; a
+// local `go build` (module version "(devel)") falls back to the ldflags default.
+func resolveVersion(ldflags string, info *debug.BuildInfo, ok bool) string {
+	if ldflags != "dev" {
+		return ldflags
+	}
+	if ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return ldflags
+}
 
 // ExitError carries an explicit process exit code from a command back to
 // main(). Tests see it as a normal error; the production main wrapper reads
@@ -70,7 +86,8 @@ var rootCmd = &cobra.Command{
 }
 
 func Execute() error {
-	rootCmd.Version = Version
+	info, ok := debug.ReadBuildInfo()
+	rootCmd.Version = resolveVersion(Version, info, ok)
 	return rootCmd.Execute()
 }
 
