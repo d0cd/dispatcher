@@ -1,17 +1,36 @@
 # Dispatcher
 
-An AI-assisted workload planner and runner. Inspect a workload, get cost and
-risk analysis across local + cloud execution targets, then run it on whichever
-target makes sense.
+**Declare a job once. Dispatch it to any cloud — or none.**
+
+Dispatcher is a declarative, cloud-agnostic job runner. You describe a workload
+in a single `dispatcher.yaml`; Dispatcher works out where it can run, what each
+option will cost, and what could go wrong — then executes it on the target you
+choose: your laptop, a container, an SSH host, Kubernetes, or a cloud VM on
+Hetzner, AWS, GCP, or Azure. It tracks the run crash-safely, gates spend behind
+an approval step, and tears everything down when it's done.
+
+**One spec. Every target. No lock-in.**
 
 ```bash
-dispatcher init        # Scaffold dispatcher.yaml
+dispatcher init        # Scaffold dispatcher.yaml from workload inspection
 dispatcher plan        # Where can it run? what will it cost?
 dispatcher run         # Execute on the recommended target
 dispatcher status <id> # Check on a run
 dispatcher diagnose <id>
 dispatcher stop <id>
 ```
+
+## Why Dispatcher
+
+- **Declarative.** Your workload is config, not provider-specific glue. The same
+  `dispatcher.yaml` runs locally and on every supported cloud.
+- **Plan before you pay.** `dispatcher plan` shows feasible targets, cost
+  estimates with confidence, and a risk audit *before* anything launches.
+- **Robust by construction.** A state-machine executor with watchdogs,
+  reconnection, orphan GC, and an approval gate — a crash never strands a cloud
+  VM or your money.
+- **No lock-in.** Swap or add providers without rewriting your workload. Leaving
+  a cloud is a config change, not a migration.
 
 ## Documentation
 
@@ -24,7 +43,7 @@ dispatcher stop <id>
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher
-go test ./...                # ~575 tests across 15 packages
+go test ./...                # ~450 tests across 15 packages
 go vet ./...
 ```
 

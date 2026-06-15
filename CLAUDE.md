@@ -41,7 +41,7 @@ docs/                 # Design doc, implementation plan
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher   # Build binary
-go test ./...                         # Run all tests (~575 tests, 15 packages)
+go test ./...                         # Run all tests (~450 tests, 15 packages)
 go vet ./...                          # Lint
 gofmt -l .                            # Find unformatted files
 ```
