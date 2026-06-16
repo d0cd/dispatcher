@@ -136,6 +136,65 @@ func TestEstimateCost_LiveCatalog(t *testing.T) {
 	assert.Contains(t, est.Assumptions[0], "cx22", "should pick the cheapest matching instance")
 }
 
+// TestEstimateCost_PopulatesSelectedInstanceType verifies the estimate carries
+// the selected instance type structurally (not just in the assumptions prose),
+// so provisioning can launch the instance that was actually priced.
+func TestEstimateCost_PopulatesSelectedInstanceType(t *testing.T) {
+	cat, _, err := cloudvm.NewLiveCatalog(context.Background(), &stubFetcher{
+		provider: cloudvm.ProviderHetzner,
+		instances: []cloudvm.InstanceType{
+			{Name: "cx22", Provider: cloudvm.ProviderHetzner, VCPUs: 2, MemoryGB: 4, PricePerHour: 0.006, Arch: "x86_64"},
+			{Name: "cx32", Provider: cloudvm.ProviderHetzner, VCPUs: 4, MemoryGB: 8, PricePerHour: 0.011, Arch: "x86_64"},
+		},
+	})
+	require.NoError(t, err)
+
+	// Requires 4 vCPU, so cx22 (2 vCPU) is infeasible and cx32 must be chosen.
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{CPU: "4"},
+	}
+	target := types.TargetConfig{
+		Kind: types.TargetKindCloudVM,
+		Capabilities: types.Capabilities{
+			Accounting: types.AccountingCapability{RateCard: "hetzner"},
+		},
+	}
+
+	est := EstimateCost(w, target, cat)
+	assert.Equal(t, "cx32", est.InstanceType, "estimate must carry the priced instance type")
+}
+
+// TestRequirementsFromSpec_ThreadsGPUModel verifies an explicit GPU model pin
+// reaches the catalog filter, so `model: h100` doesn't price/select a cheaper
+// non-h100 GPU.
+func TestRequirementsFromSpec_ThreadsGPUModel(t *testing.T) {
+	spec := types.WorkloadSpec{
+		Requirements: types.ResourceRequirements{
+			GPU: types.GPURequirement{Required: true, Count: 1, Model: "h100"},
+		},
+	}
+
+	req := requirementsFromSpec(spec)
+
+	assert.Equal(t, "h100", req.GPUModel)
+	assert.Equal(t, 1, req.GPUCount)
+}
+
+// An unpinned GPU leaves the model empty so the catalog returns the cheapest
+// matching GPU instance.
+func TestRequirementsFromSpec_NoModelLeavesGPUModelEmpty(t *testing.T) {
+	spec := types.WorkloadSpec{
+		Requirements: types.ResourceRequirements{
+			GPU: types.GPURequirement{Required: true},
+		},
+	}
+
+	req := requirementsFromSpec(spec)
+
+	assert.Empty(t, req.GPUModel)
+}
+
 // TestEstimateCost_LiveCatalog_FallsBackWhenEmpty verifies that a catalog
 // with no matching instances falls back to the static rate card rather than
 // returning ConfidenceUnknown.

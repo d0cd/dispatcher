@@ -94,6 +94,29 @@ func (a *CloudVMAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	return nil // VM creation happens in Execute
 }
 
+// buildVMOptions assembles the provisioning request for a plan. InstanceType
+// comes from the recommended target's priced estimate, so the VM that launches
+// matches the one that was costed; an empty value (non-catalog estimate) lets
+// the provider fall back to its default instance.
+func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) VMOptions {
+	var instanceType string
+	if p.Recommendation != nil {
+		instanceType = p.Recommendation.EstimatedCost.InstanceType
+	}
+	return VMOptions{
+		Name:         vmName,
+		Region:       region,
+		InstanceType: instanceType,
+		SSHKeyPath:   pubKeyPath,
+		UserData:     userData,
+		AllowSSHFrom: p.Constraints.AllowSSHFrom,
+		Tags: map[string]string{
+			"dispatcher-run-id": p.Metadata.ID,
+			"dispatcher":        "true",
+		},
+	}
+}
+
 func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	w := p.Workload
 
@@ -129,17 +152,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	userData := WatchdogCloudInit(ttl)
 	vmName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
 
-	opts := VMOptions{
-		Name:         vmName,
-		Region:       a.config.Region,
-		SSHKeyPath:   keyPath + ".pub",
-		UserData:     userData,
-		AllowSSHFrom: p.Constraints.AllowSSHFrom,
-		Tags: map[string]string{
-			"dispatcher-run-id": p.Metadata.ID,
-			"dispatcher":        "true",
-		},
-	}
+	opts := buildVMOptions(p, a.config.Region, vmName, keyPath+".pub", userData)
 
 	dlog.L().Info("cloudvm.create.start",
 		"run", p.Metadata.ID, "provider", string(a.config.ProviderID),
@@ -195,6 +208,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 		SSHUser:       effectiveUser,
 		SSHPort:       sshPort,
 		Region:        a.config.Region,
+		InstanceType:  opts.InstanceType,
 		RemoteDir:     remoteDir,
 		LogPath:       remoteDir + "/dispatcher.log",
 		CreatedAt:     time.Now().UTC(),

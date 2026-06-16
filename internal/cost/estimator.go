@@ -96,11 +96,12 @@ func estimateFromCatalog(spec types.WorkloadSpec, t types.TargetConfig, catalog 
 	}
 
 	return types.CostEstimate{
-		Value:       roundCents(total),
-		Currency:    "USD",
-		Confidence:  confidence,
-		Assumptions: assumptions,
-		Exclusions:  []string{"excludes network egress", "excludes storage after run"},
+		Value:        roundCents(total),
+		Currency:     "USD",
+		Confidence:   confidence,
+		Assumptions:  assumptions,
+		Exclusions:   []string{"excludes network egress", "excludes storage after run"},
+		InstanceType: cheapest.Name,
 	}, true
 }
 
@@ -190,9 +191,10 @@ func scaleEstimateToHours(spec types.WorkloadSpec, t types.TargetConfig, catalog
 			if len(matches) > 0 {
 				total := matches[0].PricePerHour * hours
 				return types.CostEstimate{
-					Value:      roundCents(total),
-					Currency:   "USD",
-					Confidence: types.ConfidenceMedium,
+					Value:        roundCents(total),
+					Currency:     "USD",
+					Confidence:   types.ConfidenceMedium,
+					InstanceType: matches[0].Name,
 				}
 			}
 		}
@@ -245,8 +247,11 @@ func requirementsFromSpec(spec types.WorkloadSpec) cloudvm.InstanceRequirements 
 			count = 1
 		}
 		req.GPUCount = count
-		// GPU framework like "pytorch" doesn't map cleanly to a hardware model;
-		// leave model unset so the catalog returns the cheapest matching GPU.
+		// An explicit hardware pin (e.g. model: h100) constrains the match; an
+		// unset model lets the catalog return the cheapest matching GPU. The
+		// freeform Framework field (e.g. pytorch) is not a hardware model and is
+		// intentionally not used here.
+		req.GPUModel = spec.Requirements.GPU.Model
 	}
 	return req
 }
