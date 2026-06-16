@@ -40,6 +40,7 @@ func runStatusByID(id string) error {
 	// doesn't show "running" forever for a VM that's gone.
 	// Per-run timeout matters because `dispatcher recover --attach` loops
 	// over many runs; one hung provider must not block the rest.
+	var renewedUntil time.Time
 	if !record.State.IsTerminal() && record.HandleState != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -70,6 +71,19 @@ func runStatusByID(id string) error {
 			if liveCost.Value > 0 {
 				record.Cost = liveCost
 			}
+			// Checking on a still-running run counts as dispatcher watching it,
+			// so push the watchdog deadline forward. Best-effort: a renewal
+			// failure must not fail `status`.
+			if !record.State.IsTerminal() {
+				if deadline, renewErr := run.RenewWatchdog(ctx, a, r); renewErr == nil {
+					renewedUntil = deadline
+					if _, err := r.Save(); err != nil {
+						dlog.L().Warn("status.renew_save_failed", "run", id, "err", err.Error())
+					}
+				} else {
+					dlog.L().Warn("status.renew_failed", "run", id, "err", renewErr.Error())
+				}
+			}
 		}
 	}
 
@@ -95,6 +109,10 @@ func runStatusByID(id string) error {
 	}
 	fmt.Fprintf(os.Stdout, "State:      ")
 	stateColor.Fprintln(os.Stdout, record.State)
+
+	if !renewedUntil.IsZero() {
+		fmt.Fprintf(os.Stdout, "Watchdog:   extended until %s\n", renewedUntil.Format("2006-01-02 15:04:05 UTC"))
+	}
 
 	if !record.StartedAt.IsZero() {
 		fmt.Fprintf(os.Stdout, "Started:    %s\n", record.StartedAt.Format("2006-01-02 15:04:05 UTC"))

@@ -15,7 +15,8 @@ import (
 
 // mockDurableAdapter implements adapter.DurableAdapter for testing.
 type mockDurableAdapter struct {
-	id string
+	id      string
+	lastTTL time.Duration // records the ttl passed to the most recent ExtendWatchdog
 }
 
 func (m *mockDurableAdapter) ID() string { return m.id }
@@ -52,6 +53,7 @@ func (m *mockDurableAdapter) Reconnect(_ context.Context, handleID string, state
 	}, nil
 }
 func (m *mockDurableAdapter) ExtendWatchdog(_ context.Context, _ *adapter.RunHandle, ttl time.Duration) (time.Time, error) {
+	m.lastTTL = ttl
 	return time.Now().Add(ttl), nil
 }
 func (m *mockDurableAdapter) ListResources(_ context.Context) ([]adapter.ResourceInfo, error) {

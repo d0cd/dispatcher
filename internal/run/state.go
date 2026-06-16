@@ -69,15 +69,30 @@ type Run struct {
 }
 
 // NewRun creates a run in the Created state.
+// DefaultWatchdogTTL is the self-destruct timer applied when a run does not
+// configure its own. Kept in sync with cloudvm.DefaultWatchdogTTL.
+const DefaultWatchdogTTL = 30 * time.Minute
+
 func NewRun(plan *types.Plan) *Run {
 	return &Run{
-		ID:       generateRunID(),
-		PlanID:   plan.Metadata.ID,
-		TargetID: plan.Recommendation.Target,
-		Owner:    plan.Metadata.CreatedBy,
-		State:    types.RunStateCreated,
-		Plan:     plan,
+		ID:          generateRunID(),
+		PlanID:      plan.Metadata.ID,
+		TargetID:    plan.Recommendation.Target,
+		Owner:       plan.Metadata.CreatedBy,
+		State:       types.RunStateCreated,
+		Plan:        plan,
+		WatchdogTTL: plan.Constraints.WatchdogTTL,
 	}
+}
+
+// effectiveWatchdogTTL is the run's configured watchdog TTL, or the default
+// when unset. Computed at each use so a zero stays "use the default" in the
+// persisted record rather than being frozen to 30m.
+func (r *Run) effectiveWatchdogTTL() time.Duration {
+	if r.WatchdogTTL > 0 {
+		return r.WatchdogTTL
+	}
+	return DefaultWatchdogTTL
 }
 
 // Transition moves the run to a new state, enforcing valid transitions.

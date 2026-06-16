@@ -44,7 +44,7 @@ dispatcher stop <run-id>       # Stop and clean up
 
 | Command | Purpose |
 |---|---|
-| `status <run-id>` | Run state (reconnects to live VMs; persists discovered terminal states). |
+| `status <run-id>` | Run state (reconnects to live VMs; persists discovered terminal states). Reconnecting to a still-running cloud run also extends its watchdog (see `renew`). |
 | `logs <run-id>` | Stream logs (reconnects to live VMs). |
 | `cost <run-id>` | Realized cost, broken down. |
 | `list [--refresh]` | All runs with status / cost / duration. `--refresh` reconnects to non-terminal runs and updates state. Idle non-terminal runs (>6h) are flagged `STALE` so you can spot orphans. |
@@ -57,6 +57,7 @@ dispatcher stop <run-id>       # Stop and clean up
 | Command | Purpose |
 |---|---|
 | `stop <run-id> [--force]` | Terminate and clean up a running workload. `--force` finalizes a stranded run whose record can no longer be reconnected (no handle state, provider unreachable), marking it terminal without cleanup — reclaim any leftover resources with `gc`. |
+| `renew <run-id>` | Extend a running cloud run's self-destruct watchdog by its configured TTL. Run periodically (cron / systemd timer) to keep an unattended long-running workload alive past its watchdog TTL. |
 | `gc [--dry-run] [--yes]` | Find and destroy orphaned cloud VMs. Prompts for confirmation before destroying; `--dry-run` previews without destroying, `--yes`/`-y` skips the prompt. |
 | `recover [--attach]` | Inventory cloud VMs whose local run record is missing. `--attach` runs `status` against each recoverable run to refresh and persist live state. |
 
