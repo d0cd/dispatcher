@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"runtime/debug"
@@ -33,10 +34,13 @@ func resolveVersion(ldflags string, info *debug.BuildInfo, ok bool) string {
 
 // ExitError carries an explicit process exit code from a command back to
 // main(). Tests see it as a normal error; the production main wrapper reads
-// .Code and calls os.Exit accordingly.
+// .Code and calls os.Exit accordingly. Set AlreadyPrinted when the command has
+// already presented the failure to the user (e.g. run's "Run failed:" block),
+// so main() doesn't print it a second time.
 type ExitError struct {
-	Code int
-	Err  error
+	Code           int
+	Err            error
+	AlreadyPrinted bool
 }
 
 func (e *ExitError) Error() string {
@@ -47,6 +51,25 @@ func (e *ExitError) Error() string {
 }
 
 func (e *ExitError) Unwrap() error { return e.Err }
+
+// ResolveExitError maps a top-level command error to a process exit code and
+// the message main() should print. message is empty when there is nothing to
+// print (no error, or the command already surfaced it). Cobra is configured
+// with SilenceErrors so main() is the single place errors reach the terminal —
+// without this, an error from a command would exit non-zero with no output.
+func ResolveExitError(err error) (code int, message string) {
+	if err == nil {
+		return 0, ""
+	}
+	var ee *ExitError
+	if errors.As(err, &ee) {
+		if ee.AlreadyPrinted {
+			return ee.Code, ""
+		}
+		return ee.Code, ee.Error()
+	}
+	return 1, err.Error()
+}
 
 var rootFlags struct {
 	noColor  bool
@@ -63,6 +86,11 @@ var rootCmd = &cobra.Command{
 	// Runtime errors print their own actionable message; without this cobra
 	// also dumps the full usage block, burying it.
 	SilenceUsage: true,
+	// main() is the single place errors reach the terminal (via
+	// ResolveExitError), so cobra must not also print them. This keeps
+	// per-command output (e.g. run's "Run failed:") from being duplicated and
+	// guarantees plain errors are surfaced rather than exiting silently.
+	SilenceErrors: true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		if rootFlags.noColor {
 			color.NoColor = true

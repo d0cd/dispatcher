@@ -37,10 +37,7 @@ var runCmd = &cobra.Command{
 	Short: "Plan and execute a workload (defaults to current directory)",
 	Long:  "Generates a plan for the workload at the given path, then executes it on the recommended target.\n\nIf path is omitted, the current directory is used.\n\nExit codes:\n  0  workload completed successfully\n  1  setup/plan/cleanup failure (no feasible target, validation error, cleanup error, anything before or after execution)\n  2  approval denied (a required policy gate was rejected)\n  3  workload-level failure (non-zero exit, OOM kill, budget exceeded)",
 	Args:  cobra.MaximumNArgs(1),
-	// runRun prints its own rich failure message and returns the error only to
-	// carry the exit code; silence cobra's duplicate "Error:" line.
-	SilenceErrors: true,
-	RunE:          runRun,
+	RunE:  runRun,
 }
 
 func init() {
@@ -230,11 +227,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		}
 		switch r.GetState() {
 		case types.RunStateApprovalDenied:
-			return &ExitError{Code: 2, Err: err}
+			return &ExitError{Code: 2, Err: err, AlreadyPrinted: true}
 		case types.RunStateExecutionFailed, types.RunStateBudgetExceeded:
-			return &ExitError{Code: 3, Err: err}
+			return &ExitError{Code: 3, Err: err, AlreadyPrinted: true}
 		}
-		return fmt.Errorf("run failed: %w", err)
+		return &ExitError{Code: 1, Err: fmt.Errorf("run failed: %w", err), AlreadyPrinted: true}
 	}
 
 	// Save successful run
