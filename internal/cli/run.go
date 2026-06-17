@@ -194,8 +194,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Ctrl-C / SIGTERM cancels the run context so in-flight provisioning unwinds
 	// and the adapter's cleanup (which uses a fresh context) tears down any
-	// half-created VM, instead of the process dying and leaking it. A second
-	// signal force-quits (Go's default once stop() restores it).
+	// half-created VM, instead of the process dying and leaking it. The deferred
+	// stop() restores Go's default handler only when runRun returns, so a second
+	// signal during cleanup is absorbed rather than interrupting teardown.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if maxDuration > 0 {
@@ -238,7 +239,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		case types.RunStateExecutionFailed, types.RunStateBudgetExceeded:
 			return &ExitError{Code: 3, Err: err, AlreadyPrinted: true}
 		}
-		return &ExitError{Code: 1, Err: fmt.Errorf("run failed: %w", err), AlreadyPrinted: true}
+		return &ExitError{Code: 1, Err: err, AlreadyPrinted: true}
 	}
 
 	// Save successful run
@@ -319,8 +320,8 @@ func recordRunHistory(r *run.Run, p *types.Plan) {
 	})
 }
 
-// adapterForTargetFn is the seam status/renew use to resolve an adapter; tests
-// override it to inject a fake durable adapter.
+// adapterForTargetFn is the seam status's primary reconnect path (runStatusByID)
+// uses to resolve an adapter; tests override it to inject a fake durable adapter.
 var adapterForTargetFn = adapterForTarget
 
 func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
