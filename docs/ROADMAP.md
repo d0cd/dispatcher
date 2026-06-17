@@ -79,3 +79,16 @@ framework; and docs-vs-code alignment overall. No TODO/FIXME/panic debt.
 1. **Theme 1 — provisioning gap.** Makes pricing honest and `--gpu` real.
 2. **`run` silent-failure (Theme 5) + watchdog renewal (Theme 2).** Cheapest large UX + durability win.
 3. **Provider-argv test seam (Theme 4).** Retires the biggest risk-weighted coverage hole on the money paths.
+
+## Theme 6 — Complete CI
+
+CI today runs gofmt / vet / build / `test -race` on the unit suite. To make it
+complete:
+
+| Item | Effort | Impact |
+|---|---|---|
+| **Run the `k8se2e` tests in CI** against an ephemeral cluster (`kind` or `k3d`, both run in GitHub Actions). Stand up the cluster, `go test -tags k8se2e ./internal/cloudvm/`, tear down. This is the only way the k8s execution path (init-container handoff, source delivery, real exit-code status) is exercised automatically. | M | High |
+| **A live-provider integration lane** (opt-in, credentialed, manual/scheduled) that exercises at least one real cloud provider's create/wait/destroy argv against the actual CLI — covers the 0%-tested teardown paths end-to-end. Gate behind secrets so it never runs on forks/PRs. | L | Medium |
+| **Coverage reporting + a floor** on the cost/security-critical packages (cloudvm, adapter, run) so coverage can't silently regress. | S | Medium |
+| **golangci-lint** (or staticcheck) beyond `go vet`, plus a `govulncheck` job for dependency CVEs. | S | Medium |
+| **Build & smoke-test the release binary** (`go build` is covered; add a `--version` / `--help` smoke run) and, if downloadable binaries are ever offered, a GoReleaser dry-run. | S | Low |
