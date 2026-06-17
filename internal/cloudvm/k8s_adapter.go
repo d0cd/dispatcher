@@ -274,7 +274,10 @@ func (a *K8sAdapter) getPodName(ctx context.Context, jobName string) (string, er
 // container (the only container running while the pod waits for the ready
 // marker). The emptyDir is shared, so the workload container sees the files.
 func (a *K8sAdapter) copyToInit(ctx context.Context, podName, srcPath string) error {
-	cmd := exec.CommandContext(ctx, "kubectl", "cp", srcPath, podName+":"+k8sWorkspaceDir,
+	// Trailing "/." copies the directory's CONTENTS into /workspace rather than
+	// nesting them under /workspace/<dirname>, so the workload (workingDir
+	// /workspace) finds its files directly.
+	cmd := exec.CommandContext(ctx, "kubectl", "cp", srcPath+"/.", podName+":"+k8sWorkspaceDir,
 		"-c", k8sInitName, "-n", a.namespace)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("kubectl cp failed: %s: %w", string(output), err)
