@@ -149,6 +149,35 @@ func TestSaveTarget(t *testing.T) {
 	assert.Equal(t, types.TargetKindSSH, loaded.Kind)
 }
 
+func TestDeleteTarget(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+
+	saved := types.TargetConfig{ID: "removable", Kind: types.TargetKindSSH, Enabled: true}
+	path, err := SaveTarget(saved)
+	require.NoError(t, err)
+	require.FileExists(t, path)
+
+	removed, err := DeleteTarget("removable")
+	require.NoError(t, err)
+	assert.Equal(t, path, removed)
+	assert.NoFileExists(t, path)
+}
+
+func TestDeleteTarget_NotFound(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := DeleteTarget("does-not-exist")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does-not-exist")
+}
+
+func TestDeleteTarget_RejectsTraversal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := DeleteTarget("../etc/passwd")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path separator or traversal")
+}
+
 func TestLoadProjectConfig(t *testing.T) {
 	dir := t.TempDir()
 	yamlContent := `targets:

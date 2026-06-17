@@ -27,6 +27,20 @@ func loadRegistry() *target.Registry {
 	return r
 }
 
+// availableTargetIDs renders the registry's target IDs as a comma-separated
+// list, so a "not found" error can point the user at what they can actually use.
+func availableTargetIDs(registry *target.Registry) string {
+	targets := registry.List()
+	ids := make([]string, len(targets))
+	for i, t := range targets {
+		ids[i] = t.ID
+	}
+	if len(ids) == 0 {
+		return "(none configured)"
+	}
+	return strings.Join(ids, ", ")
+}
+
 var targetsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured targets",
@@ -107,6 +121,24 @@ var targetsAddCmd = &cobra.Command{
 	},
 }
 
+var targetsRemoveCmd = &cobra.Command{
+	Use:     "remove <target-id>",
+	Aliases: []string{"rm"},
+	Short:   "Remove a target you added",
+	Long:    "Removes a user-added target file from ~/.dispatcher/targets/. Builtins and dispatcher.yaml targets are not removable.",
+	Args:    cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		id := args[0]
+		path, err := target.DeleteTarget(id)
+		if err != nil {
+			return err
+		}
+		color.New(color.FgGreen).Fprintf(os.Stdout, "Target %q removed.\n", id)
+		fmt.Fprintf(os.Stdout, "Deleted: %s\n", path)
+		return nil
+	},
+}
+
 var targetsDoctorCmd = &cobra.Command{
 	Use:   "doctor <target-id>",
 	Short: "Check target health and connectivity",
@@ -118,7 +150,7 @@ var targetsDoctorCmd = &cobra.Command{
 		registry := loadRegistry()
 		t, ok := registry.Get(id)
 		if !ok {
-			return fmt.Errorf("target %q not found", id)
+			return fmt.Errorf("target %q not found; available targets: %s", id, availableTargetIDs(registry))
 		}
 
 		bold := color.New(color.Bold)
@@ -376,5 +408,6 @@ func init() {
 
 	targetsCmd.AddCommand(targetsListCmd)
 	targetsCmd.AddCommand(targetsAddCmd)
+	targetsCmd.AddCommand(targetsRemoveCmd)
 	targetsCmd.AddCommand(targetsDoctorCmd)
 }
