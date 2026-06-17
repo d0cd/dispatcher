@@ -32,6 +32,30 @@ func TestAnalyze_GPUCapacityRisk(t *testing.T) {
 	assert.Contains(t, categories, "capacity-risk")
 }
 
+// A GPU workload whose cost estimate resolved no instance type (no catalog
+// match) will be refused at run time, so plan must flag it.
+func TestAnalyze_GPURequiredButNoInstanceResolved(t *testing.T) {
+	w := types.WorkloadSpec{
+		Requirements: types.ResourceRequirements{GPU: types.GPURequirement{Required: true, Model: "h100"}},
+	}
+	target := types.TargetConfig{Kind: types.TargetKindCloudVM}
+	est := types.CostEstimate{InstanceType: ""}
+
+	categories := riskCategories(Analyze(w, target, est))
+	assert.Contains(t, categories, "gpu-unschedulable")
+}
+
+func TestAnalyze_NoGPUUnschedulableRiskWhenInstanceResolved(t *testing.T) {
+	w := types.WorkloadSpec{
+		Requirements: types.ResourceRequirements{GPU: types.GPURequirement{Required: true, Model: "a100"}},
+	}
+	target := types.TargetConfig{Kind: types.TargetKindCloudVM}
+	est := types.CostEstimate{InstanceType: "a2-highgpu-1g"}
+
+	categories := riskCategories(Analyze(w, target, est))
+	assert.NotContains(t, categories, "gpu-unschedulable")
+}
+
 func TestAnalyze_SecretRisk(t *testing.T) {
 	w := types.WorkloadSpec{
 		DetectedKind: types.WorkloadKindScript,

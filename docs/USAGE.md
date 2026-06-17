@@ -102,7 +102,7 @@ image: registry/tool:latest   # Pre-built image; skips build, runs as-is
 command: ["python", "main.py"] # Override detected entrypoint
 gpu:                          # GPU requirements
   count: 1
-  model: h100
+  model: h100                 # pin a catalog model (a100, l4, t4, v100, a10g); unset = cheapest GPU
   framework: pytorch
 service:                      # Long-running service
   port: 8080
@@ -116,6 +116,8 @@ outputs:                      # Workload-relative paths to retrieve before clean
 watchdogTtl: 30m              # Cloud VM self-destruct timer (default 30m)
 retryTransientFailures: true  # Retry once on transient failure (OOM/SIGKILL); CLI --retry-transient wins
 ```
+
+**GPU workloads:** dispatcher provisions the catalog instance that matches the GPU requirement. If no catalog instance matches (an unknown `gpu.model`, or a provider with no GPU inventory), `plan` flags a `gpu-unschedulable` risk and `run` refuses rather than silently launching a CPU-only box.
 
 State lives in `.dispatcher/` (per-project, found by walking up from cwd) or `~/.dispatcher/` (fallback). Override with `$DISPATCHER_HOME` or the global `--state-dir` flag.
 

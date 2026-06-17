@@ -62,16 +62,39 @@ func NewLiveCatalog(ctx context.Context, fetchers ...Fetcher) (*Catalog, []Skipp
 	var (
 		instances []InstanceType
 		skipped   []SkippedProvider
+		fetched   = map[ProviderID]bool{}
 	)
 	for _, r := range results {
 		if r.skip != "" {
 			skipped = append(skipped, SkippedProvider{Provider: r.provider, Reason: r.skip})
 			continue
 		}
+		fetched[r.provider] = true
 		instances = append(instances, r.instances...)
 	}
 
-	return &Catalog{instances: instances}, skipped, nil
+	return &Catalog{instances: seedStaticGPU(instances, fetched)}, skipped, nil
+}
+
+// seedStaticGPU backfills GPU instances from the static catalog for any provider
+// that was fetched live but whose feed returned no GPU rows (e.g. the Hetzner
+// and Azure feeds carry no GPU SKUs). Without this, a GPU workload on such a
+// provider resolves no instance type and is refused at provisioning even though
+// the provider offers GPUs. Providers whose live feed already has GPU rows, or
+// that were skipped entirely, are left untouched.
+func seedStaticGPU(instances []InstanceType, fetched map[ProviderID]bool) []InstanceType {
+	hasGPU := map[ProviderID]bool{}
+	for _, inst := range instances {
+		if inst.GPUCount > 0 {
+			hasGPU[inst.Provider] = true
+		}
+	}
+	for _, inst := range defaultInstances {
+		if inst.GPUCount > 0 && fetched[inst.Provider] && !hasGPU[inst.Provider] {
+			instances = append(instances, inst)
+		}
+	}
+	return instances
 }
 
 // truncateErr keeps the skip reason short so a stack-trace-like error doesn't

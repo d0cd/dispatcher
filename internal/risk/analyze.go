@@ -39,6 +39,15 @@ func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate)
 				Description: "GPU spec has no model — planner picks the cheapest GPU instance, which may not match your performance expectation; set gpu.model (e.g. h100, a100, t4) to pin the tier",
 			})
 		}
+		// No catalog instance matched the GPU requirement on this cloud target,
+		// so `dispatcher run` will refuse to provision rather than silently use a
+		// CPU box. Surface it here so the user learns at plan time, not run time.
+		if t.Kind == types.TargetKindCloudVM && est.InstanceType == "" {
+			risks = append(risks, types.Risk{
+				Category:    "gpu-unschedulable",
+				Description: "no catalog instance matches the required GPU on this target; `dispatcher run` will refuse to provision — pin a supported gpu.model or choose a provider with GPU inventory",
+			})
+		}
 	}
 
 	// Secret access risks

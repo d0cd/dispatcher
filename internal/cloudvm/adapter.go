@@ -123,8 +123,9 @@ func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) 
 // matched nothing in the catalog).
 func validateGPUInstance(w types.WorkloadSpec, instanceType string) error {
 	if w.Requirements.GPU.Required && instanceType == "" {
-		return fmt.Errorf("workload requires a GPU but no matching instance was found; " +
-			"pin a supported gpu.model or enable live pricing — refusing to provision a CPU-only instance")
+		return fmt.Errorf("workload requires a GPU but no catalog instance matched; " +
+			"pin a supported gpu.model or choose a provider with GPU inventory — " +
+			"refusing to provision a CPU-only instance")
 	}
 	return nil
 }
