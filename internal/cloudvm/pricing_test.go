@@ -685,19 +685,26 @@ func TestNewLiveCatalog_SkipsOnTransientError(t *testing.T) {
 	assert.False(t, provs[ProviderHetzner], "the failed provider contributes nothing")
 }
 
-// A provider whose live feed returns no GPU rows (Hetzner/Azure today) must
-// still resolve a GPU instance from the static catalog, so a GPU workload isn't
+// A provider whose live feed returns no GPU rows (Azure today) must still
+// resolve a GPU instance from the static catalog, so a GPU workload isn't
 // refused at provisioning.
 func TestNewLiveCatalog_SeedsStaticGPUWhenFeedHasNone(t *testing.T) {
 	cat, _, err := NewLiveCatalog(context.Background(), &fakeFetcher{
-		provider:  ProviderHetzner,
-		instances: []InstanceType{{Name: "cx22", Provider: ProviderHetzner, VCPUs: 2, MemoryGB: 4, PricePerHour: 0.006}},
+		provider:  ProviderAzure,
+		instances: []InstanceType{{Name: "Standard_B2s", Provider: ProviderAzure, VCPUs: 2, MemoryGB: 4, PricePerHour: 0.042}},
 	})
 	require.NoError(t, err)
 
-	gpu := cat.FindCheapestForProvider(ProviderHetzner, InstanceRequirements{GPUCount: 1})
-	require.NotEmpty(t, gpu, "GPU workload on Hetzner must resolve a static GPU instance when the live feed has none")
+	gpu := cat.FindCheapestForProvider(ProviderAzure, InstanceRequirements{GPUCount: 1})
+	require.NotEmpty(t, gpu, "GPU workload on Azure must resolve a static GPU instance when the live feed has none")
 	assert.GreaterOrEqual(t, gpu[0].GPUCount, 1)
+}
+
+// Hetzner Cloud has no GPU SKU, so the catalog must never resolve a GPU instance
+// for it — provisioning would otherwise send a phantom server type to hcloud.
+func TestCatalog_HetznerHasNoGPU(t *testing.T) {
+	assert.Empty(t, NewCatalog().FindCheapestForProvider(ProviderHetzner, InstanceRequirements{GPUCount: 1}),
+		"Hetzner Cloud offers no GPU server type")
 }
 
 // A provider whose live feed already includes GPU rows must keep only those —

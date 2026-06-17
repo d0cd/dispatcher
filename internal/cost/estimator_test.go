@@ -236,3 +236,53 @@ func TestParseCPU(t *testing.T) {
 	assert.Equal(t, 2, parseCPU(""))    // default
 	assert.Equal(t, 2, parseCPU("abc")) // default
 }
+
+// TestEstimateCost_GPUResolutionMatrix pins the full GPU instance-resolution
+// contract so the behavior can't silently regress: a GPU workload must resolve
+// the same instance whether or not live pricing is available (only the price
+// confidence differs), an unresolvable GPU must yield an empty InstanceType
+// (which the run-time guard and plan-time risk key off), and model matching is
+// case-insensitive. A nil catalog models the offline / DISABLE_LIVE_PRICING /
+// no-creds path.
+func TestEstimateCost_GPUResolutionMatrix(t *testing.T) {
+	gpuSpec := func(model string) types.WorkloadSpec {
+		return types.WorkloadSpec{
+			DetectedKind: types.WorkloadKindGPUJob,
+			Requirements: types.ResourceRequirements{
+				GPU: types.GPURequirement{Required: true, Count: 1, Model: model},
+			},
+		}
+	}
+	cloudTarget := func(rateCard string) types.TargetConfig {
+		return types.TargetConfig{
+			Kind:         types.TargetKindCloudVM,
+			Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: rateCard}},
+		}
+	}
+
+	cases := []struct {
+		name         string
+		model        string
+		rateCard     string
+		wantInstance string // "" means: must NOT resolve (run refuses, plan warns)
+	}{
+		// Offline (nil catalog) must still resolve a real GPU instance per provider.
+		{"offline AWS any-GPU -> cheapest", "", "aws", "g4dn.xlarge"},
+		{"offline AWS a10g", "a10g", "aws", "g5.xlarge"},
+		{"offline GCP a100", "a100", "gcp", "a2-highgpu-1g"},
+		{"offline Azure a100", "a100", "azure", "Standard_NC24ads_A100_v4"},
+		// Case-insensitive model pin.
+		{"offline AWS miscased T4", "T4", "aws", "g4dn.xlarge"},
+		// Unresolvable -> empty (refuse): model exists nowhere.
+		{"offline AWS unlisted h100 -> refuse", "h100", "aws", ""},
+		// Unresolvable -> empty (refuse): Hetzner Cloud has no GPU SKU at all.
+		{"offline Hetzner any-GPU -> refuse", "", "hetzner", ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			est := EstimateCost(gpuSpec(tc.model), cloudTarget(tc.rateCard), nil)
+			assert.Equal(t, tc.wantInstance, est.InstanceType)
+		})
+	}
+}

@@ -63,7 +63,30 @@ func EstimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudv
 		// Catalog had no data for this provider — fall through to the static
 		// rate card so we degrade gracefully instead of surfacing Unknown.
 	}
-	return estimateFromRateCard(spec, t)
+	est := estimateFromRateCard(spec, t)
+	// Resolve a GPU instance type from the static catalog even when live pricing
+	// is unavailable, so a GPU workload isn't refused offline for lack of a
+	// resolved instance. This fills in WHICH instance only — the price and
+	// confidence stay from the rate card so we don't pretend to know live prices.
+	if t.Kind == types.TargetKindCloudVM && spec.Requirements.GPU.Required && est.InstanceType == "" {
+		est.InstanceType = staticGPUInstance(spec, t)
+	}
+	return est
+}
+
+// staticGPUInstance resolves the cheapest static-catalog instance matching the
+// workload's GPU requirement for the target's provider, or "" if none exists
+// (e.g. an unrecognized model, or a provider with no GPU SKU).
+func staticGPUInstance(spec types.WorkloadSpec, t types.TargetConfig) string {
+	provider, ok := rateCardToProvider(t.Capabilities.Accounting.RateCard)
+	if !ok {
+		return ""
+	}
+	matches := cloudvm.NewCatalog().FindCheapestForProvider(provider, requirementsFromSpec(spec))
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[0].Name
 }
 
 // estimateFromCatalog returns (estimate, true) when the catalog has a matching

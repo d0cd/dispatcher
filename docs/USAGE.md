@@ -102,7 +102,7 @@ image: registry/tool:latest   # Pre-built image; skips build, runs as-is
 command: ["python", "main.py"] # Override detected entrypoint
 gpu:                          # GPU requirements
   count: 1
-  model: h100                 # pin a catalog model (a100, l4, t4, v100, a10g); unset = cheapest GPU
+  model: a100                 # pin a catalog model (a100, l4, t4, v100, a10g); unset = cheapest GPU
   framework: pytorch
 service:                      # Long-running service
   port: 8080
