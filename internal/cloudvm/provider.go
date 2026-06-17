@@ -29,12 +29,13 @@ type VMOptions struct {
 	// AllowSSHFrom, when a non-empty CIDR, requests a per-run firewall that
 	// permits inbound SSH only from that range. Empty = no firewall.
 	AllowSSHFrom string
-	// WatchdogTTLSeconds is the renewable self-destruct window for targets that
-	// run an in-pod/in-VM watchdog (currently Kubernetes). Zero = adapter default.
-	WatchdogTTLSeconds int
 	// MaxLifetimeSeconds is an absolute upper bound on the resource's lifetime
-	// (from the run's MaxDuration), independent of watchdog renewal. Zero = none.
+	// (from the run's MaxDuration). Zero = no hard cap. On Kubernetes it becomes
+	// the Job's activeDeadlineSeconds.
 	MaxLifetimeSeconds int
+	// Command is the workload shell command. On Kubernetes it runs as the Job's
+	// main container so the Job's success/failure reflects the workload's exit.
+	Command string
 }
 
 // VMInfo describes a provisioned VM.

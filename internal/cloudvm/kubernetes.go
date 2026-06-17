@@ -2,6 +2,7 @@ package cloudvm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -71,8 +72,9 @@ func (k *KubernetesProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMI
 		return nil, fmt.Errorf("kubectl apply failed: %s: %w", string(output), err)
 	}
 
-	// Wait for pod to be running
-	if err := k.waitForPod(ctx, jobName); err != nil {
+	// Wait for the init container to be running so dispatcher can copy source
+	// into it and signal readiness (the workload container starts after that).
+	if err := k.waitForInitRunning(ctx, jobName); err != nil {
 		_ = k.DestroyVM(ctx, jobName)
 		return nil, err
 	}
@@ -178,26 +180,26 @@ func (k *KubernetesProvider) ListVMs(ctx context.Context, tags map[string]string
 }
 
 const (
-	k8sWatchdogDir  = "/tmp/dispatcher"
-	k8sWatchdogFile = "/tmp/dispatcher/watchdog"
+	k8sWorkspaceDir = "/workspace"
+	k8sReadyMarker  = "/workspace/.dispatcher-ready"
+	k8sLogFile      = "/workspace/dispatcher.log"
+	k8sInitName     = "dispatcher-init"
 )
 
-// k8sWatchdogScript is the Job container command. It seeds a self-destruct
-// deadline (now + ttl) and polls a deadline file, exiting once the deadline
-// passes — which terminates the pod and the workload running inside it. This
-// mirrors the cloud-VM systemd watchdog; ExtendWatchdog renews it by rewriting
-// the file. The container being the watchdog means an orphaned Job (dispatcher
-// gone) self-terminates at the TTL instead of running the old fixed 24h.
-func k8sWatchdogScript(ttlSeconds int) string {
-	return fmt.Sprintf("mkdir -p %s; echo $(($(date +%%s) + %d)) > %s; "+
-		"while true; do D=$(cat %s 2>/dev/null || echo 0); "+
-		"[ $(date +%%s) -ge $D ] && exit 0; sleep 30; done",
-		k8sWatchdogDir, ttlSeconds, k8sWatchdogFile, k8sWatchdogFile)
+// k8sInitScript blocks until dispatcher has copied the source and dropped the
+// ready marker into the shared volume, so the workload container starts only
+// once its inputs are in place.
+func k8sInitScript() string {
+	return fmt.Sprintf("while [ ! -f %s ]; do sleep 1; done", k8sReadyMarker)
 }
 
-// k8sRenewCommand rewrites the watchdog deadline to now + ttl.
-func k8sRenewCommand(ttlSeconds int) string {
-	return fmt.Sprintf("echo $(($(date +%%s) + %d)) > %s", ttlSeconds, k8sWatchdogFile)
+// k8sWorkloadScript is the main container command: decode and run the workload
+// as the container's process so the Job's success/failure reflects the
+// workload's exit code, capturing output to the log file. The command is
+// base64-encoded so no shell/YAML metacharacter can break the manifest.
+func k8sWorkloadScript(command string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(command))
+	return fmt.Sprintf("echo %s | base64 -d | sh > %s 2>&1", encoded, k8sLogFile)
 }
 
 func (k *KubernetesProvider) buildJobManifest(name, image string, opts VMOptions) string {
@@ -207,16 +209,11 @@ func (k *KubernetesProvider) buildJobManifest(name, image string, opts VMOptions
 	topLabels := k8sLabelBlock(opts.Tags, "    ")
 	podLabels := k8sLabelBlock(opts.Tags, "        ")
 
-	// Absolute lifetime ceiling from MaxDuration; omitted when unset so the
-	// renewable watchdog is the only bound.
+	// Hard runtime ceiling from MaxDuration; omitted when unset (the workload
+	// runs to completion and orphans are reclaimed by `dispatcher gc`).
 	deadlineLine := ""
 	if opts.MaxLifetimeSeconds > 0 {
 		deadlineLine = fmt.Sprintf("\n  activeDeadlineSeconds: %d", opts.MaxLifetimeSeconds)
-	}
-
-	ttl := opts.WatchdogTTLSeconds
-	if ttl <= 0 {
-		ttl = int(DefaultWatchdogTTL.Seconds())
 	}
 
 	manifest := fmt.Sprintf(`apiVersion: batch/v1
@@ -235,11 +232,27 @@ spec:
 %s
     spec:
       restartPolicy: Never
+      volumes:
+      - name: workspace
+        emptyDir: {}
+      initContainers:
+      - name: %s
+        image: %s
+        command: ["sh", "-c", "%s"]
+        volumeMounts:
+        - name: workspace
+          mountPath: %s
       containers:
       - name: workload
         image: %s
+        workingDir: %s
         command: ["sh", "-c", "%s"]
-`, name, k.namespace, topLabels, deadlineLine, podLabels, image, k8sWatchdogScript(ttl))
+        volumeMounts:
+        - name: workspace
+          mountPath: %s
+`, name, k.namespace, topLabels, deadlineLine, podLabels,
+		k8sInitName, image, k8sInitScript(), k8sWorkspaceDir,
+		image, k8sWorkspaceDir, k8sWorkloadScript(opts.Command), k8sWorkspaceDir)
 
 	return manifest
 }
@@ -253,9 +266,9 @@ func k8sLabelBlock(tags map[string]string, indent string) string {
 	return block
 }
 
-func (k *KubernetesProvider) waitForPod(ctx context.Context, jobName string) error {
+func (k *KubernetesProvider) waitForInitRunning(ctx context.Context, jobName string) error {
 	deadline := time.After(5 * time.Minute)
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -263,21 +276,22 @@ func (k *KubernetesProvider) waitForPod(ctx context.Context, jobName string) err
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline:
-			return fmt.Errorf("timeout waiting for pod to be running")
+			return fmt.Errorf("timeout waiting for init container to start")
 		case <-ticker.C:
 			cmd := exec.CommandContext(ctx, "kubectl", "get", "pods",
 				"-n", k.namespace, "-l", "job-name="+jobName,
-				"-o", "jsonpath={.items[0].status.phase}")
-			output, err := cmd.Output()
-			if err != nil {
-				continue
-			}
-			phase := strings.TrimSpace(string(output))
-			if phase == "Running" {
+				"-o", "jsonpath={.items[0].status.initContainerStatuses[0].state.running.startedAt}")
+			if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 				return nil
 			}
-			if phase == "Failed" || phase == "Error" {
-				return fmt.Errorf("pod failed to start (phase: %s)", phase)
+			// Bail out if the pod has already failed (e.g. image pull error).
+			pcmd := exec.CommandContext(ctx, "kubectl", "get", "pods",
+				"-n", k.namespace, "-l", "job-name="+jobName,
+				"-o", "jsonpath={.items[0].status.phase}")
+			if pout, perr := pcmd.Output(); perr == nil {
+				if phase := strings.TrimSpace(string(pout)); phase == "Failed" {
+					return fmt.Errorf("pod failed before init container started")
+				}
 			}
 		}
 	}

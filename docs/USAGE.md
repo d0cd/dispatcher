@@ -113,7 +113,7 @@ target: hetzner-vm            # Force a specific target
 outputs:                      # Workload-relative paths to retrieve before cleanup
   - results/
   - model.bin
-watchdogTtl: 30m              # Self-destruct timer for cloud VMs and k8s Jobs (default 30m; renewed while supervised)
+watchdogTtl: 30m              # Cloud-VM self-destruct timer (default 30m; renewed while supervised). k8s Jobs use maxTime → activeDeadlineSeconds instead.
 retryTransientFailures: true  # Retry once on transient failure (OOM/SIGKILL); CLI --retry-transient wins
 ```
 

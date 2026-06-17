@@ -1,6 +1,8 @@
 package cloudvm
 
 import (
+	"encoding/base64"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,20 +18,24 @@ func keysOf(m map[string]any) []string {
 	return ks
 }
 
+func parseManifest(t *testing.T, m string) map[string]any {
+	t.Helper()
+	var doc map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(m), &doc), "manifest must be valid YAML")
+	return doc
+}
+
 // The rendered manifest must be structurally valid: the pod template's labels
 // must land under template.metadata.labels, not leak in as stray top-level keys
-// from a reused (under-indented) label block — which a Contains test can't catch
-// and a strict cluster would reject.
+// from a reused (under-indented) label block.
 func TestBuildJobManifest_PodTemplateLabelsWellFormed(t *testing.T) {
 	k := NewKubernetesProvider("default")
 	opts := VMOptions{
-		Name: "j", Image: "ubuntu", WatchdogTTLSeconds: 1800,
+		Name: "j", Image: "ubuntu", Command: "echo hi",
 		Tags: map[string]string{"dispatcher-run-id": "run_1"},
 	}
 
-	var doc map[string]any
-	require.NoError(t, yaml.Unmarshal([]byte(k.buildJobManifest(opts.Name, opts.Image, opts)), &doc))
-
+	doc := parseManifest(t, k.buildJobManifest(opts.Name, opts.Image, opts))
 	spec, _ := doc["spec"].(map[string]any)
 	tmpl, _ := spec["template"].(map[string]any)
 	require.NotNil(t, tmpl)
@@ -42,47 +48,47 @@ func TestBuildJobManifest_PodTemplateLabelsWellFormed(t *testing.T) {
 	assert.Equal(t, "run_1", labels["dispatcher-run-id"])
 }
 
-// The Job must carry an absolute lifetime ceiling (activeDeadlineSeconds, from
-// MaxDuration) AND an in-pod renewable watchdog replacing the fixed 24h sleep,
-// so an orphaned Job self-terminates at the watchdog TTL instead of running 24h.
-func TestBuildJobManifest_HasDeadlineAndWatchdog(t *testing.T) {
+// The workload runs as the Job's MAIN container (so Job success/failure reflects
+// the workload's exit), with source delivered by an init container that blocks
+// until a ready marker appears in a shared volume.
+func TestBuildJobManifest_RunsWorkloadAsMainContainer(t *testing.T) {
 	k := NewKubernetesProvider("default")
 	opts := VMOptions{
-		Name:               "dispatcher-job",
-		Image:              "ubuntu:24.04",
-		WatchdogTTLSeconds: 1800,
+		Name: "j", Image: "ubuntu:24.04", Command: "python main.py",
 		MaxLifetimeSeconds: 3600,
 		Tags:               map[string]string{"dispatcher-run-id": "run_1"},
 	}
 
 	m := k.buildJobManifest(opts.Name, opts.Image, opts)
+	doc := parseManifest(t, m)
+	spec := doc["spec"].(map[string]any)
 
-	assert.Contains(t, m, "activeDeadlineSeconds: 3600", "absolute ceiling from MaxDuration")
-	assert.NotContains(t, m, "sleep 86400", "fixed 24h keep-alive replaced by the watchdog")
-	assert.Contains(t, m, "/tmp/dispatcher/watchdog", "in-pod renewable watchdog deadline file")
-	assert.Contains(t, m, "1800", "initial watchdog deadline uses the configured TTL")
+	assert.Equal(t, 3600, spec["activeDeadlineSeconds"], "hard cap from MaxDuration")
+	assert.NotContains(t, m, "sleep 86400", "no keep-alive sleep")
+
+	podSpec := spec["template"].(map[string]any)["spec"].(map[string]any)
+
+	inits, _ := podSpec["initContainers"].([]any)
+	require.Len(t, inits, 1)
+	assert.Contains(t, fmt.Sprint(inits[0].(map[string]any)["command"]), k8sReadyMarker,
+		"init container waits for the ready marker")
+
+	containers, _ := podSpec["containers"].([]any)
+	require.Len(t, containers, 1)
+	wlCmd := fmt.Sprint(containers[0].(map[string]any)["command"])
+	assert.Contains(t, wlCmd, base64.StdEncoding.EncodeToString([]byte("python main.py")),
+		"workload command is embedded base64-safe")
+	assert.Contains(t, wlCmd, "base64 -d", "and decoded at runtime")
+
+	vols, _ := podSpec["volumes"].([]any)
+	require.Len(t, vols, 1, "shared workspace volume")
 }
 
 func TestBuildJobManifest_NoDeadlineWhenMaxLifetimeUnset(t *testing.T) {
 	k := NewKubernetesProvider("default")
-	opts := VMOptions{Name: "j", Image: "ubuntu", WatchdogTTLSeconds: 1800}
+	opts := VMOptions{Name: "j", Image: "ubuntu", Command: "echo hi"}
 
 	m := k.buildJobManifest(opts.Name, opts.Image, opts)
 
-	assert.NotContains(t, m, "activeDeadlineSeconds", "no absolute ceiling when MaxDuration is unset")
-}
-
-func TestK8sWatchdogScript_SelfDestructsAndIsRenewable(t *testing.T) {
-	s := k8sWatchdogScript(1800)
-
-	assert.Contains(t, s, "1800", "initial deadline derived from the TTL")
-	assert.Contains(t, s, "exit 0", "self-terminates when the deadline passes")
-	assert.Contains(t, s, "/tmp/dispatcher/watchdog", "reads the renewable deadline file")
-}
-
-func TestK8sRenewCommand_WritesDeadline(t *testing.T) {
-	c := k8sRenewCommand(900)
-
-	assert.Contains(t, c, "900")
-	assert.Contains(t, c, "> /tmp/dispatcher/watchdog")
+	assert.NotContains(t, m, "activeDeadlineSeconds", "no hard cap when MaxDuration is unset")
 }
