@@ -93,11 +93,20 @@ func (a *K8sAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHa
 		return nil, fmt.Errorf("no command or entrypoint")
 	}
 
+	gpuCount := 0
+	if w.Requirements.GPU.Required {
+		gpuCount = w.Requirements.GPU.Count
+		if gpuCount == 0 {
+			gpuCount = 1
+		}
+	}
+
 	vmInfo, err := a.provider.CreateVM(ctx, VMOptions{
 		Name:               jobName,
 		Image:              image,
 		Command:            cmdStr,
 		MaxLifetimeSeconds: int(p.Constraints.MaxDuration.Seconds()),
+		GPUCount:           gpuCount,
 		Tags: map[string]string{
 			"dispatcher":        "true",
 			"dispatcher-run-id": p.Metadata.ID,

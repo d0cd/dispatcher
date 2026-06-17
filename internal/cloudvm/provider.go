@@ -36,6 +36,9 @@ type VMOptions struct {
 	// Command is the workload shell command. On Kubernetes it runs as the Job's
 	// main container so the Job's success/failure reflects the workload's exit.
 	Command string
+	// GPUCount, when > 0, requests that many GPUs. On Kubernetes it becomes the
+	// container's nvidia.com/gpu resource limit.
+	GPUCount int
 }
 
 // VMInfo describes a provisioned VM.

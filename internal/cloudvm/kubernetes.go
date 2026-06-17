@@ -216,6 +216,12 @@ func (k *KubernetesProvider) buildJobManifest(name, image string, opts VMOptions
 		deadlineLine = fmt.Sprintf("\n  activeDeadlineSeconds: %d", opts.MaxLifetimeSeconds)
 	}
 
+	// GPU request so k8s schedules onto a GPU node instead of silently using CPU.
+	gpuBlock := ""
+	if opts.GPUCount > 0 {
+		gpuBlock = fmt.Sprintf("\n        resources:\n          limits:\n            nvidia.com/gpu: \"%d\"", opts.GPUCount)
+	}
+
 	manifest := fmt.Sprintf(`apiVersion: batch/v1
 kind: Job
 metadata:
@@ -246,13 +252,13 @@ spec:
       - name: workload
         image: %s
         workingDir: %s
-        command: ["sh", "-c", "%s"]
+        command: ["sh", "-c", "%s"]%s
         volumeMounts:
         - name: workspace
           mountPath: %s
 `, name, k.namespace, topLabels, deadlineLine, podLabels,
 		k8sInitName, image, k8sInitScript(), k8sWorkspaceDir,
-		image, k8sWorkspaceDir, k8sWorkloadScript(opts.Command), k8sWorkspaceDir)
+		image, k8sWorkspaceDir, k8sWorkloadScript(opts.Command), gpuBlock, k8sWorkspaceDir)
 
 	return manifest
 }

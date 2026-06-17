@@ -92,3 +92,24 @@ func TestBuildJobManifest_NoDeadlineWhenMaxLifetimeUnset(t *testing.T) {
 
 	assert.NotContains(t, m, "activeDeadlineSeconds", "no hard cap when MaxDuration is unset")
 }
+
+// A GPU workload must request nvidia.com/gpu so k8s schedules it on a GPU node
+// (or leaves it Pending) instead of silently running on a CPU pod.
+func TestBuildJobManifest_RequestsGPUWhenRequired(t *testing.T) {
+	k := NewKubernetesProvider("default")
+	opts := VMOptions{Name: "j", Image: "ubuntu", Command: "train", GPUCount: 2}
+
+	doc := parseManifest(t, k.buildJobManifest(opts.Name, opts.Image, opts))
+	container := doc["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)["containers"].([]any)[0].(map[string]any)
+	limits, _ := container["resources"].(map[string]any)["limits"].(map[string]any)
+
+	require.NotNil(t, limits, "GPU workload must set resource limits")
+	assert.Equal(t, "2", fmt.Sprint(limits["nvidia.com/gpu"]))
+}
+
+func TestBuildJobManifest_NoGPUResourcesWhenNotRequired(t *testing.T) {
+	k := NewKubernetesProvider("default")
+	opts := VMOptions{Name: "j", Image: "ubuntu", Command: "echo hi"}
+
+	assert.NotContains(t, k.buildJobManifest(opts.Name, opts.Image, opts), "nvidia.com/gpu")
+}
