@@ -330,6 +330,30 @@ func TestGC_DryRunNeverDestroys(t *testing.T) {
 	assert.Empty(t, f.destroyed)
 }
 
+// A VM whose run record exists but is unreadable (corrupt JSON) must be treated
+// as fail-safe: gc must NOT destroy it, because it could be a live run whose
+// record was merely corrupted. Destroying it would be irreversible data loss.
+func TestGC_DoesNotDestroyVMBehindCorruptRecord(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+
+	dir, err := run.StoreDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	require.NoError(t, os.WriteFile(dir+"/run_corrupt.json", []byte("{ not valid json"), 0o600))
+
+	f := &fakeGCAdapter{
+		id:        "hetzner-vm",
+		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_corrupt"}},
+	}
+	withGCAdapter(t, f)
+
+	_, _, err = executeCommand("gc", "--yes")
+	require.NoError(t, err)
+	assert.Empty(t, f.destroyed, "must not destroy a VM whose run record is unreadable")
+}
+
 // ---- P2: --json output ----
 
 func TestJSONOutput_List(t *testing.T) {

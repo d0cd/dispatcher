@@ -31,12 +31,19 @@ before running for real, especially with long-lived state directories.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 
-		// Load all active (non-terminal) run IDs
+		// Load all active (non-terminal) run IDs. A record that exists but fails
+		// to parse is tracked separately: we must NOT treat its VM as an orphan,
+		// since a corrupt record could belong to a live run — destroying it would
+		// be irreversible data loss. Fail safe by protecting it instead.
 		runIDs, _ := run.ListRecords()
 		activeRuns := map[string]bool{}
+		unreadableRuns := map[string]bool{}
 		for _, id := range runIDs {
 			rec, err := run.LoadRecord(id)
-			if err == nil && !rec.State.IsTerminal() {
+			switch {
+			case err != nil:
+				unreadableRuns[id] = true
+			case !rec.State.IsTerminal():
 				activeRuns[id] = true
 			}
 		}
@@ -68,6 +75,10 @@ before running for real, especially with long-lived state directories.`,
 			for _, res := range resources {
 				if res.RunID != "" && activeRuns[res.RunID] {
 					continue // active run, not an orphan
+				}
+				if res.RunID != "" && unreadableRuns[res.RunID] {
+					red.Fprintf(os.Stderr, "  Skipping %s: run %s record is unreadable; refusing to destroy (could be live)\n", res.ResourceID, res.RunID)
+					continue
 				}
 
 				orphans = append(orphans, orphan{adapter: a, res: res})
