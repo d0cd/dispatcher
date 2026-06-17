@@ -177,11 +177,46 @@ func (k *KubernetesProvider) ListVMs(ctx context.Context, tags map[string]string
 	return vms, nil
 }
 
+const (
+	k8sWatchdogDir  = "/tmp/dispatcher"
+	k8sWatchdogFile = "/tmp/dispatcher/watchdog"
+)
+
+// k8sWatchdogScript is the Job container command. It seeds a self-destruct
+// deadline (now + ttl) and polls a deadline file, exiting once the deadline
+// passes — which terminates the pod and the workload running inside it. This
+// mirrors the cloud-VM systemd watchdog; ExtendWatchdog renews it by rewriting
+// the file. The container being the watchdog means an orphaned Job (dispatcher
+// gone) self-terminates at the TTL instead of running the old fixed 24h.
+func k8sWatchdogScript(ttlSeconds int) string {
+	return fmt.Sprintf("mkdir -p %s; echo $(($(date +%%s) + %d)) > %s; "+
+		"while true; do D=$(cat %s 2>/dev/null || echo 0); "+
+		"[ $(date +%%s) -ge $D ] && exit 0; sleep 30; done",
+		k8sWatchdogDir, ttlSeconds, k8sWatchdogFile, k8sWatchdogFile)
+}
+
+// k8sRenewCommand rewrites the watchdog deadline to now + ttl.
+func k8sRenewCommand(ttlSeconds int) string {
+	return fmt.Sprintf("echo $(($(date +%%s) + %d)) > %s", ttlSeconds, k8sWatchdogFile)
+}
+
 func (k *KubernetesProvider) buildJobManifest(name, image string, opts VMOptions) string {
 	// Build labels
 	labels := `    dispatcher: "true"`
 	for key, val := range opts.Tags {
 		labels += fmt.Sprintf("\n    %s: \"%s\"", key, val)
+	}
+
+	// Absolute lifetime ceiling from MaxDuration; omitted when unset so the
+	// renewable watchdog is the only bound.
+	deadlineLine := ""
+	if opts.MaxLifetimeSeconds > 0 {
+		deadlineLine = fmt.Sprintf("\n  activeDeadlineSeconds: %d", opts.MaxLifetimeSeconds)
+	}
+
+	ttl := opts.WatchdogTTLSeconds
+	if ttl <= 0 {
+		ttl = int(DefaultWatchdogTTL.Seconds())
 	}
 
 	manifest := fmt.Sprintf(`apiVersion: batch/v1
@@ -193,7 +228,7 @@ metadata:
 %s
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 300
+  ttlSecondsAfterFinished: 300%s
   template:
     metadata:
       labels:
@@ -203,8 +238,8 @@ spec:
       containers:
       - name: workload
         image: %s
-        command: ["sleep", "86400"]
-`, name, k.namespace, labels, labels, image)
+        command: ["sh", "-c", "%s"]
+`, name, k.namespace, labels, deadlineLine, labels, image, k8sWatchdogScript(ttl))
 
 	return manifest
 }

@@ -86,10 +86,19 @@ func (a *K8sAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHa
 		}
 	}
 
+	// Renewable self-destruct TTL (configured, or the default) plus an absolute
+	// ceiling from MaxDuration, mirroring the cloud-VM watchdog model.
+	ttl := DefaultWatchdogTTL
+	if p.Constraints.WatchdogTTL > 0 {
+		ttl = p.Constraints.WatchdogTTL
+	}
+
 	// Create the Job
 	vmInfo, err := a.provider.CreateVM(ctx, VMOptions{
-		Name:  jobName,
-		Image: image,
+		Name:               jobName,
+		Image:              image,
+		WatchdogTTLSeconds: int(ttl.Seconds()),
+		MaxLifetimeSeconds: int(p.Constraints.MaxDuration.Seconds()),
 		Tags: map[string]string{
 			"dispatcher":        "true",
 			"dispatcher-run-id": p.Metadata.ID,
@@ -244,8 +253,13 @@ func (a *K8sAdapter) Reconnect(_ context.Context, handleID string, raw json.RawM
 	return &adapter.RunHandle{ID: handleID, TargetID: "kubernetes", State: &state}, nil
 }
 
-func (a *K8sAdapter) ExtendWatchdog(_ context.Context, _ *adapter.RunHandle, ttl time.Duration) (time.Time, error) {
-	// K8s Jobs have ttlSecondsAfterFinished; no watchdog needed
+func (a *K8sAdapter) ExtendWatchdog(ctx context.Context, h *adapter.RunHandle, ttl time.Duration) (time.Time, error) {
+	state := h.State.(*K8sState)
+	cmd := exec.CommandContext(ctx, "kubectl", "exec", state.PodName,
+		"-n", state.Namespace, "--", "sh", "-c", k8sRenewCommand(int(ttl.Seconds())))
+	if err := cmd.Run(); err != nil {
+		return time.Time{}, fmt.Errorf("failed to extend k8s watchdog: %w", err)
+	}
 	return time.Now().Add(ttl), nil
 }
 
