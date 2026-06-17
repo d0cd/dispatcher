@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/run"
 )
 
@@ -116,6 +117,12 @@ before running for real, especially with long-lived state directories.`,
 			} else {
 				green.Fprintf(os.Stderr, "  destroyed %s\n", o.res.ResourceID)
 				totalDestroyed++
+				// Reclaim the per-run SSH key material the orphaned run left on
+				// disk (the normal Cleanup path never ran for it). No-op for
+				// targets without per-run keys (e.g. Kubernetes).
+				if o.res.RunID != "" {
+					cloudvm.RemoveRunKeyFiles(o.res.RunID)
+				}
 			}
 		}
 

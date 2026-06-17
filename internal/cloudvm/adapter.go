@@ -583,6 +583,25 @@ func providerBaseRate(p ProviderID) float64 {
 	}
 }
 
+// RemoveRunKeyFiles deletes the per-run SSH artifacts a cloud-VM run leaves in
+// the state keys dir (private key, .pub, known_hosts, ssh wrapper). gc uses it
+// to reclaim key material when reaping an orphaned VM, since the normal Cleanup
+// path never ran. Best-effort: missing files are ignored.
+func RemoveRunKeyFiles(runID string) {
+	keyDir, err := statedir.Subdir("keys")
+	if err != nil {
+		return
+	}
+	for _, name := range []string{
+		"dispatcher-" + runID,
+		"dispatcher-" + runID + ".pub",
+		"known_hosts-" + runID,
+		"ssh-wrapper-" + runID + ".sh",
+	} {
+		_ = os.Remove(filepath.Join(keyDir, name))
+	}
+}
+
 func generateSSHKey(ctx context.Context, runID string) (string, error) {
 	keyDir, err := statedir.Subdir("keys")
 	if err != nil {

@@ -15,6 +15,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/approval"
 	"github.com/d0cd/dispatcher/internal/run"
+	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/target"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -316,6 +317,28 @@ func TestGC_YesFlagDestroysWithoutPrompt(t *testing.T) {
 	_, _, err := executeCommand("gc", "--yes")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"srv-123"}, f.destroyed)
+}
+
+func TestGC_ReclaimsPerRunSSHKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+
+	keyDir, err := statedir.Subdir("keys")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(keyDir, 0o700))
+	keyPath := keyDir + "/dispatcher-run_gone" // orphanFixture's RunID
+	require.NoError(t, os.WriteFile(keyPath, []byte("k"), 0o600))
+
+	f := orphanFixture()
+	withGCAdapter(t, f)
+
+	_, _, err = executeCommand("gc", "--yes")
+	require.NoError(t, err)
+	require.Equal(t, []string{"srv-123"}, f.destroyed)
+
+	_, statErr := os.Stat(keyPath)
+	assert.True(t, os.IsNotExist(statErr), "gc must reclaim the per-run SSH key after destroying the VM")
 }
 
 func TestGC_DryRunNeverDestroys(t *testing.T) {
