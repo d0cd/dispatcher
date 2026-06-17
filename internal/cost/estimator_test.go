@@ -4,12 +4,41 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// The history/AI-planner cost path (EstimateCostWithHistory -> scaleEstimateToHours)
+// must preserve the GPU instance type EstimateCost resolved — otherwise an empty
+// InstanceType falsely flags gpu-unschedulable and the run is refused.
+func TestEstimateCostWithHistory_PreservesGPUInstanceType(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := NewHistoryStore()
+	require.NoError(t, err)
+
+	spec := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindGPUJob,
+		Requirements: types.ResourceRequirements{GPU: types.GPURequirement{Required: true, Count: 1}},
+	}
+	target := types.TargetConfig{
+		ID:           "aws-vm",
+		Kind:         types.TargetKindCloudVM,
+		Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: "aws"}},
+	}
+	require.NoError(t, store.Record(RunHistory{
+		RunID: "r1", TargetID: "aws-vm", WorkloadKind: string(spec.DetectedKind),
+		ActualDuration: time.Hour, Success: true, CompletedAt: time.Now(),
+	}))
+
+	est := EstimateCostWithHistory(spec, target, store, nil)
+
+	assert.Equal(t, "g4dn.xlarge", est.InstanceType,
+		"the resolved GPU instance must survive the history/scaling path")
+}
 
 type stubFetcher struct {
 	provider  cloudvm.ProviderID

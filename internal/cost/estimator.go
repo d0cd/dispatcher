@@ -191,8 +191,13 @@ func EstimateCostWithHistory(spec types.WorkloadSpec, t types.TargetConfig, hist
 	histDuration := history.EstimateDuration(t.ID, string(spec.DetectedKind))
 	if histDuration > 0 {
 		hours := histDuration.Hours()
-		// Re-run the cost calculation with the historical hours.
+		// Re-run the cost calculation with the historical hours. The scaled
+		// estimate re-derives price but its rate-card branch doesn't resolve an
+		// instance type, so carry forward the one EstimateCost already resolved
+		// (incl. the static GPU fallback) — otherwise a GPU run is falsely
+		// flagged unschedulable and refused.
 		scaled := scaleEstimateToHours(spec, t, catalog, hours)
+		scaled.InstanceType = base.InstanceType
 		scaled.Assumptions = append(scaled.Assumptions,
 			fmt.Sprintf("based on historical median runtime of %s", histDuration.Round(time.Second)))
 		base = scaled
