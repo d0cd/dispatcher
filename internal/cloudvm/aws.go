@@ -162,12 +162,11 @@ func (a *AWSProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 }
 
 func (a *AWSProvider) getVMInRegion(ctx context.Context, vmID, region string) (*VMInfo, error) {
-	cmd := exec.CommandContext(ctx, "aws", "ec2", "describe-instances",
+	output, err := runCLI(ctx, "aws", "ec2", "describe-instances",
 		"--region", region,
 		"--instance-ids", vmID,
 		"--output", "json",
 	)
-	output, err := cmd.Output()
 	if err != nil {
 		return nil, wrapExecError("aws ec2 describe-instances", err)
 	}
@@ -204,11 +203,10 @@ func (a *AWSProvider) getVMInRegion(ctx context.Context, vmID, region string) (*
 }
 
 func (a *AWSProvider) DestroyVM(ctx context.Context, vmID string) error {
-	cmd := exec.CommandContext(ctx, "aws", "ec2", "terminate-instances",
+	if _, err := runCLI(ctx, "aws", "ec2", "terminate-instances",
 		"--region", a.defaultRegion,
 		"--instance-ids", vmID,
-	)
-	if err := cmd.Run(); err != nil {
+	); err != nil {
 		return fmt.Errorf("aws ec2 terminate-instances failed: %w", err)
 	}
 	return nil
@@ -232,8 +230,7 @@ func (a *AWSProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VM
 		args = append(args, filters...)
 	}
 
-	cmd := exec.CommandContext(ctx, "aws", args...)
-	output, err := cmd.Output()
+	output, err := runCLI(ctx, "aws", args...)
 	if err != nil {
 		return nil, wrapExecError("aws ec2 describe-instances", err)
 	}
