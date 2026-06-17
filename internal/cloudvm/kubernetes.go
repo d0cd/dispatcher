@@ -201,11 +201,11 @@ func k8sRenewCommand(ttlSeconds int) string {
 }
 
 func (k *KubernetesProvider) buildJobManifest(name, image string, opts VMOptions) string {
-	// Build labels
-	labels := `    dispatcher: "true"`
-	for key, val := range opts.Tags {
-		labels += fmt.Sprintf("\n    %s: \"%s\"", key, val)
-	}
+	// Labels render at two depths: 4 spaces under the Job's metadata.labels and
+	// 8 spaces under template.metadata.labels. Reusing one block under-indents
+	// the pod-template labels, dropping them (and injecting stray keys).
+	topLabels := k8sLabelBlock(opts.Tags, "    ")
+	podLabels := k8sLabelBlock(opts.Tags, "        ")
 
 	// Absolute lifetime ceiling from MaxDuration; omitted when unset so the
 	// renewable watchdog is the only bound.
@@ -239,9 +239,18 @@ spec:
       - name: workload
         image: %s
         command: ["sh", "-c", "%s"]
-`, name, k.namespace, labels, deadlineLine, labels, image, k8sWatchdogScript(ttl))
+`, name, k.namespace, topLabels, deadlineLine, podLabels, image, k8sWatchdogScript(ttl))
 
 	return manifest
+}
+
+// k8sLabelBlock renders the dispatcher label set at the given indentation.
+func k8sLabelBlock(tags map[string]string, indent string) string {
+	block := indent + `dispatcher: "true"`
+	for key, val := range tags {
+		block += fmt.Sprintf("\n%s%s: \"%s\"", indent, key, val)
+	}
+	return block
 }
 
 func (k *KubernetesProvider) waitForPod(ctx context.Context, jobName string) error {

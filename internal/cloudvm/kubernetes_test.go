@@ -4,7 +4,43 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
+
+func keysOf(m map[string]any) []string {
+	ks := make([]string, 0, len(m))
+	for k := range m {
+		ks = append(ks, k)
+	}
+	return ks
+}
+
+// The rendered manifest must be structurally valid: the pod template's labels
+// must land under template.metadata.labels, not leak in as stray top-level keys
+// from a reused (under-indented) label block — which a Contains test can't catch
+// and a strict cluster would reject.
+func TestBuildJobManifest_PodTemplateLabelsWellFormed(t *testing.T) {
+	k := NewKubernetesProvider("default")
+	opts := VMOptions{
+		Name: "j", Image: "ubuntu", WatchdogTTLSeconds: 1800,
+		Tags: map[string]string{"dispatcher-run-id": "run_1"},
+	}
+
+	var doc map[string]any
+	require.NoError(t, yaml.Unmarshal([]byte(k.buildJobManifest(opts.Name, opts.Image, opts)), &doc))
+
+	spec, _ := doc["spec"].(map[string]any)
+	tmpl, _ := spec["template"].(map[string]any)
+	require.NotNil(t, tmpl)
+	assert.ElementsMatch(t, []string{"metadata", "spec"}, keysOf(tmpl),
+		"pod template must have only metadata+spec (no misindented label keys leaking in)")
+
+	meta, _ := tmpl["metadata"].(map[string]any)
+	labels, _ := meta["labels"].(map[string]any)
+	assert.Equal(t, "true", labels["dispatcher"], "pod template must carry its labels")
+	assert.Equal(t, "run_1", labels["dispatcher-run-id"])
+}
 
 // The Job must carry an absolute lifetime ceiling (activeDeadlineSeconds, from
 // MaxDuration) AND an in-pod renewable watchdog replacing the fixed 24h sleep,
