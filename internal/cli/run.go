@@ -6,7 +6,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/fatih/color"
@@ -190,7 +192,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	fmt.Fprintln(os.Stderr, "Status: running")
 	fmt.Fprintln(os.Stderr)
 
-	ctx := context.Background()
+	// Ctrl-C / SIGTERM cancels the run context so in-flight provisioning unwinds
+	// and the adapter's cleanup (which uses a fresh context) tears down any
+	// half-created VM, instead of the process dying and leaking it. A second
+	// signal force-quits (Go's default once stop() restores it).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	if maxDuration > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, maxDuration)
