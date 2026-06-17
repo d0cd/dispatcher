@@ -68,6 +68,8 @@ func runList(cmd *cobra.Command, args []string) error {
 		for _, id := range ids {
 			rec, err := run.LoadRecord(id)
 			if err != nil {
+				// Surface rather than drop — a corrupt record may be a live run.
+				records = append(records, run.RunRecord{ID: id, State: "unreadable"})
 				continue
 			}
 			records = append(records, *rec)
@@ -91,9 +93,16 @@ func runList(cmd *cobra.Command, args []string) error {
 	dim.Fprintln(os.Stdout, "─────────────────────────────────────────────────────────────────────────────────")
 
 	stale := 0
+	unreadable := 0
 	for _, id := range ids {
 		rec, err := run.LoadRecord(id)
 		if err != nil {
+			// A corrupt record could be a still-billing run, and gc now refuses
+			// to reap it, so surface it instead of hiding it.
+			fmt.Fprintf(os.Stdout, "%-14s %-16s ", id, "-")
+			red.Fprintf(os.Stdout, "%-16s", "UNREADABLE")
+			fmt.Fprintf(os.Stdout, " %-10s %10s %10s\n", "-", "-", "-")
+			unreadable++
 			continue
 		}
 
@@ -154,6 +163,11 @@ func runList(cmd *cobra.Command, args []string) error {
 		dim.Fprintf(os.Stdout, "%d run(s) appear stale (no progress in %s).\n",
 			stale, staleThreshold)
 		dim.Fprintln(os.Stdout, "Run `dispatcher list --refresh` to reconnect and update, or `dispatcher stop <id> --force` to finalize a stranded record.")
+	}
+
+	if unreadable > 0 {
+		fmt.Fprintln(os.Stdout)
+		dim.Fprintf(os.Stdout, "%d run record(s) are unreadable (corrupt) and won't be reaped by gc; inspect or remove them under the runs/ state dir.\n", unreadable)
 	}
 
 	return nil

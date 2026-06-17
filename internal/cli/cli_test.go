@@ -30,10 +30,16 @@ func executeCommand(args ...string) (string, string, error) {
 
 	err := rootCmd.Execute()
 
-	// Reset for next call
+	// Reset for next call. Persistent flags retain their parsed values across
+	// Execute calls, so reset the globals too — otherwise e.g. `--json` from one
+	// test leaks into the next and silently changes its output format.
 	rootCmd.SetOut(nil)
 	rootCmd.SetErr(nil)
 	rootCmd.SetArgs(nil)
+	rootFlags.output = "text"
+	rootFlags.json = false
+	rootFlags.stateDir = ""
+	rootFlags.noColor = false
 
 	return stdout.String(), stderr.String(), err
 }
