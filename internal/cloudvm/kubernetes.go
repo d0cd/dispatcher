@@ -195,11 +195,13 @@ func k8sInitScript() string {
 
 // k8sWorkloadScript is the main container command: decode and run the workload
 // as the container's process so the Job's success/failure reflects the
-// workload's exit code, capturing output to the log file. The command is
-// base64-encoded so no shell/YAML metacharacter can break the manifest.
+// workload's exit code. Output goes to the container's stdout/stderr so `kubectl
+// logs` can retrieve it during AND after the run (kubelet retains it until the
+// Job is GC'd) — a file in the emptyDir would vanish when the pod terminates.
+// The command is base64-encoded so no shell/YAML metacharacter breaks the manifest.
 func k8sWorkloadScript(command string) string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(command))
-	return fmt.Sprintf("echo %s | base64 -d | sh > %s 2>&1", encoded, k8sLogFile)
+	return fmt.Sprintf("echo %s | base64 -d | sh", encoded)
 }
 
 func (k *KubernetesProvider) buildJobManifest(name, image string, opts VMOptions) string {

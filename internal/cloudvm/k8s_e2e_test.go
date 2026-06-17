@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -67,32 +66,26 @@ func waitForTerminal(t *testing.T, a *K8sAdapter, h *adapter.RunHandle, timeout 
 	return last
 }
 
-// A successful workload must report Completed, and its stdout must reach the log.
+// A successful workload must report Completed, and its stdout must be
+// retrievable AFTER it finished (kubectl logs survives container termination;
+// the old emptyDir file + exec-cat did not).
 func TestK8sE2E_SuccessfulWorkload(t *testing.T) {
 	requireCluster(t)
 	a := NewK8sAdapter("default")
 	ctx := context.Background()
 
-	// Echo a marker, then linger briefly so logs are catchable while running.
 	h, err := a.Execute(ctx, k8sPlan("e2e-ok",
-		[]string{"sh", "-c", "echo DISPATCHER_E2E_MARKER; sleep 8; exit 0"}, ""))
+		[]string{"sh", "-c", "echo DISPATCHER_E2E_MARKER; exit 0"}, ""))
 	require.NoError(t, err)
 	t.Cleanup(func() { _, _ = a.Cleanup(context.Background(), h) })
 
-	// Best-effort: catch the log while the pod is still up.
-	var gotMarker bool
-	for i := 0; i < 6; i++ {
-		var logs bytes.Buffer
-		if a.Logs(ctx, h, &logs) == nil && strings.Contains(logs.String(), "DISPATCHER_E2E_MARKER") {
-			gotMarker = true
-			break
-		}
-		time.Sleep(1 * time.Second)
-	}
-	assert.True(t, gotMarker, "workload stdout should reach /workspace/dispatcher.log")
-
 	assert.Equal(t, types.RunStateCompleted, waitForTerminal(t, a, h, 3*time.Minute),
 		"a successful workload must report Completed")
+
+	var logs bytes.Buffer
+	require.NoError(t, a.Logs(ctx, h, &logs))
+	assert.Contains(t, logs.String(), "DISPATCHER_E2E_MARKER",
+		"workload stdout must be retrievable after completion via kubectl logs")
 }
 
 // A failing workload must report ExecutionFailed with the real exit code — the

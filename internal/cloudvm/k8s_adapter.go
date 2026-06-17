@@ -163,8 +163,11 @@ func (a *K8sAdapter) Status(ctx context.Context, h *adapter.RunHandle) (types.Ru
 
 func (a *K8sAdapter) Logs(ctx context.Context, h *adapter.RunHandle, w io.Writer) error {
 	state := h.State.(*K8sState)
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", state.PodName,
-		"-n", a.namespace, "--", "cat", state.LogPath)
+	// kubectl logs reads the workload container's stdout/stderr, which the
+	// kubelet retains after the container terminates (until the Job is GC'd) —
+	// unlike exec-cat, which fails once the pod is gone.
+	cmd := exec.CommandContext(ctx, "kubectl", "logs", state.PodName,
+		"-c", "workload", "-n", a.namespace)
 	cmd.Stdout = w
 	cmd.Stderr = w
 	return cmd.Run()
