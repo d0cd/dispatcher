@@ -286,3 +286,47 @@ func TestEstimateCost_GPUResolutionMatrix(t *testing.T) {
 		})
 	}
 }
+
+// Hetzner Cloud has no GPU SKU (the gx11 catalog row was removed), so the rate
+// card must not add a phantom GPU cost for a GPU workload that will be refused.
+func TestEstimateCost_HetznerGPUHasNoPhantomCost(t *testing.T) {
+	target := types.TargetConfig{
+		Kind:         types.TargetKindCloudVM,
+		Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: "hetzner"}},
+	}
+	gpuSpec := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{GPU: types.GPURequirement{Required: true, Count: 1}},
+	}
+	cpuSpec := types.WorkloadSpec{DetectedKind: types.WorkloadKindScript}
+
+	gpu := EstimateCost(gpuSpec, target, nil)
+	cpu := EstimateCost(cpuSpec, target, nil)
+
+	assert.Equal(t, cpu.Value, gpu.Value, "Hetzner has no GPU SKU, so requiring a GPU must add no cost")
+	assert.Empty(t, gpu.InstanceType, "and the GPU workload resolves no instance")
+}
+
+// Regression guard for the live-catalog-misses-provider -> static-fallback
+// branch: when the live catalog lacks the target provider, a GPU instance is
+// still resolved from the static catalog (instance only; price stays low-conf).
+func TestEstimateCost_GPUResolvesFromStaticWhenLiveCatalogLacksProvider(t *testing.T) {
+	cat, _, err := cloudvm.NewLiveCatalog(context.Background(), &stubFetcher{
+		provider:  cloudvm.ProviderGCP,
+		instances: []cloudvm.InstanceType{{Name: "e2-medium", Provider: cloudvm.ProviderGCP, VCPUs: 2, MemoryGB: 4, PricePerHour: 0.034}},
+	})
+	require.NoError(t, err)
+
+	gpuSpec := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindGPUJob,
+		Requirements: types.ResourceRequirements{GPU: types.GPURequirement{Required: true, Count: 1}},
+	}
+	awsTarget := types.TargetConfig{
+		Kind:         types.TargetKindCloudVM,
+		Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: "aws"}},
+	}
+
+	est := EstimateCost(gpuSpec, awsTarget, cat)
+	assert.Equal(t, "g4dn.xlarge", est.InstanceType, "AWS GPU resolves from static when the live catalog lacks AWS")
+	assert.Equal(t, types.ConfidenceLow, est.Confidence, "price stays low-confidence offline-style")
+}
