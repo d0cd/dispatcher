@@ -77,7 +77,7 @@ before running for real, especially with long-lived state directories.`,
 					continue // active run, not an orphan
 				}
 				if res.RunID != "" && unreadableRuns[res.RunID] {
-					red.Fprintf(os.Stderr, "  Skipping %s: run %s record is unreadable; refusing to destroy (could be live)\n", res.ResourceID, res.RunID)
+					red.Fprintf(os.Stderr, "  Skipping %s: run %s record is unreadable; refusing to destroy (could be live). Remove the run record to allow GC.\n", res.ResourceID, res.RunID)
 					continue
 				}
 
