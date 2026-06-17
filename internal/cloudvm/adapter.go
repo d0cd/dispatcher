@@ -117,6 +117,18 @@ func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) 
 	}
 }
 
+// validateGPUInstance refuses to provision when a workload requires a GPU but no
+// specific instance type was resolved — otherwise the provider would silently
+// launch its CPU-only default (e.g. an unpinned or unrecognized gpu.model that
+// matched nothing in the catalog).
+func validateGPUInstance(w types.WorkloadSpec, instanceType string) error {
+	if w.Requirements.GPU.Required && instanceType == "" {
+		return fmt.Errorf("workload requires a GPU but no matching instance was found; " +
+			"pin a supported gpu.model or enable live pricing — refusing to provision a CPU-only instance")
+	}
+	return nil
+}
+
 func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	w := p.Workload
 
@@ -153,6 +165,9 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	vmName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
 
 	opts := buildVMOptions(p, a.config.Region, vmName, keyPath+".pub", userData)
+	if err := validateGPUInstance(w, opts.InstanceType); err != nil {
+		return nil, err
+	}
 
 	dlog.L().Info("cloudvm.create.start",
 		"run", p.Metadata.ID, "provider", string(a.config.ProviderID),

@@ -38,3 +38,14 @@ func TestBuildVMOptions_NilRecommendationYieldsEmptyInstanceType(t *testing.T) {
 
 	assert.Empty(t, opts.InstanceType)
 }
+
+func TestValidateGPUInstance(t *testing.T) {
+	gpuSpec := types.WorkloadSpec{Requirements: types.ResourceRequirements{GPU: types.GPURequirement{Required: true}}}
+	cpuSpec := types.WorkloadSpec{}
+
+	// A GPU workload that resolved to no specific instance would otherwise
+	// provision the provider's CPU default — refuse it instead.
+	assert.Error(t, validateGPUInstance(gpuSpec, ""))
+	assert.NoError(t, validateGPUInstance(gpuSpec, "g5.xlarge"))
+	assert.NoError(t, validateGPUInstance(cpuSpec, ""))
+}

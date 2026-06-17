@@ -44,9 +44,11 @@ func runStatusByID(id string) error {
 	if !record.State.IsTerminal() && record.HandleState != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		r, a, reconnErr := run.ReconnectToRun(ctx, id, adapterForTarget)
+		r, a, reconnErr := run.ReconnectToRun(ctx, id, adapterForTargetFn)
 		if reconnErr == nil && a != nil && r.Handle != nil {
+			statusOK := false
 			if liveState, err := a.Status(ctx, r.Handle); err == nil {
+				statusOK = true
 				if liveState != record.State {
 					record.State = liveState
 					if liveState.IsTerminal() {
@@ -72,9 +74,10 @@ func runStatusByID(id string) error {
 				record.Cost = liveCost
 			}
 			// Checking on a still-running run counts as dispatcher watching it,
-			// so push the watchdog deadline forward. Best-effort: a renewal
-			// failure must not fail `status`.
-			if !record.State.IsTerminal() {
+			// so push the watchdog deadline forward — but only when the live
+			// status actually confirmed the run is still up. Best-effort: a
+			// renewal failure must not fail `status`.
+			if statusOK && !record.State.IsTerminal() {
 				if deadline, renewErr := run.RenewWatchdog(ctx, a, r); renewErr == nil {
 					renewedUntil = deadline
 					if _, err := r.Save(); err != nil {

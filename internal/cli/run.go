@@ -312,6 +312,10 @@ func recordRunHistory(r *run.Run, p *types.Plan) {
 	})
 }
 
+// adapterForTargetFn is the seam status/renew use to resolve an adapter; tests
+// override it to inject a fake durable adapter.
+var adapterForTargetFn = adapterForTarget
+
 func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 	// Check known adapters by ID first
 	switch targetID {
