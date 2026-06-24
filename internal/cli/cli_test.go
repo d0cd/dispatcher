@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/d0cd/dispatcher/internal/target"
 )
 
 // TestMain disables the live pricing fetch for the whole CLI test suite.
@@ -67,6 +69,21 @@ func TestCLI_TargetsDoctor_NotFoundListsAvailable(t *testing.T) {
 	assert.Contains(t, err.Error(), "available targets:")
 	// A known builtin should be listed so the user can correct a typo.
 	assert.Contains(t, err.Error(), "local-docker")
+}
+
+func TestCLI_TargetsAdd_KeyFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	_, _, err := executeCommand("targets", "add", "box",
+		"--kind", "ssh", "--host", "h.example", "--key-file", "/tmp/k")
+	require.NoError(t, err)
+
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	tc, ok := r.Get("box")
+	require.True(t, ok)
+	require.NotNil(t, tc.SSH)
+	assert.Equal(t, "/tmp/k", tc.SSH.KeyFile)
 }
 
 func TestCLI_TargetsRemove(t *testing.T) {

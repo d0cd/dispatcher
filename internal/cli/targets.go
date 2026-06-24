@@ -71,6 +71,7 @@ var addFlags struct {
 	host    string
 	user    string
 	port    int
+	keyFile string
 	enabled bool
 }
 
@@ -103,9 +104,10 @@ var targetsAddCmd = &cobra.Command{
 				return fmt.Errorf("ssh target requires --host")
 			}
 			t.SSH = &types.SSHTargetConfig{
-				Host: addFlags.host,
-				User: addFlags.user,
-				Port: addFlags.port,
+				Host:    addFlags.host,
+				User:    addFlags.user,
+				Port:    addFlags.port,
+				KeyFile: addFlags.keyFile,
 			}
 		}
 
@@ -404,6 +406,7 @@ func init() {
 	targetsAddCmd.Flags().StringVar(&addFlags.host, "host", "", "hostname for SSH targets")
 	targetsAddCmd.Flags().StringVar(&addFlags.user, "user", "", "username for SSH targets")
 	targetsAddCmd.Flags().IntVar(&addFlags.port, "port", 22, "port for SSH targets")
+	targetsAddCmd.Flags().StringVar(&addFlags.keyFile, "key-file", "", "private key path for SSH targets")
 	targetsAddCmd.Flags().BoolVar(&addFlags.enabled, "enabled", true, "whether the target is enabled")
 
 	targetsCmd.AddCommand(targetsListCmd)
