@@ -43,7 +43,7 @@ var rateCards = map[string]RateCard{
 	"aws":     {CPUPerHour: 0.05, MemoryPerHour: 0.007, GPUPerHour: 3.00, BasePerHour: 0.10},
 	"gcp":     {CPUPerHour: 0.04, MemoryPerHour: 0.005, GPUPerHour: 2.80, BasePerHour: 0.08},
 	"azure":   {CPUPerHour: 0.05, MemoryPerHour: 0.007, GPUPerHour: 3.00, BasePerHour: 0.10},
-	"hetzner": {CPUPerHour: 0.003, MemoryPerHour: 0.001, GPUPerHour: 1.95, BasePerHour: 0.003},
+	"hetzner": {CPUPerHour: 0.003, MemoryPerHour: 0.001, GPUPerHour: 0, BasePerHour: 0.003}, // Hetzner Cloud has no GPU SKU
 }
 
 // EstimateCost produces a cost estimate for running a workload on a target.
@@ -63,7 +63,30 @@ func EstimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudv
 		// Catalog had no data for this provider — fall through to the static
 		// rate card so we degrade gracefully instead of surfacing Unknown.
 	}
-	return estimateFromRateCard(spec, t)
+	est := estimateFromRateCard(spec, t)
+	// Resolve a GPU instance type from the static catalog even when live pricing
+	// is unavailable, so a GPU workload isn't refused offline for lack of a
+	// resolved instance. This fills in WHICH instance only — the price and
+	// confidence stay from the rate card so we don't pretend to know live prices.
+	if t.Kind == types.TargetKindCloudVM && spec.Requirements.GPU.Required && est.InstanceType == "" {
+		est.InstanceType = staticGPUInstance(spec, t)
+	}
+	return est
+}
+
+// staticGPUInstance resolves the cheapest static-catalog instance matching the
+// workload's GPU requirement for the target's provider, or "" if none exists
+// (e.g. an unrecognized model, or a provider with no GPU SKU).
+func staticGPUInstance(spec types.WorkloadSpec, t types.TargetConfig) string {
+	provider, ok := rateCardToProvider(t.Capabilities.Accounting.RateCard)
+	if !ok {
+		return ""
+	}
+	matches := cloudvm.NewCatalog().FindCheapestForProvider(provider, requirementsFromSpec(spec))
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[0].Name
 }
 
 // estimateFromCatalog returns (estimate, true) when the catalog has a matching
@@ -96,11 +119,12 @@ func estimateFromCatalog(spec types.WorkloadSpec, t types.TargetConfig, catalog 
 	}
 
 	return types.CostEstimate{
-		Value:       roundCents(total),
-		Currency:    "USD",
-		Confidence:  confidence,
-		Assumptions: assumptions,
-		Exclusions:  []string{"excludes network egress", "excludes storage after run"},
+		Value:        roundCents(total),
+		Currency:     "USD",
+		Confidence:   confidence,
+		Assumptions:  assumptions,
+		Exclusions:   []string{"excludes network egress", "excludes storage after run"},
+		InstanceType: cheapest.Name,
 	}, true
 }
 
@@ -167,8 +191,13 @@ func EstimateCostWithHistory(spec types.WorkloadSpec, t types.TargetConfig, hist
 	histDuration := history.EstimateDuration(t.ID, string(spec.DetectedKind))
 	if histDuration > 0 {
 		hours := histDuration.Hours()
-		// Re-run the cost calculation with the historical hours.
+		// Re-run the cost calculation with the historical hours. The scaled
+		// estimate re-derives price but its rate-card branch doesn't resolve an
+		// instance type, so carry forward the one EstimateCost already resolved
+		// (incl. the static GPU fallback) — otherwise a GPU run is falsely
+		// flagged unschedulable and refused.
 		scaled := scaleEstimateToHours(spec, t, catalog, hours)
+		scaled.InstanceType = base.InstanceType
 		scaled.Assumptions = append(scaled.Assumptions,
 			fmt.Sprintf("based on historical median runtime of %s", histDuration.Round(time.Second)))
 		base = scaled
@@ -190,9 +219,10 @@ func scaleEstimateToHours(spec types.WorkloadSpec, t types.TargetConfig, catalog
 			if len(matches) > 0 {
 				total := matches[0].PricePerHour * hours
 				return types.CostEstimate{
-					Value:      roundCents(total),
-					Currency:   "USD",
-					Confidence: types.ConfidenceMedium,
+					Value:        roundCents(total),
+					Currency:     "USD",
+					Confidence:   types.ConfidenceMedium,
+					InstanceType: matches[0].Name,
 				}
 			}
 		}
@@ -245,8 +275,11 @@ func requirementsFromSpec(spec types.WorkloadSpec) cloudvm.InstanceRequirements 
 			count = 1
 		}
 		req.GPUCount = count
-		// GPU framework like "pytorch" doesn't map cleanly to a hardware model;
-		// leave model unset so the catalog returns the cheapest matching GPU.
+		// An explicit hardware pin (e.g. model: h100) constrains the match; an
+		// unset model lets the catalog return the cheapest matching GPU. The
+		// freeform Framework field (e.g. pytorch) is not a hardware model and is
+		// intentionally not used here.
+		req.GPUModel = spec.Requirements.GPU.Model
 	}
 	return req
 }

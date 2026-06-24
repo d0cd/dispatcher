@@ -272,9 +272,8 @@ func (e *Executor) startLongRunning(ctx context.Context, r *Run, logWriter io.Wr
 		return fmt.Errorf("long-running workloads require a durable adapter")
 	}
 
-	// Extend watchdog for initial TTL
-	r.WatchdogTTL = 30 * time.Minute
-	if _, err := durable.ExtendWatchdog(ctx, r.Handle, r.WatchdogTTL); err != nil {
+	// Extend watchdog for the initial TTL (configured, or the default).
+	if _, err := durable.ExtendWatchdog(ctx, r.Handle, r.effectiveWatchdogTTL()); err != nil {
 		if logWriter != nil {
 			fmt.Fprintf(logWriter, "[dispatcher] warning: initial watchdog extension failed: %v\n", err)
 		}

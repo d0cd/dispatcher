@@ -57,6 +57,6 @@ var defaultInstances = []InstanceType{
 	{Name: "Standard_NC4as_T4_v3", Provider: ProviderAzure, VCPUs: 4, MemoryGB: 28, GPUCount: 1, GPUModel: "t4", PricePerHour: 0.526, Arch: "x86_64"},
 	{Name: "Standard_NC24ads_A100_v4", Provider: ProviderAzure, VCPUs: 24, MemoryGB: 220, GPUCount: 1, GPUModel: "a100", PricePerHour: 3.673, Arch: "x86_64"},
 
-	// --- Hetzner GPU (dedicated) ---
-	{Name: "gx11", Provider: ProviderHetzner, VCPUs: 8, MemoryGB: 32, GPUCount: 1, GPUModel: "a100", PricePerHour: 1.950, Arch: "x86_64"},
+	// Hetzner Cloud offers no GPU server type (its GPUs are dedicated/Robot
+	// servers, not provisionable via the Cloud API), so no Hetzner GPU row.
 }

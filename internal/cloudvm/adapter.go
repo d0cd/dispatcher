@@ -94,6 +94,42 @@ func (a *CloudVMAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	return nil // VM creation happens in Execute
 }
 
+// buildVMOptions assembles the provisioning request for a plan. InstanceType
+// comes from the recommended target's priced estimate, so the VM that launches
+// matches the one that was costed; an empty value (non-catalog estimate) lets
+// the provider fall back to its default instance.
+func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) VMOptions {
+	var instanceType string
+	if p.Recommendation != nil {
+		instanceType = p.Recommendation.EstimatedCost.InstanceType
+	}
+	return VMOptions{
+		Name:         vmName,
+		Region:       region,
+		InstanceType: instanceType,
+		SSHKeyPath:   pubKeyPath,
+		UserData:     userData,
+		AllowSSHFrom: p.Constraints.AllowSSHFrom,
+		Tags: map[string]string{
+			"dispatcher-run-id": p.Metadata.ID,
+			"dispatcher":        "true",
+		},
+	}
+}
+
+// validateGPUInstance refuses to provision when a workload requires a GPU but no
+// specific instance type was resolved — otherwise the provider would silently
+// launch its CPU-only default (e.g. an unpinned or unrecognized gpu.model that
+// matched nothing in the catalog).
+func validateGPUInstance(w types.WorkloadSpec, instanceType string) error {
+	if w.Requirements.GPU.Required && instanceType == "" {
+		return fmt.Errorf("workload requires a GPU but no catalog instance matched; " +
+			"pin a supported gpu.model or choose a provider with GPU inventory — " +
+			"refusing to provision a CPU-only instance")
+	}
+	return nil
+}
+
 func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	w := p.Workload
 
@@ -129,16 +165,9 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	userData := WatchdogCloudInit(ttl)
 	vmName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
 
-	opts := VMOptions{
-		Name:         vmName,
-		Region:       a.config.Region,
-		SSHKeyPath:   keyPath + ".pub",
-		UserData:     userData,
-		AllowSSHFrom: p.Constraints.AllowSSHFrom,
-		Tags: map[string]string{
-			"dispatcher-run-id": p.Metadata.ID,
-			"dispatcher":        "true",
-		},
+	opts := buildVMOptions(p, a.config.Region, vmName, keyPath+".pub", userData)
+	if err := validateGPUInstance(w, opts.InstanceType); err != nil {
+		return nil, err
 	}
 
 	dlog.L().Info("cloudvm.create.start",
@@ -153,12 +182,24 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	dlog.L().Info("cloudvm.create.ok",
 		"run", p.Metadata.ID, "vm_id", vmInfo.ID, "ip", vmInfo.IP)
 
+	// Destroy the VM if Execute returns an error after creating it. A fresh
+	// context is essential: if the run context was cancelled (e.g. Ctrl-C during
+	// provisioning), reusing it would cancel the teardown too and leak a billing
+	// VM. Cleared on success so Cleanup owns the VM.
+	destroyOnErr := true
+	defer func() {
+		if !destroyOnErr {
+			return
+		}
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		_ = a.provider.DestroyVM(cctx, vmInfo.ID)
+	}()
+
 	// Wait for SSH
 	if err := a.provider.WaitReady(ctx, vmInfo.ID, vmInfo.IP, keyPath); err != nil {
 		dlog.L().Error("cloudvm.ssh_wait.failed",
 			"run", p.Metadata.ID, "vm_id", vmInfo.ID, "err", err.Error())
-		// Try to destroy on wait failure
-		_ = a.provider.DestroyVM(ctx, vmInfo.ID)
 		return nil, fmt.Errorf("VM not reachable via SSH: %w", err)
 	}
 	dlog.L().Info("cloudvm.ssh_ready", "run", p.Metadata.ID, "vm_id", vmInfo.ID)
@@ -195,6 +236,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 		SSHUser:       effectiveUser,
 		SSHPort:       sshPort,
 		Region:        a.config.Region,
+		InstanceType:  opts.InstanceType,
 		RemoteDir:     remoteDir,
 		LogPath:       remoteDir + "/dispatcher.log",
 		CreatedAt:     time.Now().UTC(),
@@ -206,7 +248,6 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	if err := PinHostKey(ctx, state, p.Metadata.ID); err != nil {
 		dlog.L().Error("cloudvm.keypin.failed",
 			"run", p.Metadata.ID, "vm_id", vmInfo.ID, "err", err.Error())
-		_ = a.provider.DestroyVM(ctx, vmInfo.ID)
 		return nil, fmt.Errorf("pin host key: %w", err)
 	}
 	earlyCleanup = append(earlyCleanup, state.KnownHostsPath)
@@ -215,7 +256,6 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 
 	wrapper, err := writeSSHWrapper(state, p.Metadata.ID)
 	if err != nil {
-		_ = a.provider.DestroyVM(ctx, vmInfo.ID)
 		return nil, fmt.Errorf("build ssh wrapper: %w", err)
 	}
 	state.SSHWrapper = wrapper
@@ -235,7 +275,6 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	if err := rsyncToVM(ctx, state, w.Source.Path); err != nil {
 		dlog.L().Error("cloudvm.rsync.failed",
 			"run", p.Metadata.ID, "vm_id", vmInfo.ID, "err", err.Error())
-		_ = a.provider.DestroyVM(ctx, vmInfo.ID)
 		return nil, fmt.Errorf("rsync failed: %w", err)
 	}
 	dlog.L().Info("cloudvm.rsync.ok", "run", p.Metadata.ID, "vm_id", vmInfo.ID)
@@ -244,13 +283,13 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	if err := startWorkloadOnVM(ctx, state, w); err != nil {
 		dlog.L().Error("cloudvm.workload_start.failed",
 			"run", p.Metadata.ID, "vm_id", vmInfo.ID, "err", err.Error())
-		_ = a.provider.DestroyVM(ctx, vmInfo.ID)
 		return nil, fmt.Errorf("workload start failed: %w", err)
 	}
 	dlog.L().Info("cloudvm.workload_start.ok",
 		"run", p.Metadata.ID, "vm_id", vmInfo.ID, "pid", state.WorkloadPID)
 
-	earlyCleanup = nil // success — Cleanup owns the files now
+	earlyCleanup = nil   // success — Cleanup owns the files now
+	destroyOnErr = false // success — the VM is live and owned by the run
 
 	return &adapter.RunHandle{
 		ID:       vmInfo.ID,
@@ -541,6 +580,25 @@ func providerBaseRate(p ProviderID) float64 {
 		return 0.05 // B2s ~$0.04
 	default:
 		return 0.10
+	}
+}
+
+// RemoveRunKeyFiles deletes the per-run SSH artifacts a cloud-VM run leaves in
+// the state keys dir (private key, .pub, known_hosts, ssh wrapper). gc uses it
+// to reclaim key material when reaping an orphaned VM, since the normal Cleanup
+// path never ran. Best-effort: missing files are ignored.
+func RemoveRunKeyFiles(runID string) {
+	keyDir, err := statedir.Subdir("keys")
+	if err != nil {
+		return
+	}
+	for _, name := range []string{
+		"dispatcher-" + runID,
+		"dispatcher-" + runID + ".pub",
+		"known_hosts-" + runID,
+		"ssh-wrapper-" + runID + ".sh",
+	} {
+		_ = os.Remove(filepath.Join(keyDir, name))
 	}
 }
 

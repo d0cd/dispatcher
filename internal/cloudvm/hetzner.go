@@ -170,8 +170,7 @@ func (h *HetznerProvider) WaitReady(ctx context.Context, _ string, ip string, _ 
 }
 
 func (h *HetznerProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
-	cmd := exec.CommandContext(ctx, "hcloud", "server", "describe", vmID, "-o", "json")
-	output, err := cmd.Output()
+	output, err := runCLI(ctx, "hcloud", "server", "describe", vmID, "-o", "json")
 	if err != nil {
 		return nil, fmt.Errorf("hcloud server describe failed: %w", err)
 	}
@@ -216,13 +215,12 @@ func (h *HetznerProvider) DestroyVM(ctx context.Context, vmID string) error {
 	// attached to the server).
 	runID := h.runIDForServer(ctx, vmID)
 
-	cmd := exec.CommandContext(ctx, "hcloud", "server", "delete", vmID)
-	if err := cmd.Run(); err != nil {
+	if _, err := runCLI(ctx, "hcloud", "server", "delete", vmID); err != nil {
 		return fmt.Errorf("hcloud server delete failed: %w", err)
 	}
 	if runID != "" {
 		// Best-effort: the firewall only exists when --allow-ssh-from was set.
-		_ = exec.CommandContext(ctx, "hcloud", "firewall", "delete", firewallNameFromString(runID)).Run()
+		_, _ = runCLI(ctx, "hcloud", "firewall", "delete", firewallNameFromString(runID))
 	}
 	// Best-effort: clean up any dispatcher-managed SSH keys for this VM.
 	// We don't know the run ID from vmID alone, so list and delete by
@@ -234,7 +232,7 @@ func (h *HetznerProvider) DestroyVM(ctx context.Context, vmID string) error {
 // runIDForServer reads the dispatcher-run-id label off a server before it is
 // deleted. Best-effort: returns "" if the server is already gone.
 func (h *HetznerProvider) runIDForServer(ctx context.Context, vmID string) string {
-	out, err := exec.CommandContext(ctx, "hcloud", "server", "describe", vmID, "-o", "json").Output()
+	out, err := runCLI(ctx, "hcloud", "server", "describe", vmID, "-o", "json")
 	if err != nil {
 		return ""
 	}
@@ -287,7 +285,7 @@ func uploadHetznerSSHKey(ctx context.Context, name, pubKeyPath string) error {
 // Best-effort: failures are logged but not propagated.
 func cleanupHetznerSSHKeysForVM(ctx context.Context, vmID string) error {
 	// Read the VM's labels to recover the run id.
-	out, err := exec.CommandContext(ctx, "hcloud", "server", "describe", vmID, "-o", "json").Output()
+	out, err := runCLI(ctx, "hcloud", "server", "describe", vmID, "-o", "json")
 	if err != nil {
 		// VM is gone already (typical — we just deleted it). The label
 		// info we need is gone too; give up cleanly.
@@ -300,7 +298,7 @@ func cleanupHetznerSSHKeysForVM(ctx context.Context, vmID string) error {
 		return nil
 	}
 	if runID := srv.Labels["dispatcher-run-id"]; runID != "" {
-		_ = exec.CommandContext(ctx, "hcloud", "ssh-key", "delete", "dispatcher-"+runID).Run()
+		_, _ = runCLI(ctx, "hcloud", "ssh-key", "delete", "dispatcher-"+runID)
 	}
 	return nil
 }
@@ -314,8 +312,7 @@ func (h *HetznerProvider) ListVMs(ctx context.Context, tags map[string]string) (
 		args = append(args, "--selector", fmt.Sprintf("%s=%s", k, v))
 	}
 
-	cmd := exec.CommandContext(ctx, "hcloud", args...)
-	output, err := cmd.Output()
+	output, err := runCLI(ctx, "hcloud", args...)
 	if err != nil {
 		return nil, fmt.Errorf("hcloud server list failed: %w", err)
 	}

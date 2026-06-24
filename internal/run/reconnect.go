@@ -4,10 +4,32 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/plan"
 )
+
+// RenewWatchdog extends the run's cloud self-destruct watchdog by its effective
+// TTL and records the heartbeat, so a healthy detached run isn't reaped while
+// dispatcher is still watching it. It refuses terminal runs and targets without
+// a watchdog (non-durable adapters). The caller persists the run.
+func RenewWatchdog(ctx context.Context, a adapter.TargetAdapter, r *Run) (time.Time, error) {
+	if r.GetState().IsTerminal() {
+		return time.Time{}, fmt.Errorf("run %s is %s; nothing to renew", r.ID, r.GetState())
+	}
+	durable, ok := a.(adapter.DurableAdapter)
+	if !ok {
+		return time.Time{}, fmt.Errorf("target %s has no watchdog to renew", r.TargetID)
+	}
+	ttl := r.effectiveWatchdogTTL()
+	deadline, err := durable.ExtendWatchdog(ctx, r.Handle, ttl)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("failed to renew watchdog for run %s: %w", r.ID, err)
+	}
+	r.LastHeartbeat = time.Now().UTC()
+	return deadline, nil
+}
 
 // AdapterResolver resolves a target ID to an adapter instance.
 type AdapterResolver func(targetID string) (adapter.TargetAdapter, error)

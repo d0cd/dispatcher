@@ -82,6 +82,32 @@ func (r *Registry) LoadUserConfig() error {
 	return nil
 }
 
+// DeleteTarget removes the user-defined target file at
+// <state-dir>/targets/<id>.yaml (the file SaveTarget writes). Builtins and
+// project-local `dispatcher.yaml` targets have no such file and aren't
+// removable here. Applies the same id validation as SaveTarget so a crafted
+// id can't escape the targets directory.
+func DeleteTarget(id string) (string, error) {
+	if id == "" {
+		return "", fmt.Errorf("target id is empty")
+	}
+	if strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return "", fmt.Errorf("invalid target id %q: contains path separator or traversal", id)
+	}
+	dir, err := state.Subdir("targets")
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(dir, id+".yaml")
+	if _, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("no user-defined target %q to remove (builtins and dispatcher.yaml targets are not removable)", id)
+	}
+	if err := os.Remove(path); err != nil {
+		return "", fmt.Errorf("cannot remove target file: %w", err)
+	}
+	return path, nil
+}
+
 // LoadProjectConfig loads targets from dispatcher.yaml in the given directory.
 func (r *Registry) LoadProjectConfig(dir string) error {
 	for _, name := range []string{"dispatcher.yaml", "dispatcher.yml"} {

@@ -76,20 +76,37 @@ func (a *K8sAdapter) Prepare(_ context.Context, _ *types.Plan) error {
 func (a *K8sAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	w := p.Workload
 	jobName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
-	remoteDir := "/workspace"
 
-	// Determine image
 	image := "ubuntu:24.04"
-	if w.Package.Dockerfile != "" || w.Package.BaseImage != "" {
-		if w.Package.BaseImage != "" {
-			image = w.Package.BaseImage
+	if w.Package.BaseImage != "" {
+		image = w.Package.BaseImage
+	}
+
+	// The workload runs as the Job's main container, so its command goes into the
+	// manifest — build it before creating the Job.
+	var cmdStr string
+	if len(w.Command) > 0 {
+		cmdStr = adapter.ShellQuoteArgs(w.Command)
+	} else if len(w.Entrypoints) > 0 {
+		cmdStr = adapter.ShellQuoteArgs(adapter.RuntimeCommand(w.Runtime, w.Entrypoints[0], true))
+	} else {
+		return nil, fmt.Errorf("no command or entrypoint")
+	}
+
+	gpuCount := 0
+	if w.Requirements.GPU.Required {
+		gpuCount = w.Requirements.GPU.Count
+		if gpuCount == 0 {
+			gpuCount = 1
 		}
 	}
 
-	// Create the Job
 	vmInfo, err := a.provider.CreateVM(ctx, VMOptions{
-		Name:  jobName,
-		Image: image,
+		Name:               jobName,
+		Image:              image,
+		Command:            cmdStr,
+		MaxLifetimeSeconds: int(p.Constraints.MaxDuration.Seconds()),
+		GPUCount:           gpuCount,
 		Tags: map[string]string{
 			"dispatcher":        "true",
 			"dispatcher-run-id": p.Metadata.ID,
@@ -99,61 +116,33 @@ func (a *K8sAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHa
 		return nil, fmt.Errorf("job creation failed: %w", err)
 	}
 
-	// Get the pod name
 	podName, err := a.getPodName(ctx, jobName)
 	if err != nil {
 		_ = a.provider.DestroyVM(ctx, jobName)
 		return nil, fmt.Errorf("cannot find pod: %w", err)
 	}
 
-	// Copy source to pod
+	// Deliver source into the shared volume via the init container, then drop the
+	// ready marker so the init container exits and the workload container starts.
 	if w.Source.Path != "" {
-		if err := a.copyToPod(ctx, podName, w.Source.Path, remoteDir); err != nil {
+		if err := a.copyToInit(ctx, podName, w.Source.Path); err != nil {
 			_ = a.provider.DestroyVM(ctx, jobName)
 			return nil, fmt.Errorf("file copy failed: %w", err)
 		}
 	}
-
-	// Build command
-	var cmdStr string
-	if len(w.Command) > 0 {
-		cmdStr = adapter.ShellQuoteArgs(w.Command)
-	} else if len(w.Entrypoints) > 0 {
-		parts := adapter.RuntimeCommand(w.Runtime, w.Entrypoints[0], true)
-		cmdStr = adapter.ShellQuoteArgs(parts)
-	} else {
+	if err := a.signalReady(ctx, podName); err != nil {
 		_ = a.provider.DestroyVM(ctx, jobName)
-		return nil, fmt.Errorf("no command or entrypoint")
-	}
-
-	logPath := remoteDir + "/dispatcher.log"
-
-	// Start workload in background
-	execCmd := fmt.Sprintf("cd %s && nohup sh -c %s > %s 2>&1 &",
-		adapter.ShellQuote(remoteDir),
-		adapter.ShellQuote(cmdStr),
-		adapter.ShellQuote(logPath))
-
-	kubectl := exec.CommandContext(ctx, "kubectl", "exec", podName,
-		"-n", a.namespace, "--", "sh", "-c", execCmd)
-	if err := kubectl.Run(); err != nil {
-		_ = a.provider.DestroyVM(ctx, jobName)
-		return nil, fmt.Errorf("workload start failed: %w", err)
+		return nil, fmt.Errorf("failed to start workload: %w", err)
 	}
 
 	state := &K8sState{
 		JobName:   jobName,
 		Namespace: a.namespace,
 		PodName:   podName,
-		RemoteDir: remoteDir,
-		LogPath:   logPath,
+		RemoteDir: k8sWorkspaceDir,
+		LogPath:   k8sLogFile,
 	}
-
-	return &adapter.RunHandle{
-		ID:       vmInfo.ID,
-		TargetID: "kubernetes",
-		State:    state,
-	}, nil
+	return &adapter.RunHandle{ID: vmInfo.ID, TargetID: "kubernetes", State: state}, nil
 }
 
 func (a *K8sAdapter) Status(ctx context.Context, h *adapter.RunHandle) (types.RunState, error) {
@@ -174,8 +163,11 @@ func (a *K8sAdapter) Status(ctx context.Context, h *adapter.RunHandle) (types.Ru
 
 func (a *K8sAdapter) Logs(ctx context.Context, h *adapter.RunHandle, w io.Writer) error {
 	state := h.State.(*K8sState)
-	cmd := exec.CommandContext(ctx, "kubectl", "exec", state.PodName,
-		"-n", a.namespace, "--", "cat", state.LogPath)
+	// kubectl logs reads the workload container's stdout/stderr, which the
+	// kubelet retains after the container terminates (until the Job is GC'd) —
+	// unlike exec-cat, which fails once the pod is gone.
+	cmd := exec.CommandContext(ctx, "kubectl", "logs", state.PodName,
+		"-c", "workload", "-n", a.namespace)
 	cmd.Stdout = w
 	cmd.Stderr = w
 	return cmd.Run()
@@ -244,9 +236,11 @@ func (a *K8sAdapter) Reconnect(_ context.Context, handleID string, raw json.RawM
 	return &adapter.RunHandle{ID: handleID, TargetID: "kubernetes", State: &state}, nil
 }
 
-func (a *K8sAdapter) ExtendWatchdog(_ context.Context, _ *adapter.RunHandle, ttl time.Duration) (time.Time, error) {
-	// K8s Jobs have ttlSecondsAfterFinished; no watchdog needed
-	return time.Now().Add(ttl), nil
+func (a *K8sAdapter) ExtendWatchdog(_ context.Context, _ *adapter.RunHandle, _ time.Duration) (time.Time, error) {
+	// k8s Jobs are bounded by a fixed activeDeadlineSeconds, not a renewable
+	// watchdog; orphans are reclaimed by `dispatcher gc`. Report honestly so
+	// status/renew don't claim a renewal that didn't happen.
+	return time.Time{}, fmt.Errorf("kubernetes runs use a fixed deadline, not a renewable watchdog")
 }
 
 func (a *K8sAdapter) ListResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
@@ -288,12 +282,28 @@ func (a *K8sAdapter) getPodName(ctx context.Context, jobName string) (string, er
 	return name, nil
 }
 
-func (a *K8sAdapter) copyToPod(ctx context.Context, podName, srcPath, destDir string) error {
-	// kubectl cp requires tar, copies directory
-	cmd := exec.CommandContext(ctx, "kubectl", "cp", srcPath, podName+":"+destDir,
-		"-n", a.namespace)
+// copyToInit copies the workload source into the shared volume via the init
+// container (the only container running while the pod waits for the ready
+// marker). The emptyDir is shared, so the workload container sees the files.
+func (a *K8sAdapter) copyToInit(ctx context.Context, podName, srcPath string) error {
+	// Trailing "/." copies the directory's CONTENTS into /workspace rather than
+	// nesting them under /workspace/<dirname>, so the workload (workingDir
+	// /workspace) finds its files directly.
+	cmd := exec.CommandContext(ctx, "kubectl", "cp", srcPath+"/.", podName+":"+k8sWorkspaceDir,
+		"-c", k8sInitName, "-n", a.namespace)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("kubectl cp failed: %s: %w", string(output), err)
+	}
+	return nil
+}
+
+// signalReady drops the ready marker into the shared volume, releasing the init
+// container so the workload container starts.
+func (a *K8sAdapter) signalReady(ctx context.Context, podName string) error {
+	cmd := exec.CommandContext(ctx, "kubectl", "exec", podName, "-c", k8sInitName,
+		"-n", a.namespace, "--", "touch", k8sReadyMarker)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("kubectl exec (signal ready) failed: %s: %w", string(output), err)
 	}
 	return nil
 }

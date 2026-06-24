@@ -156,7 +156,7 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 	if g.project != "" {
 		args = append(args, "--project", g.project)
 	}
-	out, err := exec.CommandContext(ctx, "gcloud", args...).Output()
+	out, err := runCLI(ctx, "gcloud", args...)
 	if err != nil {
 		return g.zone
 	}
@@ -184,8 +184,7 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 		args = append(args, "--project", g.project)
 	}
 
-	cmd := exec.CommandContext(ctx, "gcloud", args...)
-	output, err := cmd.Output()
+	output, err := runCLI(ctx, "gcloud", args...)
 	if err != nil {
 		return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
 	}
@@ -215,8 +214,7 @@ func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
 	if g.project != "" {
 		args = append(args, "--project", g.project)
 	}
-	cmd := exec.CommandContext(ctx, "gcloud", args...)
-	if err := cmd.Run(); err != nil {
+	if _, err := runCLI(ctx, "gcloud", args...); err != nil {
 		return fmt.Errorf("gcloud compute instances delete failed: %w", err)
 	}
 	return nil
@@ -242,8 +240,7 @@ func (g *GCPProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VM
 		args = append(args, "--filter", strings.Join(filters, " AND "))
 	}
 
-	cmd := exec.CommandContext(ctx, "gcloud", args...)
-	output, err := cmd.Output()
+	output, err := runCLI(ctx, "gcloud", args...)
 	if err != nil {
 		return nil, wrapExecError("gcloud compute instances list", err)
 	}

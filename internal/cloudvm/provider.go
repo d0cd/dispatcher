@@ -29,6 +29,16 @@ type VMOptions struct {
 	// AllowSSHFrom, when a non-empty CIDR, requests a per-run firewall that
 	// permits inbound SSH only from that range. Empty = no firewall.
 	AllowSSHFrom string
+	// MaxLifetimeSeconds is an absolute upper bound on the resource's lifetime
+	// (from the run's MaxDuration). Zero = no hard cap. On Kubernetes it becomes
+	// the Job's activeDeadlineSeconds.
+	MaxLifetimeSeconds int
+	// Command is the workload shell command. On Kubernetes it runs as the Job's
+	// main container so the Job's success/failure reflects the workload's exit.
+	Command string
+	// GPUCount, when > 0, requests that many GPUs. On Kubernetes it becomes the
+	// container's nvidia.com/gpu resource limit.
+	GPUCount int
 }
 
 // VMInfo describes a provisioned VM.

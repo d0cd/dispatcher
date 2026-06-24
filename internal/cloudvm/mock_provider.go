@@ -19,6 +19,11 @@ type MockProvider struct {
 	DestroyErr error
 	GetErr     error
 	CLIErr     error
+	WaitErr    error
+
+	// DestroyCtx records the context passed to the most recent DestroyVM, so
+	// tests can assert cleanup uses a fresh (non-cancelled) context.
+	DestroyCtx context.Context
 
 	// Lima-style overrides: when set, CreateVM populates these on the
 	// returned VMInfo so tests can exercise the provider-supplied-identity
@@ -68,7 +73,7 @@ func (m *MockProvider) CreateVM(_ context.Context, opts VMOptions) (*VMInfo, err
 }
 
 func (m *MockProvider) WaitReady(_ context.Context, _ string, _ string, _ string) error {
-	return nil
+	return m.WaitErr
 }
 
 func (m *MockProvider) GetVM(_ context.Context, vmID string) (*VMInfo, error) {
@@ -86,14 +91,14 @@ func (m *MockProvider) GetVM(_ context.Context, vmID string) (*VMInfo, error) {
 	return vm, nil
 }
 
-func (m *MockProvider) DestroyVM(_ context.Context, vmID string) error {
-	if m.DestroyErr != nil {
-		return m.DestroyErr
-	}
-
+func (m *MockProvider) DestroyVM(ctx context.Context, vmID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.DestroyCtx = ctx
+	if m.DestroyErr != nil {
+		return m.DestroyErr
+	}
 	if vm, ok := m.vms[vmID]; ok {
 		vm.State = VMStateTerminated
 		delete(m.vms, vmID)

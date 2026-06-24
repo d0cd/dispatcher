@@ -26,7 +26,7 @@ The reconciler audits what happened.
 
 ## What's Built
 
-### CLI Commands (18 top-level + 3 `targets` subcommands)
+### CLI Commands (19 top-level + 3 `targets` subcommands)
 
 ```bash
 dispatcher init [path]              # Scaffold dispatcher.yaml from workload inspection
@@ -46,6 +46,7 @@ dispatcher deny <run-id>            # Deny a pending policy gate
 dispatcher targets list             # List configured targets
 dispatcher targets add <id>         # Add a new target
 dispatcher targets doctor <id>      # Health check a target
+dispatcher renew <run-id>           # Extend a running cloud run's self-destruct watchdog
 dispatcher gc [--dry-run]           # Find and destroy orphaned cloud resources
 dispatcher recover                  # Inventory cloud VMs whose local record is missing
 dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to-date

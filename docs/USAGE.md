@@ -44,7 +44,7 @@ dispatcher stop <run-id>       # Stop and clean up
 
 | Command | Purpose |
 |---|---|
-| `status <run-id>` | Run state (reconnects to live VMs; persists discovered terminal states). |
+| `status <run-id>` | Run state (reconnects to live VMs; persists discovered terminal states). Reconnecting to a still-running cloud run also extends its watchdog (see `renew`). |
 | `logs <run-id>` | Stream logs (reconnects to live VMs). |
 | `cost <run-id>` | Realized cost, broken down. |
 | `list [--refresh]` | All runs with status / cost / duration. `--refresh` reconnects to non-terminal runs and updates state. Idle non-terminal runs (>6h) are flagged `STALE` so you can spot orphans. |
@@ -57,6 +57,7 @@ dispatcher stop <run-id>       # Stop and clean up
 | Command | Purpose |
 |---|---|
 | `stop <run-id> [--force]` | Terminate and clean up a running workload. `--force` finalizes a stranded run whose record can no longer be reconnected (no handle state, provider unreachable), marking it terminal without cleanup — reclaim any leftover resources with `gc`. |
+| `renew <run-id>` | Extend a running cloud run's self-destruct watchdog by its configured TTL. Run periodically (cron / systemd timer) to keep an unattended long-running workload alive past its watchdog TTL. |
 | `gc [--dry-run] [--yes]` | Find and destroy orphaned cloud VMs. Prompts for confirmation before destroying; `--dry-run` previews without destroying, `--yes`/`-y` skips the prompt. |
 | `recover [--attach]` | Inventory cloud VMs whose local run record is missing. `--attach` runs `status` against each recoverable run to refresh and persist live state. |
 
@@ -101,7 +102,7 @@ image: registry/tool:latest   # Pre-built image; skips build, runs as-is
 command: ["python", "main.py"] # Override detected entrypoint
 gpu:                          # GPU requirements
   count: 1
-  model: h100
+  model: a100                 # pin a catalog model (a100, l4, t4, v100, a10g); unset = cheapest GPU
   framework: pytorch
 service:                      # Long-running service
   port: 8080
@@ -112,9 +113,11 @@ target: hetzner-vm            # Force a specific target
 outputs:                      # Workload-relative paths to retrieve before cleanup
   - results/
   - model.bin
-watchdogTtl: 30m              # Cloud VM self-destruct timer (default 30m)
+watchdogTtl: 30m              # Cloud-VM self-destruct timer (default 30m; renewed while supervised). k8s Jobs use maxTime → activeDeadlineSeconds instead.
 retryTransientFailures: true  # Retry once on transient failure (OOM/SIGKILL); CLI --retry-transient wins
 ```
+
+**GPU workloads:** dispatcher provisions the catalog instance that matches the GPU requirement. If no catalog instance matches (an unknown `gpu.model`, or a provider with no GPU inventory), `plan` flags a `gpu-unschedulable` risk and `run` refuses rather than silently launching a CPU-only box.
 
 State lives in `.dispatcher/` (per-project, found by walking up from cwd) or `~/.dispatcher/` (fallback). Override with `$DISPATCHER_HOME` or the global `--state-dir` flag.
 

@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/run"
 )
 
@@ -31,12 +32,19 @@ before running for real, especially with long-lived state directories.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 
-		// Load all active (non-terminal) run IDs
+		// Load all active (non-terminal) run IDs. A record that exists but fails
+		// to parse is tracked separately: we must NOT treat its VM as an orphan,
+		// since a corrupt record could belong to a live run — destroying it would
+		// be irreversible data loss. Fail safe by protecting it instead.
 		runIDs, _ := run.ListRecords()
 		activeRuns := map[string]bool{}
+		unreadableRuns := map[string]bool{}
 		for _, id := range runIDs {
 			rec, err := run.LoadRecord(id)
-			if err == nil && !rec.State.IsTerminal() {
+			switch {
+			case err != nil:
+				unreadableRuns[id] = true
+			case !rec.State.IsTerminal():
 				activeRuns[id] = true
 			}
 		}
@@ -68,6 +76,10 @@ before running for real, especially with long-lived state directories.`,
 			for _, res := range resources {
 				if res.RunID != "" && activeRuns[res.RunID] {
 					continue // active run, not an orphan
+				}
+				if res.RunID != "" && unreadableRuns[res.RunID] {
+					red.Fprintf(os.Stderr, "  Skipping %s: run %s record is unreadable; refusing to destroy (could be live). Remove the run record to allow GC.\n", res.ResourceID, res.RunID)
+					continue
 				}
 
 				orphans = append(orphans, orphan{adapter: a, res: res})
@@ -105,6 +117,12 @@ before running for real, especially with long-lived state directories.`,
 			} else {
 				green.Fprintf(os.Stderr, "  destroyed %s\n", o.res.ResourceID)
 				totalDestroyed++
+				// Reclaim the per-run SSH key material the orphaned run left on
+				// disk (the normal Cleanup path never ran for it). No-op for
+				// targets without per-run keys (e.g. Kubernetes).
+				if o.res.RunID != "" {
+					cloudvm.RemoveRunKeyFiles(o.res.RunID)
+				}
 			}
 		}
 

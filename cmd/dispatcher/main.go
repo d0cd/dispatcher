@@ -1,7 +1,7 @@
 package main
 
 import (
-	"errors"
+	"fmt"
 	"os"
 	"syscall"
 
@@ -17,13 +17,9 @@ func main() {
 	// any future caller that forgets.
 	syscall.Umask(0o077)
 
-	err := cli.Execute()
-	if err == nil {
-		return
+	code, message := cli.ResolveExitError(cli.Execute())
+	if message != "" {
+		fmt.Fprintln(os.Stderr, "Error:", message)
 	}
-	var ee *cli.ExitError
-	if errors.As(err, &ee) {
-		os.Exit(ee.Code)
-	}
-	os.Exit(1)
+	os.Exit(code)
 }

@@ -30,10 +30,16 @@ func executeCommand(args ...string) (string, string, error) {
 
 	err := rootCmd.Execute()
 
-	// Reset for next call
+	// Reset for next call. Persistent flags retain their parsed values across
+	// Execute calls, so reset the globals too — otherwise e.g. `--json` from one
+	// test leaks into the next and silently changes its output format.
 	rootCmd.SetOut(nil)
 	rootCmd.SetErr(nil)
 	rootCmd.SetArgs(nil)
+	rootFlags.output = "text"
+	rootFlags.json = false
+	rootFlags.stateDir = ""
+	rootFlags.noColor = false
 
 	return stdout.String(), stderr.String(), err
 }
@@ -51,6 +57,55 @@ func TestCLI_TargetsList(t *testing.T) {
 	_, _, err := executeCommand("targets", "list")
 	require.NoError(t, err)
 	// Output goes to os.Stdout directly; we verify no error.
+}
+
+func TestCLI_TargetsDoctor_NotFoundListsAvailable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, _, err := executeCommand("targets", "doctor", "no-such-target-xyz")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no-such-target-xyz")
+	assert.Contains(t, err.Error(), "available targets:")
+	// A known builtin should be listed so the user can correct a typo.
+	assert.Contains(t, err.Error(), "local-docker")
+}
+
+func TestCLI_TargetsRemove(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	_, _, err := executeCommand("targets", "add", "tmp-box", "--kind", "docker")
+	require.NoError(t, err)
+
+	_, _, err = executeCommand("targets", "remove", "tmp-box")
+	require.NoError(t, err)
+
+	// Removing again must fail — the file is gone.
+	_, _, err = executeCommand("targets", "remove", "tmp-box")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tmp-box")
+}
+
+func TestCLI_Validate_Valid(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatcher.yaml"),
+		[]byte("name: demo\nmaxCost: 5\nmaxTime: 1h\n"), 0o644))
+	_, _, err := executeCommand("validate", dir)
+	require.NoError(t, err)
+}
+
+func TestCLI_Validate_Invalid(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatcher.yaml"),
+		[]byte("name: demo\nmaxTime: not-a-duration\n"), 0o644))
+	_, _, err := executeCommand("validate", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "maxTime")
+}
+
+func TestCLI_Validate_NoConfig(t *testing.T) {
+	dir := t.TempDir()
+	_, _, err := executeCommand("validate", dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no dispatcher.yaml")
 }
 
 func TestCLI_Plan(t *testing.T) {

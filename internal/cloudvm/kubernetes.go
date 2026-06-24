@@ -2,6 +2,7 @@ package cloudvm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -71,8 +72,9 @@ func (k *KubernetesProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMI
 		return nil, fmt.Errorf("kubectl apply failed: %s: %w", string(output), err)
 	}
 
-	// Wait for pod to be running
-	if err := k.waitForPod(ctx, jobName); err != nil {
+	// Wait for the init container to be running so dispatcher can copy source
+	// into it and signal readiness (the workload container starts after that).
+	if err := k.waitForInitRunning(ctx, jobName); err != nil {
 		_ = k.DestroyVM(ctx, jobName)
 		return nil, err
 	}
@@ -177,11 +179,49 @@ func (k *KubernetesProvider) ListVMs(ctx context.Context, tags map[string]string
 	return vms, nil
 }
 
+const (
+	k8sWorkspaceDir = "/workspace"
+	k8sReadyMarker  = "/workspace/.dispatcher-ready"
+	k8sLogFile      = "/workspace/dispatcher.log"
+	k8sInitName     = "dispatcher-init"
+)
+
+// k8sInitScript blocks until dispatcher has copied the source and dropped the
+// ready marker into the shared volume, so the workload container starts only
+// once its inputs are in place.
+func k8sInitScript() string {
+	return fmt.Sprintf("while [ ! -f %s ]; do sleep 1; done", k8sReadyMarker)
+}
+
+// k8sWorkloadScript is the main container command: decode and run the workload
+// as the container's process so the Job's success/failure reflects the
+// workload's exit code. Output goes to the container's stdout/stderr so `kubectl
+// logs` can retrieve it during AND after the run (kubelet retains it until the
+// Job is GC'd) — a file in the emptyDir would vanish when the pod terminates.
+// The command is base64-encoded so no shell/YAML metacharacter breaks the manifest.
+func k8sWorkloadScript(command string) string {
+	encoded := base64.StdEncoding.EncodeToString([]byte(command))
+	return fmt.Sprintf("echo %s | base64 -d | sh", encoded)
+}
+
 func (k *KubernetesProvider) buildJobManifest(name, image string, opts VMOptions) string {
-	// Build labels
-	labels := `    dispatcher: "true"`
-	for key, val := range opts.Tags {
-		labels += fmt.Sprintf("\n    %s: \"%s\"", key, val)
+	// Labels render at two depths: 4 spaces under the Job's metadata.labels and
+	// 8 spaces under template.metadata.labels. Reusing one block under-indents
+	// the pod-template labels, dropping them (and injecting stray keys).
+	topLabels := k8sLabelBlock(opts.Tags, "    ")
+	podLabels := k8sLabelBlock(opts.Tags, "        ")
+
+	// Hard runtime ceiling from MaxDuration; omitted when unset (the workload
+	// runs to completion and orphans are reclaimed by `dispatcher gc`).
+	deadlineLine := ""
+	if opts.MaxLifetimeSeconds > 0 {
+		deadlineLine = fmt.Sprintf("\n  activeDeadlineSeconds: %d", opts.MaxLifetimeSeconds)
+	}
+
+	// GPU request so k8s schedules onto a GPU node instead of silently using CPU.
+	gpuBlock := ""
+	if opts.GPUCount > 0 {
+		gpuBlock = fmt.Sprintf("\n        resources:\n          limits:\n            nvidia.com/gpu: \"%d\"", opts.GPUCount)
 	}
 
 	manifest := fmt.Sprintf(`apiVersion: batch/v1
@@ -193,25 +233,50 @@ metadata:
 %s
 spec:
   backoffLimit: 0
-  ttlSecondsAfterFinished: 300
+  ttlSecondsAfterFinished: 300%s
   template:
     metadata:
       labels:
 %s
     spec:
       restartPolicy: Never
+      volumes:
+      - name: workspace
+        emptyDir: {}
+      initContainers:
+      - name: %s
+        image: %s
+        command: ["sh", "-c", "%s"]
+        volumeMounts:
+        - name: workspace
+          mountPath: %s
       containers:
       - name: workload
         image: %s
-        command: ["sleep", "86400"]
-`, name, k.namespace, labels, labels, image)
+        workingDir: %s
+        command: ["sh", "-c", "%s"]%s
+        volumeMounts:
+        - name: workspace
+          mountPath: %s
+`, name, k.namespace, topLabels, deadlineLine, podLabels,
+		k8sInitName, image, k8sInitScript(), k8sWorkspaceDir,
+		image, k8sWorkspaceDir, k8sWorkloadScript(opts.Command), gpuBlock, k8sWorkspaceDir)
 
 	return manifest
 }
 
-func (k *KubernetesProvider) waitForPod(ctx context.Context, jobName string) error {
+// k8sLabelBlock renders the dispatcher label set at the given indentation.
+func k8sLabelBlock(tags map[string]string, indent string) string {
+	block := indent + `dispatcher: "true"`
+	for key, val := range tags {
+		block += fmt.Sprintf("\n%s%s: \"%s\"", indent, key, val)
+	}
+	return block
+}
+
+func (k *KubernetesProvider) waitForInitRunning(ctx context.Context, jobName string) error {
 	deadline := time.After(5 * time.Minute)
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
 	for {
@@ -219,21 +284,22 @@ func (k *KubernetesProvider) waitForPod(ctx context.Context, jobName string) err
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline:
-			return fmt.Errorf("timeout waiting for pod to be running")
+			return fmt.Errorf("timeout waiting for init container to start")
 		case <-ticker.C:
 			cmd := exec.CommandContext(ctx, "kubectl", "get", "pods",
 				"-n", k.namespace, "-l", "job-name="+jobName,
-				"-o", "jsonpath={.items[0].status.phase}")
-			output, err := cmd.Output()
-			if err != nil {
-				continue
-			}
-			phase := strings.TrimSpace(string(output))
-			if phase == "Running" {
+				"-o", "jsonpath={.items[0].status.initContainerStatuses[0].state.running.startedAt}")
+			if out, err := cmd.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 				return nil
 			}
-			if phase == "Failed" || phase == "Error" {
-				return fmt.Errorf("pod failed to start (phase: %s)", phase)
+			// Bail out if the pod has already failed (e.g. image pull error).
+			pcmd := exec.CommandContext(ctx, "kubectl", "get", "pods",
+				"-n", k.namespace, "-l", "job-name="+jobName,
+				"-o", "jsonpath={.items[0].status.phase}")
+			if pout, perr := pcmd.Output(); perr == nil {
+				if phase := strings.TrimSpace(string(pout)); phase == "Failed" {
+					return fmt.Errorf("pod failed before init container started")
+				}
 			}
 		}
 	}

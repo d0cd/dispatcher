@@ -640,7 +640,16 @@ func TestNewLiveCatalog_Aggregates(t *testing.T) {
 	)
 	require.NoError(t, err)
 	assert.Empty(t, skipped)
-	assert.Len(t, cat.instances, 2)
+	provs := providerSet(cat.instances)
+	assert.True(t, provs[ProviderHetzner] && provs[ProviderAzure], "both providers' instances aggregated")
+}
+
+func providerSet(insts []InstanceType) map[ProviderID]bool {
+	m := map[ProviderID]bool{}
+	for _, i := range insts {
+		m[i.Provider] = true
+	}
+	return m
 }
 
 func TestNewLiveCatalog_SkipsMissingCreds(t *testing.T) {
@@ -654,7 +663,7 @@ func TestNewLiveCatalog_SkipsMissingCreds(t *testing.T) {
 	require.Len(t, skipped, 1)
 	assert.Equal(t, ProviderAWS, skipped[0].Provider)
 	assert.Contains(t, skipped[0].Reason, "credentials")
-	assert.Len(t, cat.instances, 1, "skipped providers contribute no instances")
+	assert.False(t, providerSet(cat.instances)[ProviderAWS], "skipped providers contribute no instances")
 }
 
 func TestNewLiveCatalog_SkipsOnTransientError(t *testing.T) {
@@ -671,5 +680,45 @@ func TestNewLiveCatalog_SkipsOnTransientError(t *testing.T) {
 	assert.Equal(t, ProviderHetzner, skipped[0].Provider)
 	assert.Contains(t, skipped[0].Reason, "transient")
 	assert.Contains(t, skipped[0].Reason, "network exploded")
-	assert.Len(t, cat.instances, 1, "the other providers' data should still load")
+	provs := providerSet(cat.instances)
+	assert.True(t, provs[ProviderAzure], "the other provider's data should still load")
+	assert.False(t, provs[ProviderHetzner], "the failed provider contributes nothing")
+}
+
+// A provider whose live feed returns no GPU rows (Azure today) must still
+// resolve a GPU instance from the static catalog, so a GPU workload isn't
+// refused at provisioning.
+func TestNewLiveCatalog_SeedsStaticGPUWhenFeedHasNone(t *testing.T) {
+	cat, _, err := NewLiveCatalog(context.Background(), &fakeFetcher{
+		provider:  ProviderAzure,
+		instances: []InstanceType{{Name: "Standard_B2s", Provider: ProviderAzure, VCPUs: 2, MemoryGB: 4, PricePerHour: 0.042}},
+	})
+	require.NoError(t, err)
+
+	gpu := cat.FindCheapestForProvider(ProviderAzure, InstanceRequirements{GPUCount: 1})
+	require.NotEmpty(t, gpu, "GPU workload on Azure must resolve a static GPU instance when the live feed has none")
+	assert.GreaterOrEqual(t, gpu[0].GPUCount, 1)
+}
+
+// Hetzner Cloud has no GPU SKU, so the catalog must never resolve a GPU instance
+// for it — provisioning would otherwise send a phantom server type to hcloud.
+func TestCatalog_HetznerHasNoGPU(t *testing.T) {
+	assert.Empty(t, NewCatalog().FindCheapestForProvider(ProviderHetzner, InstanceRequirements{GPUCount: 1}),
+		"Hetzner Cloud offers no GPU server type")
+}
+
+// A provider whose live feed already includes GPU rows must keep only those —
+// no duplicate static rows.
+func TestNewLiveCatalog_DoesNotSeedWhenFeedHasGPU(t *testing.T) {
+	cat, _, err := NewLiveCatalog(context.Background(), &fakeFetcher{
+		provider: ProviderAWS,
+		instances: []InstanceType{
+			{Name: "live-gpu", Provider: ProviderAWS, VCPUs: 4, MemoryGB: 16, GPUCount: 1, GPUModel: "t4", PricePerHour: 0.5},
+		},
+	})
+	require.NoError(t, err)
+
+	gpu := cat.FindCheapestForProvider(ProviderAWS, InstanceRequirements{GPUCount: 1})
+	require.Len(t, gpu, 1, "should use only the live GPU row, not also static AWS GPU rows")
+	assert.Equal(t, "live-gpu", gpu[0].Name)
 }

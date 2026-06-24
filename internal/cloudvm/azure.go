@@ -128,13 +128,12 @@ func (a *AzureProvider) WaitReady(ctx context.Context, _ string, ip string, _ st
 }
 
 func (a *AzureProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
-	cmd := exec.CommandContext(ctx, "az", "vm", "show",
+	output, err := runCLI(ctx, "az", "vm", "show",
 		"--resource-group", a.resourceGroup,
 		"--name", vmID,
 		"--show-details",
 		"--output", "json",
 	)
-	output, err := cmd.Output()
 	if err != nil {
 		return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
 	}
@@ -162,13 +161,12 @@ func (a *AzureProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error)
 }
 
 func (a *AzureProvider) DestroyVM(ctx context.Context, vmID string) error {
-	cmd := exec.CommandContext(ctx, "az", "vm", "delete",
+	if _, err := runCLI(ctx, "az", "vm", "delete",
 		"--resource-group", a.resourceGroup,
 		"--name", vmID,
 		"--yes",
 		"--force-deletion", "true",
-	)
-	if err := cmd.Run(); err != nil {
+	); err != nil {
 		return fmt.Errorf("az vm delete failed: %w", err)
 	}
 	return nil
@@ -181,8 +179,7 @@ func (a *AzureProvider) ListVMs(ctx context.Context, tags map[string]string) ([]
 		"--output", "json",
 	}
 
-	cmd := exec.CommandContext(ctx, "az", args...)
-	output, err := cmd.Output()
+	output, err := runCLI(ctx, "az", args...)
 	if err != nil {
 		return nil, wrapExecError("az vm list", err)
 	}

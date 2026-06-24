@@ -40,6 +40,18 @@ func TestCatalog_FindCheapest_GPUModel(t *testing.T) {
 	}
 }
 
+// A user-pinned model like "A100" must match the lowercase catalog entry —
+// otherwise a case mismatch silently yields no GPU instance.
+func TestCatalog_FindCheapest_GPUModel_CaseInsensitive(t *testing.T) {
+	cat := NewCatalog()
+	results := cat.FindCheapest(InstanceRequirements{GPUCount: 1, GPUModel: "A100"})
+
+	require.NotEmpty(t, results, "uppercase model pin should still match the catalog")
+	for _, r := range results {
+		assert.Equal(t, "a100", r.GPUModel)
+	}
+}
+
 func TestCatalog_FindCheapest_ARM(t *testing.T) {
 	cat := NewCatalog()
 	results := cat.FindCheapest(InstanceRequirements{MinVCPUs: 4, Arch: "arm64"})

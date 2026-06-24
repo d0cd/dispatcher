@@ -73,6 +73,14 @@ func retryCLIOutput(ctx context.Context, bin, label string, args ...string) ([]b
 	return out, err
 }
 
+// runCLI executes a provider CLI and returns its stdout. It is a package-level
+// seam so tests can capture the exact argv and stub output without invoking a
+// real cloud binary — the teardown/list/get command lines are cost-critical and
+// must not regress.
+var runCLI = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, name, args...).Output()
+}
+
 // wrapExecError appends stderr from an *exec.ExitError so the classifier can
 // see the cloud CLI's actual complaint, not just "exit status 1".
 func wrapExecError(label string, err error) error {

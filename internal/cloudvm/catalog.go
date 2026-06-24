@@ -1,6 +1,9 @@
 package cloudvm
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // InstanceType describes a single VM offering with pricing.
 type InstanceType struct {
@@ -51,7 +54,7 @@ func (c *Catalog) FindCheapest(req InstanceRequirements) []InstanceType {
 		if req.GPUCount > 0 && inst.GPUCount < req.GPUCount {
 			continue
 		}
-		if req.GPUModel != "" && inst.GPUModel != req.GPUModel {
+		if req.GPUModel != "" && !strings.EqualFold(inst.GPUModel, req.GPUModel) {
 			continue
 		}
 		if req.Arch != "" && inst.Arch != req.Arch {

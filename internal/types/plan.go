@@ -27,6 +27,11 @@ type CostEstimate struct {
 	Confidence  Confidence `yaml:"confidence" json:"confidence"`
 	Assumptions []string   `yaml:"assumptions,omitempty" json:"assumptions,omitempty"`
 	Exclusions  []string   `yaml:"exclusions,omitempty" json:"exclusions,omitempty"`
+	// InstanceType is the cloud instance the estimate was priced against, set
+	// when the estimate comes from the catalog. Carried so provisioning can
+	// launch the instance that was actually priced. Empty for non-catalog
+	// estimates (local/docker/rate-card).
+	InstanceType string `yaml:"instanceType,omitempty" json:"instanceType,omitempty"`
 }
 
 // PlanMetadata contains identification and audit info.
