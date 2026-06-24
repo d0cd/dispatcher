@@ -154,6 +154,8 @@ func TestValidateSSHTarget(t *testing.T) {
 		Host: "host.example.com", User: "ubuntu", KeyFile: "/home/me/.ssh/id_ed25519",
 	}))
 
+	assert.Error(t, ValidateSSHTarget(nil), "nil ssh config must be rejected")
+
 	bad := map[string]*types.SSHTargetConfig{
 		"empty host":            {Host: ""},
 		"host with colon":       {Host: "h:22"},
@@ -164,6 +166,7 @@ func TestValidateSSHTarget(t *testing.T) {
 		"user metachar":         {Host: "h", User: "a;b"},
 		"user leading dash":     {Host: "h", User: "-x"},
 		"key_file with newline": {Host: "h", KeyFile: "/k\nevil"},
+		"key_file flag-like":    {Host: "h", KeyFile: "-k"},
 	}
 	for name, c := range bad {
 		t.Run(name, func(t *testing.T) { assert.Error(t, ValidateSSHTarget(c)) })

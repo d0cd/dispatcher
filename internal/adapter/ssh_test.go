@@ -48,6 +48,16 @@ func TestSSHAdapter_Artifacts_RsyncsEachOutputSecurely(t *testing.T) {
 	assert.Equal(t, "out.txt", refs[0].Name)
 }
 
+func TestSSHAdapter_Artifacts_RsyncErrorSurfaces(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	stubRunRsync(t, func(_ context.Context, _ ...string) error { return assert.AnError })
+	a := NewSSHAdapter(SSHConfig{Host: "h", User: "u", RemoteDir: "/tmp/dispatcher"})
+	h := &RunHandle{ID: "x", RunID: "r", State: &sshState{outputs: []string{"results"}}}
+	refs, err := a.Artifacts(context.Background(), h)
+	assert.Error(t, err, "a failed transfer must surface, not be swallowed")
+	assert.Empty(t, refs)
+}
+
 func TestSSHAdapter_Artifacts_NoOutputsIsNoop(t *testing.T) {
 	called := false
 	stubRunRsync(t, func(_ context.Context, _ ...string) error { called = true; return nil })
@@ -59,15 +69,19 @@ func TestSSHAdapter_Artifacts_NoOutputsIsNoop(t *testing.T) {
 }
 
 func TestSSHAdapter_Artifacts_RejectsUnsafeOutput(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	called := false
-	stubRunRsync(t, func(_ context.Context, _ ...string) error { called = true; return nil })
-	a := NewSSHAdapter(SSHConfig{Host: "h", User: "u", RemoteDir: "/tmp/dispatcher"})
-	h := &RunHandle{ID: "x", RunID: "r", State: &sshState{outputs: []string{"../escape"}}}
-	refs, err := a.Artifacts(context.Background(), h)
-	assert.Error(t, err, "path traversal output must be rejected")
-	assert.Empty(t, refs)
-	assert.False(t, called, "must not rsync a traversal path")
+	for _, out := range []string{"../escape", "/etc/passwd"} {
+		t.Run(out, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			called := false
+			stubRunRsync(t, func(_ context.Context, _ ...string) error { called = true; return nil })
+			a := NewSSHAdapter(SSHConfig{Host: "h", User: "u", RemoteDir: "/tmp/dispatcher"})
+			h := &RunHandle{ID: "x", RunID: "r", State: &sshState{outputs: []string{out}}}
+			refs, err := a.Artifacts(context.Background(), h)
+			assert.Error(t, err, "absolute/traversal output must be rejected")
+			assert.Empty(t, refs)
+			assert.False(t, called, "must not rsync an unsafe path")
+		})
+	}
 }
 
 // containsAdjacent reports whether want appears as a contiguous subsequence

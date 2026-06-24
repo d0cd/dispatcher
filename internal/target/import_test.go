@@ -10,6 +10,16 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
+func TestDefaultCapabilities(t *testing.T) {
+	for _, k := range []types.TargetKind{
+		types.TargetKindDocker, types.TargetKindSSH, types.TargetKindKubernetes, types.TargetKindLocal,
+	} {
+		assert.NotEmpty(t, DefaultCapabilities(k).WorkloadKinds, "kind %s must advertise workload kinds", k)
+	}
+	assert.True(t, DefaultCapabilities(types.TargetKindKubernetes).Resources.GPU.Supported)
+	assert.True(t, DefaultCapabilities(types.TargetKindSSH).Networking.PublicEndpoint)
+}
+
 func TestParseDispatcherTargets_Valid(t *testing.T) {
 	blob := []byte(`{"targets":[{"id":"trainer","kind":"ssh","ssh":{"host":"203.0.113.10","user":"ubuntu","port":2222,"key_file":"/home/me/.ssh/id"}}]}`)
 	got, err := ParseDispatcherTargets(blob)
