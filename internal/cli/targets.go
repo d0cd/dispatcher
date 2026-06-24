@@ -96,7 +96,7 @@ var targetsAddCmd = &cobra.Command{
 			ID:           id,
 			Kind:         kind,
 			Enabled:      addFlags.enabled,
-			Capabilities: defaultCapabilitiesForKind(kind),
+			Capabilities: target.DefaultCapabilities(kind),
 		}
 
 		if kind == types.TargetKindSSH {
@@ -361,44 +361,6 @@ func statusIcon(status string) string {
 		return "-"
 	}
 	return "?"
-}
-
-func defaultCapabilitiesForKind(kind types.TargetKind) types.Capabilities {
-	switch kind {
-	case types.TargetKindDocker:
-		return types.Capabilities{
-			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindScript, types.WorkloadKindJob, types.WorkloadKindContainer, types.WorkloadKindService},
-			Resources:     types.ResourceCapability{CPU: true, Memory: true},
-			Accounting:    types.AccountingCapability{CostEstimate: true, RateCard: "local"},
-			Isolation:     types.IsolationCapability{Levels: []string{"container"}},
-			Observability: types.ObservabilityCapability{Logs: true, Artifacts: true},
-		}
-	case types.TargetKindSSH:
-		return types.Capabilities{
-			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindScript, types.WorkloadKindJob, types.WorkloadKindContainer, types.WorkloadKindService},
-			Resources:     types.ResourceCapability{CPU: true, Memory: true},
-			Networking:    types.NetworkingCapability{PublicEndpoint: true, PrivateVPCAccess: true},
-			Accounting:    types.AccountingCapability{CostEstimate: true, RateCard: "ssh"},
-			Isolation:     types.IsolationCapability{Levels: []string{"process", "container"}},
-			Observability: types.ObservabilityCapability{Logs: true, Artifacts: true},
-		}
-	case types.TargetKindKubernetes:
-		return types.Capabilities{
-			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindJob, types.WorkloadKindContainer, types.WorkloadKindService, types.WorkloadKindGPUJob},
-			Resources:     types.ResourceCapability{CPU: true, Memory: true, GPU: types.GPUCapability{Supported: true}},
-			Networking:    types.NetworkingCapability{PublicEndpoint: true, PrivateVPCAccess: true},
-			Accounting:    types.AccountingCapability{CostEstimate: true, RateCard: "internal"},
-			Isolation:     types.IsolationCapability{Levels: []string{"container", "dedicated-node"}},
-			Observability: types.ObservabilityCapability{Logs: true, Metrics: true, Artifacts: true},
-		}
-	default:
-		return types.Capabilities{
-			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindScript, types.WorkloadKindJob},
-			Resources:     types.ResourceCapability{CPU: true, Memory: true},
-			Accounting:    types.AccountingCapability{CostEstimate: true},
-			Observability: types.ObservabilityCapability{Logs: true},
-		}
-	}
 }
 
 func init() {
