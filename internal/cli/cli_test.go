@@ -71,6 +71,39 @@ func TestCLI_TargetsDoctor_NotFoundListsAvailable(t *testing.T) {
 	assert.Contains(t, err.Error(), "local-docker")
 }
 
+func TestCLI_TargetsImport_FromJSON(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	jf := filepath.Join(t.TempDir(), "t.json")
+	require.NoError(t, os.WriteFile(jf,
+		[]byte(`{"targets":[{"id":"byo","kind":"ssh","ssh":{"host":"h.example","user":"ubuntu"}}]}`), 0o644))
+
+	_, _, err := executeCommand("targets", "import", "--from-json", jf)
+	require.NoError(t, err)
+
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	tc, ok := r.Get("byo")
+	require.True(t, ok)
+	assert.True(t, tc.Enabled)
+	require.NotNil(t, tc.SSH)
+	assert.Equal(t, "h.example", tc.SSH.Host)
+}
+
+func TestCLI_TargetsImport_DryRunWritesNothing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	jf := filepath.Join(t.TempDir(), "t.json")
+	require.NoError(t, os.WriteFile(jf,
+		[]byte(`{"targets":[{"id":"byo","kind":"ssh","ssh":{"host":"h.example"}}]}`), 0o644))
+
+	_, _, err := executeCommand("targets", "import", "--from-json", jf, "--dry-run")
+	require.NoError(t, err)
+
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	_, ok := r.Get("byo")
+	assert.False(t, ok, "--dry-run must not persist anything")
+}
+
 func TestCLI_TargetsAdd_KeyFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 

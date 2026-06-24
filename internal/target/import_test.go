@@ -72,6 +72,63 @@ func TestParseDispatcherTargets_MalformedJSON(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestImportFromJSON_AddUpdateRemove(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	r1, err := ImportFromJSON([]byte(`{"targets":[
+		{"id":"a","kind":"ssh","ssh":{"host":"ha"}},
+		{"id":"b","kind":"ssh","ssh":{"host":"hb"}}]}`))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a", "b"}, r1.Added)
+	assert.Empty(t, r1.Removed)
+
+	// Re-import: a updated, c added, b removed.
+	r2, err := ImportFromJSON([]byte(`{"targets":[
+		{"id":"a","kind":"ssh","ssh":{"host":"ha2"}},
+		{"id":"c","kind":"ssh","ssh":{"host":"hc"}}]}`))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a"}, r2.Updated)
+	assert.ElementsMatch(t, []string{"c"}, r2.Added)
+	assert.ElementsMatch(t, []string{"b"}, r2.Removed)
+
+	reg := NewRegistry()
+	require.NoError(t, reg.LoadUserConfig())
+	_, ok := reg.Get("a")
+	assert.True(t, ok)
+	_, ok = reg.Get("c")
+	assert.True(t, ok)
+	_, ok = reg.Get("b")
+	assert.False(t, ok, "removed target must be gone after re-import")
+}
+
+func TestImportFromJSON_RejectsHandAddedCollision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := SaveTarget(types.TargetConfig{
+		ID: "box", Kind: types.TargetKindSSH, Enabled: true,
+		SSH: &types.SSHTargetConfig{Host: "h"},
+	})
+	require.NoError(t, err)
+
+	_, err = ImportFromJSON([]byte(`{"targets":[{"id":"box","kind":"ssh","ssh":{"host":"h2"}}]}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hand-added")
+}
+
+func TestImportFromJSON_EmptyDeletesAll(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := ImportFromJSON([]byte(`{"targets":[{"id":"a","kind":"ssh","ssh":{"host":"h"}}]}`))
+	require.NoError(t, err)
+
+	r, err := ImportFromJSON([]byte(`{"targets":[]}`))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a"}, r.Removed)
+
+	reg := NewRegistry()
+	require.NoError(t, reg.LoadUserConfig())
+	_, ok := reg.Get("a")
+	assert.False(t, ok)
+}
+
 func TestWriteTargetsFile_AtomicRoundTripAndWholesale(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 

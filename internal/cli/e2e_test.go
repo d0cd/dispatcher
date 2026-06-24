@@ -28,6 +28,8 @@ func setupE2E(t *testing.T) {
 	runFlags.timeout = ""
 	runFlags.yes = false
 	gcFlags.dryRun = false
+	importFlags.fromJSON = ""
+	importFlags.dryRun = false
 }
 
 func writeFixture(t *testing.T, dir string, files map[string]string) string {
@@ -40,6 +42,29 @@ func writeFixture(t *testing.T, dir string, files map[string]string) string {
 		require.NoError(t, os.WriteFile(full, []byte(content), 0o644))
 	}
 	return base
+}
+
+// Import an SSH target from a dispatcher_targets blob, then plan a real workload
+// onto it — proving the imported target is Enabled and carries capabilities (an
+// infeasible import would fail the plan). This is the bring-your-own-hosts
+// vertical, end to end, without needing a live host (plan is offline).
+func TestE2E_ImportTargetThenPlan(t *testing.T) {
+	setupE2E(t)
+
+	dir := writeFixture(t, "wl", map[string]string{
+		"main.py":          "print('hi')\n",
+		"requirements.txt": "",
+	})
+
+	jf := filepath.Join(t.TempDir(), "targets.json")
+	require.NoError(t, os.WriteFile(jf,
+		[]byte(`{"targets":[{"id":"byo-box","kind":"ssh","ssh":{"host":"h.example","user":"ubuntu"}}]}`), 0o644))
+
+	_, _, err := executeCommand("targets", "import", "--from-json", jf)
+	require.NoError(t, err)
+
+	_, _, err = executeCommand("plan", dir, "--target", "byo-box")
+	require.NoError(t, err, "planning onto the imported SSH target must succeed")
 }
 
 func TestE2E_InitPlanRun(t *testing.T) {

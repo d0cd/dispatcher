@@ -5,12 +5,98 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// managedImportFile is the single file all imported targets are written to, so
+// re-import can reconcile them wholesale without touching hand-added targets.
+const managedImportFile = "terraform-import.yaml"
+
+// ImportResult summarizes what an import changed, for the CLI to report.
+type ImportResult struct {
+	Path    string
+	Added   []string
+	Updated []string
+	Removed []string
+}
+
+// ImportFromJSON parses a dispatcher_targets blob and reconciles it into the
+// managed import file. An empty target list legitimately clears all previously
+// imported targets.
+func ImportFromJSON(blob []byte) (*ImportResult, error) {
+	targets, err := ParseDispatcherTargets(blob)
+	if err != nil {
+		return nil, err
+	}
+	return reconcileImport(targets)
+}
+
+// reconcileImport rejects collisions with hand-added targets, computes the
+// add/update/remove delta against the previous import, and atomically rewrites
+// the managed file.
+func reconcileImport(targets []types.TargetConfig) (*ImportResult, error) {
+	dir, err := state.Subdir("targets")
+	if err != nil {
+		return nil, err
+	}
+
+	// A collision with a hand-added <id>.yaml is resolved by filename sort order
+	// at load time, so refuse it outright rather than silently shadow.
+	for _, t := range targets {
+		if _, err := os.Stat(filepath.Join(dir, t.ID+".yaml")); err == nil {
+			return nil, fmt.Errorf("target %q already exists as a hand-added target (%s.yaml); refusing to shadow it", t.ID, t.ID)
+		}
+	}
+
+	prev := managedIDs(filepath.Join(dir, managedImportFile))
+	next := make(map[string]bool, len(targets))
+	res := &ImportResult{}
+	for _, t := range targets {
+		next[t.ID] = true
+		if prev[t.ID] {
+			res.Updated = append(res.Updated, t.ID)
+		} else {
+			res.Added = append(res.Added, t.ID)
+		}
+	}
+	for id := range prev {
+		if !next[id] {
+			res.Removed = append(res.Removed, id)
+		}
+	}
+	sort.Strings(res.Added)
+	sort.Strings(res.Updated)
+	sort.Strings(res.Removed)
+
+	path, err := WriteTargetsFile(managedImportFile, targets)
+	if err != nil {
+		return nil, err
+	}
+	res.Path = path
+	return res, nil
+}
+
+// managedIDs returns the ids currently in the managed import file (empty if it
+// doesn't exist or can't be read — a fresh import).
+func managedIDs(path string) map[string]bool {
+	m := map[string]bool{}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return m
+	}
+	var tf TargetsFile
+	if yaml.Unmarshal(data, &tf) == nil {
+		for _, t := range tf.Targets {
+			m[t.ID] = true
+		}
+	}
+	return m
+}
 
 // dispatcherTargetsBlob is the structured contract a source (Terraform output,
 // Pulumi, a script) emits to declare importable targets. It maps 1:1 to
