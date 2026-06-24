@@ -1,6 +1,7 @@
 package adapter
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,6 +9,66 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// stubRunRsync replaces the runRsync seam so artifact retrieval can be exercised
+// without a live SSH host, capturing the exact rsync argv.
+func stubRunRsync(t *testing.T, fn func(ctx context.Context, args ...string) error) {
+	t.Helper()
+	prev := runRsync
+	runRsync = fn
+	t.Cleanup(func() { runRsync = prev })
+}
+
+func TestSSHAdapter_Artifacts_RsyncsEachOutputSecurely(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var calls [][]string
+	stubRunRsync(t, func(_ context.Context, args ...string) error {
+		calls = append(calls, append([]string(nil), args...))
+		dest := args[len(args)-1] // local dest is the final rsync arg
+		if err := os.MkdirAll(dest, 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(filepath.Join(dest, "out.txt"), []byte("x"), 0o600)
+	})
+
+	a := NewSSHAdapter(SSHConfig{Host: "host.example", User: "ubuntu", KeyFile: "/k", RemoteDir: "/tmp/dispatcher"})
+	h := &RunHandle{ID: "ssh-x", RunID: "run-1", State: &sshState{outputs: []string{"results"}}}
+
+	refs, err := a.Artifacts(context.Background(), h)
+	require.NoError(t, err)
+	require.Len(t, calls, 1, "one rsync per output path")
+
+	got := calls[0]
+	assert.True(t, containsAdjacent(got, []string{"--safe-links", "--protect-args"}),
+		"must harden rsync against symlink escape and remote re-tokenization")
+	assert.Contains(t, got, "ubuntu@host.example:/tmp/dispatcher/results",
+		"remote source must be user@host:<remoteDir>/<output>")
+	require.NotEmpty(t, refs)
+	assert.Equal(t, "out.txt", refs[0].Name)
+}
+
+func TestSSHAdapter_Artifacts_NoOutputsIsNoop(t *testing.T) {
+	called := false
+	stubRunRsync(t, func(_ context.Context, _ ...string) error { called = true; return nil })
+	a := NewSSHAdapter(SSHConfig{Host: "h", User: "u"})
+	refs, err := a.Artifacts(context.Background(), &RunHandle{State: &sshState{outputs: nil}})
+	require.NoError(t, err)
+	assert.Nil(t, refs)
+	assert.False(t, called, "no outputs → no rsync")
+}
+
+func TestSSHAdapter_Artifacts_RejectsUnsafeOutput(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	called := false
+	stubRunRsync(t, func(_ context.Context, _ ...string) error { called = true; return nil })
+	a := NewSSHAdapter(SSHConfig{Host: "h", User: "u", RemoteDir: "/tmp/dispatcher"})
+	h := &RunHandle{ID: "x", RunID: "r", State: &sshState{outputs: []string{"../escape"}}}
+	refs, err := a.Artifacts(context.Background(), h)
+	assert.Error(t, err, "path traversal output must be rejected")
+	assert.Empty(t, refs)
+	assert.False(t, called, "must not rsync a traversal path")
+}
 
 // containsAdjacent reports whether want appears as a contiguous subsequence
 // of got.
