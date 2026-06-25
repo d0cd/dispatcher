@@ -14,6 +14,12 @@ cd dispatcher
 go build -o dispatcher ./cmd/dispatcher
 ```
 
+Shell completion is available via the standard Cobra command, e.g.:
+
+```bash
+dispatcher completion bash > /etc/bash_completion.d/dispatcher   # or zsh/fish/powershell
+```
+
 ## Quick start
 
 All commands default to the current directory; pass an explicit path to operate elsewhere.

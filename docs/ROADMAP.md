@@ -39,7 +39,6 @@ severity.
 |---|---|---|
 | Shell completion ships but is inert — no `ValidArgsFunction` for run-ids, target-ids, or enum flags. | M | Medium |
 | `--json` missing on `history` / `gc` / `recover` — the commands operators script. | M | Low |
-| Doc fixes: `watchdogTtl` doesn't apply to k8s; `completion` undocumented. | S | Low |
 
 ## Theme 5 — Complete CI
 
