@@ -54,23 +54,20 @@ can run jobs on infra you already own.
   demand (§13). Pre-announcing them manufactures the "why doesn't it read my
   EKS?" expectation the non-goals exist to fence off.
 
-## 3. Prerequisites (must land before/with Phase 1)
+## 3. Prerequisites (shipped before/with Phase 1)
 
-These are gating — the feature feels broken on arrival without them.
+These were gating — the feature would have felt broken on arrival without them, so
+they shipped first:
 
-1. **SSH artifact retrieval is a silent no-op today.** `internal/adapter/ssh.go`
-   `Artifacts()` returns `(nil, nil)`. Every imported host runs via SSH, so a
-   user's first job with `outputs:` would silently lose its results. Fix:
-   implement scp-back, **or at minimum** make `outputs:` on SSH a loud warning
-   instead of silent success. (Already ROADMAP Theme 3.)
-2. **A real SSH-field validator must exist and be shared.** The security model
-   (§8) depends on it; today `cloudvm.isSafeArg` is package-private and, anyway,
-   wrong for this job (§8). Add `internal/target` validators (or a small
-   `internal/validate` package) and call them from the importer **and**
-   `SaveTarget`/`targets add`, so no path can persist an unsafe SSH target.
-3. **`targets add --key-file`.** The manual baseline this feature builds on has
-   no key-file flag today (`targets add` exposes only `--kind/--host/--user/
-   --port/--enabled`). Add it so manual and imported targets are at parity.
+1. **SSH artifact retrieval.** `internal/adapter/ssh.go` `Artifacts()` previously
+   returned `(nil, nil)`, so a job's `outputs:` on an SSH host silently vanished.
+   It now retrieves them via rsync over ssh (hardened: reject abs/`..`/escape-root,
+   `--safe-links`, `--protect-args`).
+2. **A shared SSH-field validator** — `target.ValidateSSHTarget` (`host`/`user`/
+   `key_file`), called from the importer **and** `SaveTarget`/`targets add`, so no
+   path can persist an unsafe SSH target. (`cloudvm.isSafeArg` was package-private
+   and wrong for this job — see §8.)
+3. **`targets add --key-file`**, so manual and imported SSH targets are at parity.
 
 ## 4. Prior art (validates SSH-first, source-agnostic)
 
@@ -121,7 +118,7 @@ For each entry the importer produces a `types.TargetConfig`:
 | `ID` | entry `id` (validated, §8) |
 | `Kind` | `ssh` (any other kind → hard error in Phase 1, §11) |
 | `Enabled` | **`true`, set explicitly** |
-| `Capabilities` | from `defaultCapabilitiesForKind(SSH)` |
+| `Capabilities` | from `target.DefaultCapabilities(SSH)` |
 | `SSH` | `{Host, User, Port (default 22), KeyFile}` |
 
 Two non-obvious correctness requirements (both were false-assumptions in v1):
@@ -131,9 +128,8 @@ Two non-obvious correctness requirements (both were false-assumptions in v1):
   infeasible, so the planner would **never select it**. The contract has no
   `enabled` field by design — the importer sets it.
 - **`Capabilities` must be populated**, or the target is infeasible/unselectable.
-  `defaultCapabilitiesForKind` currently lives in `internal/cli` (unexported);
-  factor it into `internal/target` (exported) and use it from both `targets add`
-  and the importer.
+  `target.DefaultCapabilities` (exported, in `internal/target`) is used by both
+  `targets add` and the importer.
 
 ## 7. CLI
 
@@ -159,13 +155,13 @@ too permissive and too strict for SSH:
   (ssh/rsync option injection via `user@host` and `-e` reparsing), whitespace,
   NUL, newline. `isSafeArg` wrongly permits `: / @`.
 - **`user`** — strict charset `[a-zA-Z0-9_.-]`, reject leading `-`.
-- **`key_file`** — a *path* validator (the host/user one would reject its own
-  `~/.ssh/...` example): clean the path, expand a leading `~` to the user's home
-  and store the absolute path (or require absolute and reject `~`/relative —
-  pick one and document it), reject NUL/newline. At import: `stat` it; if missing
-  or not `0600`-owned-by-current-user, **warn** (or error under `--strict`). This
-  is referenced, not copied; document the run-time TOCTOU (the key is read at ssh
-  time, not import time).
+- **`key_file`** — a *path* validator (the host/user charset would reject its own
+  `~/.ssh/...` example): `validateSSHKeyFile` rejects a leading `-` and NUL/newline.
+  A leading `~` is expanded to an absolute path in the import path (`expandTilde`,
+  not the shared validator — so a `key_file` supplied via `targets add --key-file`
+  is stored verbatim). At import, `KeyFileWarnings` `stat`s each key; a missing or
+  group/world-accessible key **warns** (errors under `--strict`). The key is
+  referenced, not copied, and read at ssh time (a benign run-time TOCTOU).
 
 Enforce these in the importer **and** in `SaveTarget`/`targets add` so every
 persist path is fail-closed (Prereq §3.2).
@@ -244,29 +240,24 @@ Imported targets are written as one managed file
 | Source output flagged `sensitive` | Refuse unless `--allow-sensitive`; value never echoed. |
 | Host unreachable now (infra changed) | Out of scope at import; `targets doctor <id>` is the reachability check. |
 
-## 12. Required code changes (the honest list)
+## 12. What shipped
 
-v1 claimed "no new types or adapter code." That was false. Phase 1 needs:
-
-1. Importer + `runTF`/`runJSON` seam (testable, no shell) in a new
-   `internal/target` path.
-2. `target.WriteTargetsFile` — atomic multi-target writer.
-3. SSH-field validators (`host`/`user`/`key_file`), wired into the importer
-   **and** `SaveTarget`/`targets add`.
-4. Export `defaultCapabilitiesForKind` into `internal/target`; importer sets
-   `Capabilities` and `Enabled: true`.
-5. `targets add --key-file` flag (Prereq §3.3).
-6. SSH `Artifacts()` fix or loud warning (Prereq §3.1).
-7. CLI `targets import` command (thin wrapper).
-
-No new execution path or adapter — but not "no new code."
+Phase 1 delivered exactly this (commits `1eb0550`…`8ec7c8d`): the `runTF` seam and
+the importer in `internal/target`; `target.WriteTargetsFile` (atomic multi-target
+writer); the `host`/`user`/`key_file` validators wired into the importer **and**
+`SaveTarget`/`targets add`; `target.DefaultCapabilities` (exported, used by both)
+with `Enabled: true`; `targets add --key-file`; SSH `Artifacts()` retrieval (rsync
+over ssh); and the `targets import` CLI command. JSON is parsed inline — there is
+no separate `runJSON` seam.
 
 ## 13. Phasing
 
-| Phase | Scope | Effort |
-|---|---|---|
-| 1 | `--from-json` + `--from-terraform` shell, SSH only, all of §3/§8/§9, tests. | M |
-| — | **k8s / cloud / `--from-state` are NOT scheduled.** Reopen only on real, repeated demand. Each reintroduces type+adapter work and (for state/cloud) raw-secret handling and per-target credentials — the IaC-accessory tail this design refuses to pre-commit to. | — |
+Phase 1 (`--from-json` + `--from-terraform`, SSH only) is **shipped**.
+
+**k8s / cloud / `--from-state` are NOT scheduled** — reopen only on real, repeated
+demand. Each reintroduces type+adapter work and (for state/cloud) raw-secret
+handling and per-target credentials — the IaC-accessory tail this design refuses
+to pre-commit to.
 
 ## 14. Testing (TDD)
 

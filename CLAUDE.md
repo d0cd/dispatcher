@@ -19,7 +19,7 @@ go build -o dispatcher ./cmd/dispatcher
 cmd/
   dispatcher/         # CLI entry point (main.go)
 internal/
-  cli/                # Cobra command definitions (19 top-level + 3 targets subcommands)
+  cli/                # Cobra command definitions (20 top-level + 5 targets subcommands)
   workload/           # Workload inspection, config loading, recursive scanning
   target/             # Target registry, builtins, YAML config, feasibility matching
   plan/               # Plan generation, validation, formatting, persistence
@@ -34,14 +34,14 @@ internal/
   state/              # State-dir resolution + 0700 enforcement
   dlog/               # Structured JSON log file
   types/              # Shared Go types and constants
-docs/                 # Design doc, implementation plan
+docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, terraform-interop (host import)
 ```
 
 ## Commands
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher   # Build binary
-go test ./...                         # Run all tests (~450 tests, 15 packages)
+go test ./...                         # Run all tests (~540 tests, 15 packages)
 go vet ./...                          # Lint
 gofmt -l .                            # Find unformatted files
 ```
@@ -70,7 +70,7 @@ gofmt -l .                            # Find unformatted files
 - `RunState` — 22-state machine for execution (internal/types)
 - `TargetAdapter` — execution interface every target implements (internal/adapter)
 - `DurableAdapter` — extends TargetAdapter with reconnection/watchdog/GC (internal/adapter)
-- `CloudProvider` — cloud VM lifecycle interface (internal/cloudvm)
+- `Provider` — cloud VM lifecycle interface (internal/cloudvm)
 - `DispatcherConfig` — dispatcher.yaml schema (internal/workload)
 - `approval.Gate` — per-run Unix-socket approval gate (filesystem perms are the auth boundary)
 - `approval.Record` — audit-trail entry embedded in the persisted run state

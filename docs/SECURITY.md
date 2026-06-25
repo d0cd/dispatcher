@@ -16,7 +16,7 @@ We do not defend against:
 
 ## State directory
 
-State lives at `$DISPATCHER_HOME` or `~/.dispatcher/`, mode `0700`. Every subdirectory (`runs/`, `plans/`, `keys/`, `approvals/`) is enforced to `0700`. `state.ensureSecureDir` chmods pre-existing directories that have looser perms — and **fails closed** if the chmod can't succeed, rather than silently using a leaky dir.
+State lives at `$DISPATCHER_HOME` or `~/.dispatcher/`, mode `0700`. Every subdirectory (`runs/`, `plans/`, `keys/`, `approvals/`, `targets/`) is enforced to `0700`. `state.ensureSecureDir` chmods pre-existing directories that have looser perms — and **fails closed** if the chmod can't succeed, rather than silently using a leaky dir.
 
 `DISPATCHER_HOME` is validated: must be absolute, must not contain `..` segments. The process startup also sets `syscall.Umask(0o077)` so any file created without an explicit mode is owner-only.
 
@@ -43,6 +43,18 @@ The pinned `known_hosts` file is written with `O_EXCL` to refuse following a pla
 **rsync invocation** is the historical attack surface: rsync re-parses the `-e` value with shell-like splitting, so naively building `fmt.Sprintf("ssh -i %s -p %d -o UserKnownHostsFile=%s", ...)` is an injection vector. Dispatcher writes a **per-run SSH wrapper script** (`<state-dir>/keys/ssh-wrapper-<run-id>.sh`, mode `0700`) with every embedded value shell-quoted **once at write time**. Every rsync call is `-e <wrapper>` — a single filesystem path, no runtime interpolation.
 
 Both directions use `--protect-args` to disable remote-shell re-tokenization of paths. `--safe-links` is applied on artifact **retrieval** (download from the VM), where a malicious workload could plant a symlink escaping the transferred tree into the local filesystem; the upload path (trusted local source) uses `--protect-args` only.
+
+## Host import (bring your own hosts)
+
+`dispatcher targets import` registers externally-provisioned hosts as SSH targets. Its trust boundary:
+
+- **`--from-terraform`** shells out to `terraform output -json` through a read-only seam. `terraform output` reads state — it never refreshes or mutates resources. The raw output and the binary's stderr are **never echoed** (they may carry unrelated secret outputs); errors are reduced to a safe, actionable hint.
+- A `dispatcher_targets` output marked **`sensitive`** is **refused** unless `--allow-sensitive`.
+- Every imported `host`/`user`/`key_file` is validated at the boundary (`target.ValidateSSHTarget`): host as a hostname/IP, user as a strict word, rejecting the `:`/`/`/`@`/leading-`-` metacharacters that would inject into the `user@host` / `-e` ssh/rsync argv.
+- Imported targets are written to `<state-dir>/targets/` at `0600`. An operator-supplied `key_file` is **referenced, not copied**; a leading `~` is expanded, and a missing or group/world-accessible key is warned (`--strict` makes it an error).
+- Import **refuses to shadow** an existing target (builtin, hand-added, or project `dispatcher.yaml`) — load order would otherwise decide silently.
+
+The cloud-VM host-key pinning above does not apply to imported targets: they are long-lived operator infra reached with the operator's own key and `known_hosts`, not dispatcher-generated per-run identities.
 
 ## Cloud CLI argument discipline
 

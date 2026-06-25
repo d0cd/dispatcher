@@ -36,6 +36,7 @@ dispatcher stop <run-id>       # Stop and clean up
 |---|---|
 | `init [path] [--force]` | Scaffold `dispatcher.yaml` from workload inspection. `--force`/`-f` overwrites an existing file. |
 | `plan <path>` | Generate execution plan with cost / risk analysis. Flags: `--ai` (LLM-driven planner), `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--gpu <spec>`. |
+| `validate [path]` | Validate `dispatcher.yaml` (schema + semantic checks) without planning or running. |
 | `audit <path>` | Pre-run risk audit: cost surprises, missing secrets, missing Dockerfile, no-feasible-target. |
 | `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; Hetzner only — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
 | `explain <plan-id>` | Verbose recommendation for a saved plan. |
@@ -73,7 +74,7 @@ dispatcher stop <run-id>       # Stop and clean up
 | Command | Purpose |
 |---|---|
 | `targets list` | List configured targets. |
-| `targets add <id>` | Add a target (`--host/--user/--port/--key-file` for SSH). |
+| `targets add <id>` | Add a target. `--kind docker\|ssh\|kubernetes\|cloud-vm` (default `docker`), `--enabled` (default true), and `--host/--user/--port/--key-file` for SSH. |
 | `targets remove <id>` | Remove a target you added (alias `rm`). |
 | `targets import` | Import hosts as SSH targets (see [Bring your own hosts](#bring-your-own-hosts)). |
 | `targets doctor <id>` | Health check a target. |
