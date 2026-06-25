@@ -50,6 +50,33 @@ func TestBuildVMOptions_NoConfidentialByDefault(t *testing.T) {
 	assert.Equal(t, "", opts.ConfidentialType)
 }
 
+func TestExecute_FailsClosedWhenAttestationRequired(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	mock := NewMockProvider(ProviderGCP)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderGCP, Region: "us-central1"})
+
+	p := &types.Plan{
+		Metadata: types.PlanMetadata{ID: "run_cc"},
+		Workload: types.WorkloadSpec{
+			Name: "secure",
+			Requirements: types.ResourceRequirements{
+				Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp", Attestation: "required"},
+			},
+		},
+	}
+	_, err := a.Execute(context.Background(), p)
+	require.Error(t, err, "attestation:required must fail closed until verification exists")
+	assert.Contains(t, err.Error(), "attestation")
+	assert.Equal(t, 0, mock.VMCount(), "must not provision a VM it can't attest")
+}
+
+func TestValidateConfidentialAttestation_OffIsAllowed(t *testing.T) {
+	w := types.WorkloadSpec{Requirements: types.ResourceRequirements{
+		Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp", Attestation: "off"},
+	}}
+	assert.NoError(t, validateConfidentialAttestation(w), "attestation:off provisions the TEE without verification")
+}
+
 func TestGCPConfidentialComputeType(t *testing.T) {
 	assert.Equal(t, "SEV", gcpConfidentialComputeType("sev"))
 	assert.Equal(t, "SEV_SNP", gcpConfidentialComputeType("sev-snp"))

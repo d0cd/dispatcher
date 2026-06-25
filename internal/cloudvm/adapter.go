@@ -137,6 +137,19 @@ func validateGPUInstance(w types.WorkloadSpec, instanceType string) error {
 	return nil
 }
 
+// validateConfidentialAttestation fails closed: when a workload requires
+// attestation but TEE attestation verification isn't implemented yet, we refuse
+// to provision rather than run as if the VM were attested. `attestation: off`
+// opts out (provision the TEE without verification).
+func validateConfidentialAttestation(w types.WorkloadSpec) error {
+	c := w.Requirements.Confidential
+	if c.Required && c.Attestation != "off" {
+		return fmt.Errorf("confidential attestation is required but TEE attestation verification is not yet implemented; " +
+			"set `confidential.attestation: off` to provision the TEE without verification (see docs/confidential-computing.md)")
+	}
+	return nil
+}
+
 func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	w := p.Workload
 
@@ -174,6 +187,9 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 
 	opts := buildVMOptions(p, a.config.Region, vmName, keyPath+".pub", userData)
 	if err := validateGPUInstance(w, opts.InstanceType); err != nil {
+		return nil, err
+	}
+	if err := validateConfidentialAttestation(w); err != nil {
 		return nil, err
 	}
 
