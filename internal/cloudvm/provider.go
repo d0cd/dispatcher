@@ -39,6 +39,10 @@ type VMOptions struct {
 	// GPUCount, when > 0, requests that many GPUs. On Kubernetes it becomes the
 	// container's nvidia.com/gpu resource limit.
 	GPUCount int
+	// ConfidentialType, when non-empty ("sev" | "sev-snp" | "tdx" | "any"),
+	// requests a TEE-backed (memory-encrypted) VM of that type. The provider
+	// maps it to its create flag and rejects it where unsupported.
+	ConfidentialType string
 }
 
 // VMInfo describes a provisioned VM.

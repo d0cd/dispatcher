@@ -66,6 +66,16 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--quiet",
 	}
 
+	if opts.ConfidentialType != "" {
+		// Confidential VMs can't live-migrate, so maintenance must TERMINATE.
+		// The catalog is responsible for picking a compatible machine type
+		// (n2d/c2d for SEV-SNP, c3 for TDX) — if it doesn't, gcloud errors and
+		// the failure surfaces honestly.
+		args = append(args,
+			"--confidential-compute-type="+gcpConfidentialComputeType(opts.ConfidentialType),
+			"--maintenance-policy=TERMINATE")
+	}
+
 	if g.project != "" {
 		args = append(args, "--project", g.project)
 	}
@@ -172,6 +182,20 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 		return g.zone
 	}
 	return zone
+}
+
+// gcpConfidentialComputeType maps a dispatcher TEE type to GCP's
+// --confidential-compute-type value. "any" and "sev-snp" both pick SEV_SNP
+// (AMD's strongest); SEV and TDX map through.
+func gcpConfidentialComputeType(t string) string {
+	switch t {
+	case "sev":
+		return "SEV"
+	case "tdx":
+		return "TDX"
+	default: // "sev-snp", "any"
+		return "SEV_SNP"
+	}
 }
 
 func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {

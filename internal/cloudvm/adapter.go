@@ -103,7 +103,7 @@ func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) 
 	if p.Recommendation != nil {
 		instanceType = p.Recommendation.EstimatedCost.InstanceType
 	}
-	return VMOptions{
+	opts := VMOptions{
 		Name:         vmName,
 		Region:       region,
 		InstanceType: instanceType,
@@ -115,6 +115,13 @@ func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) 
 			"dispatcher":        "true",
 		},
 	}
+	if c := p.Workload.Requirements.Confidential; c.Required {
+		opts.ConfidentialType = c.Type
+		if opts.ConfidentialType == "" {
+			opts.ConfidentialType = "any"
+		}
+	}
+	return opts
 }
 
 // validateGPUInstance refuses to provision when a workload requires a GPU but no

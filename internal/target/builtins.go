@@ -246,6 +246,10 @@ func BuiltinTargets() []types.TargetConfig {
 						Supported: true,
 						Models:    []string{"l4", "a100", "h100"},
 					},
+					Confidential: types.ConfidentialCapability{
+						Supported: true,
+						Types:     []string{"sev", "sev-snp", "tdx"},
+					},
 				},
 				Networking: types.NetworkingCapability{
 					PublicEndpoint:   true,
