@@ -1,103 +1,156 @@
 # Design: Confidential computing (secure jobs)
 
-**Status:** Proposed
+**Status:** Proposed (revised — typed TEE + attestation in scope)
 **Related:** ROADMAP Theme 6.
 
 ## 1. Goal & non-goals
 
-Let a workload request a **TEE-backed VM** — one whose memory is hardware-encrypted
-so the cloud host/hypervisor can't read it (AMD SEV/SEV-SNP, Intel TDX). The
-mechanism mirrors how `--gpu` already flows: a workload **requirement** →
-`VMOptions` → a per-provider create flag, gated by **capability + feasibility** so
-a confidential run never silently lands on a non-confidential VM.
+Let a workload demand a **TEE-backed VM** — hardware-encrypted memory (AMD
+SEV/SEV-SNP, Intel TDX) so the cloud host/hypervisor can't read it — **and prove
+it** via attestation. The workload names the TEE type it needs; dispatcher only
+runs it on hardware that delivers that type, fetches and verifies the TEE's
+attestation report, and refuses to run the workload if the proof doesn't check
+out.
 
-**MVP delivers:** provisioning a confidential VM where the provider/instance/
-region supports it, and a hard rejection where it doesn't.
+**In scope (this plan):**
+- Provision a confidential VM of a requested **type** (SEV / SEV-SNP / TDX).
+- **Attestation:** fetch the TEE's signed report, verify it to the hardware/cloud
+  root of trust, record the verdict on the run, and **fail closed** when
+  attestation is required and can't be verified.
 
-**Non-goals (MVP):**
-- **No attestation verification.** A confidential VM encrypts memory, but the
-  *proof* that it did is a signed attestation report. The MVP provisions the TEE
-  but does **not** fetch/verify attestation — so it raises the bar (host can't
-  trivially read memory) without yet *proving* confidentiality. This limitation
-  must be stated plainly to users; attestation is a separate, larger effort (§7).
-- **No AWS Nitro Enclaves / k8s Confidential Containers (CoCo).** Those are a
-  different model (an enclave *within* an instance, custom tooling/images), not a
-  VM create flag. Out of scope until there's demand.
-- Doesn't change dispatcher's existing operator-boundary security model; this is
-  additive (protects *data-in-use* from the cloud, an orthogonal threat model).
+**Non-goals:**
+- **AWS Nitro Enclaves / k8s Confidential Containers (CoCo)** — a different model
+  (enclave-within-instance, custom tooling/images), not a VM create flag. Out of
+  scope until demand.
+- Custom/operator-supplied expected-measurement policies beyond "valid report
+  from the right vendor root for the requested type" — a later refinement.
+- Doesn't change the existing operator-boundary security model; this is additive
+  (protects *data-in-use* from the cloud, an orthogonal threat model).
 
-## 2. How it flows (mirrors the GPU pattern)
+## 2. Workload contract (top-level, typed)
 
-| Layer | GPU (existing) | Confidential (new) |
-|---|---|---|
-| Workload requirement | `Requirements.GPU` | `Requirements.Confidential bool` |
-| dispatcher.yaml | `gpu:` | `confidential: true` |
-| VM request | `VMOptions.GPUCount` | `VMOptions.Confidential bool` |
-| Catalog/capability | GPU model/count on instance | `ConfidentialCapable` on instance + target capability |
-| Feasibility | gpu-unschedulable rejection | confidential-unschedulable rejection |
-| Provider create | GPU flags | the per-provider confidential flag (§4) |
-
-This keeps the change small and consistent with code reviewers already know.
-
-## 3. Workload contract
+`confidential:` is a top-level block in `dispatcher.yaml`, parallel to `gpu:`:
 
 ```yaml
-# dispatcher.yaml
-confidential: true   # run only on a TEE-backed (memory-encrypted) VM
+confidential:
+  type: sev-snp          # sev | sev-snp | tdx | any   (default: any)
+  attestation: required  # required | off              (default: required)
 ```
 
-→ `WorkloadSpec.Requirements.Confidential = true`. The planner then only considers
-targets/instances flagged confidential-capable, and `VMOptions.Confidential`
-drives the create flag.
+- **`type`** — the TEE technology. `any` lets dispatcher pick whatever the chosen
+  provider/instance supports.
+- **`attestation`** — `required` (default) means the run only proceeds after the
+  attestation report verifies; `off` provisions the TEE but skips verification
+  (explicit opt-out, for users who only want memory encryption).
 
-## 4. Per-provider create flag (verify exact syntax at implementation)
+Secure by default: a bare `confidential: {}` (or `confidential: {type: any}`)
+means "any TEE, attestation required."
+
+## 3. Data model
+
+Mirrors the GPU shapes (`GPURequirement` / `GPUCapability`) so it's familiar.
+
+```go
+// types.ResourceRequirements
+type ConfidentialRequirement struct {
+    Required    bool   // a confidential VM is required
+    Type        string // "sev" | "sev-snp" | "tdx" | "" (any)
+    Attestation string // "required" (default) | "off"
+}
+
+// types.ResourceCapability
+type ConfidentialCapability struct {
+    Supported bool     // target can provision confidential VMs
+    Types     []string // which TEE types it offers, e.g. ["sev-snp","tdx"]
+}
+```
+
+> **Evolves the first increment.** The committed deterministic core used a plain
+> `bool` for both the requirement and the capability. This typed model replaces
+> it (the bool → the `Required`/`Supported` field), with `Type`/`Types` and the
+> attestation knob added. A small, mechanical refactor of already-tested code.
+
+## 4. Feasibility (mirrors GPU model matching)
+
+```
+if Requirements.Confidential.Required:
+    if not cap.Supported:                      → "confidential required but target can't"
+    elif Type != "" and Type != "any"
+         and Type not in cap.Types:            → "confidential type <T> not offered (has: …)"
+```
+
+So a `tdx` job won't land on an SEV-only target; an `any` job takes whatever the
+target offers. Same structure as the GPU-model gate already in `match.go`.
+
+## 5. Provisioning — per-provider create flag (verify exact syntax at impl)
+
+`VMOptions` gains `Confidential ConfidentialRequirement` (or just `Type`); each
+provider's `CreateVM` emits the right flag, argv-table-tested via the `runCLI`
+seam. The catalog marks which instance types offer which TEE type.
 
 | Provider | Mechanism | Notes |
 |---|---|---|
-| **GCP** | `--confidential-compute-type=SEV` (or `SEV_SNP`/`TDX`) + `--maintenance-policy=TERMINATE` | SEV needs `n2d`; TDX needs `c3`. |
-| **AWS** | `--cpu-options AmdSevSnp=enabled` | Supported on specific later-gen AMD instance types only. |
-| **Azure** | `--security-type ConfidentialVM` + confidential VM size (DCasv5/ECasv5/…) + `--os-disk-security-encryption-type` + vTPM/secure-boot | The most involved (SKU + OS-disk encryption). |
-| **Hetzner / Lima** | not available | Reject as unsupported. |
+| **GCP** | `--confidential-compute-type=SEV\|SEV_SNP\|TDX` + `--maintenance-policy=TERMINATE` | SEV→`n2d`, TDX→`c3` |
+| **AWS** | `--cpu-options AmdSevSnp=enabled` (SEV-SNP) | specific later-gen AMD types only; no TDX today |
+| **Azure** | `--security-type ConfidentialVM` + DCasv5/ECasv5 (SEV-SNP) or TDX SKU + OS-disk encryption + vTPM | most involved |
+| **Hetzner / Lima** | — | not confidential-capable; rejected by feasibility |
 
-Exact flags/instance lists are verified and table-tested at implementation time
-(via the existing `runCLI` argv seam), not trusted from this doc.
+## 6. Attestation (in scope) — fetch → verify → gate
 
-## 5. Capability & feasibility
+After the VM is reachable and **before the workload runs**, the cloud-VM adapter
+runs an attestation step:
 
-- The catalog marks which instance types are confidential-capable (per provider/
-  region). `Capabilities` gains a `Confidential bool` on targets.
-- Feasibility: if `Requirements.Confidential` and the target/instance can't do it,
-  reject with a clear reason (mirrors `gpu-unschedulable`). Add a
-  `confidential-unsupported` risk/feasibility reason.
-- Cost: confidential instances carry a premium; the estimate uses the
-  confidential SKU's price where the catalog has it (else flag as an assumption).
+1. **Fetch** the TEE's attestation evidence (per-provider, §6.1).
+2. **Verify** the signature chain to the hardware/cloud root of trust and that
+   the report's TEE type matches what was requested. (MVP policy = "a valid,
+   correctly-signed report of the requested type"; expected-measurement pinning
+   is a later refinement.)
+3. **Record** an `AttestationResult{Verified, Type, Measurement, Verdict}` on the
+   run state, surfaced by `diagnose`/`status`.
+4. **Gate:** if `attestation: required` and verification fails (or isn't
+   implemented for that provider yet), **fail the run before executing the
+   workload** — never run on an unproven VM. If `attestation: off`, skip 1–2 and
+   record `Verified: false (skipped by request)`.
 
-## 6. Implementation order (TDD, incremental)
+This adds one stage to the cloud-VM execute flow (a `RunStateAttesting` between
+"provisioned/ready" and "running") — small surface, fail-closed.
 
-1. **Deterministic core first** (no provider calls): `Requirements.Confidential`
-   + `dispatcher.yaml` `confidential:` parsing; `VMOptions.Confidential`;
-   capability + feasibility rejection. Fully unit-testable.
-2. **Provider argv**: thread `VMOptions.Confidential` into each provider's
-   `CreateVM` flag, table-tested via the `runCLI` seam (GCP/AWS/Azure; reject on
-   Hetzner/Lima).
-3. **Catalog**: flag confidential-capable instances + (where known) confidential
-   pricing.
-4. **Docs**: USAGE + SECURITY (the data-in-use boundary, and the honest
-   no-attestation-yet caveat).
+### 6.1 Per-provider evidence (verify exact APIs at impl)
+- **Azure** — Microsoft Azure Attestation (MAA): the guest gets a report, MAA
+  returns a signed JWT; dispatcher verifies the JWT against MAA's keys. Most
+  turnkey.
+- **AWS SEV-SNP** — the guest reads an SEV-SNP report (`/dev/sev-guest`);
+  dispatcher verifies it against AMD's key distribution service (KDS) cert chain.
+  Needs a tiny guest-side fetch step + AMD root verification.
+- **GCP** — Confidential VM vTPM / Confidential Space attestation token; verify
+  against Google's attestation root.
 
-## 7. Attestation (future, separate design)
+Honest note: attestation is the **larger, cryptographically-involved** half of
+this work and is per-provider. It's in the plan (not punted), but it lands after
+provisioning and is the bulk of the effort.
 
-The real "secure jobs" guarantee is **verifiable attestation**: fetch the TEE's
-signed report, check the measurement/root-of-trust, and record it on the run so a
-user can *prove* the job ran confidentially. This is substantial (per-provider
-attestation APIs, a trust policy, verification) and gets its own design when the
-MVP lands and demand is real. Until then, the feature is documented as
-"provisions a TEE-backed VM; does not yet verify attestation."
+## 7. Build order (TDD, incremental — all in this plan)
 
-## 8. Open questions
+| # | Increment | Status |
+|---|---|---|
+| 1 | Deterministic core: requirement/capability/feasibility (was bool) | ✅ shipped (bool) |
+| 2 | **Evolve to the typed model** (§3) + type-aware feasibility (§4) | next |
+| 3 | Mark cloud builtins/catalog confidential-capable (with types) + thread into `CreateVM` flags (§5), argv-tested | |
+| 4 | Attestation: `RunStateAttesting` stage + `AttestationResult` + fail-closed gate (§6); per-provider verify (§6.1), Azure first | |
+| 5 | Docs: USAGE + SECURITY (data-in-use boundary + attestation semantics) | |
 
-- Where does `confidential:` live in `dispatcher.yaml` — top-level (like `gpu:`)
-  or under a `security:`/`sandbox:` block? Lean: top-level, matching `gpu`.
-- Do we expose the TEE *type* (SEV vs SEV-SNP vs TDX) or keep it a boolean and let
-  the provider pick its default? Lean: boolean for the MVP; revisit with
-  attestation (where the type matters for verification).
+Until a provider's attestation verify (4) exists, `attestation: required` on that
+provider **fails closed** — so the secure default is honored from the start.
+
+## 8. Cost & risk
+Confidential instances carry a price premium; the estimate uses the confidential
+SKU's price where the catalog has it (else flagged as an assumption). A
+`confidential-unschedulable` feasibility reason mirrors `gpu-unschedulable`.
+
+## 9. Open questions
+- **Expected-measurement policy:** MVP verifies "valid report of the requested
+  type from the right root." Do we later let users pin expected measurements
+  (full remote-attestation policy)? Deferred refinement.
+- **Where attestation runs:** a guest-side fetch (a short command over SSH on the
+  ready VM) vs. a provider control-plane API. Likely per-provider (Azure=API,
+  AWS=guest-side). Decided per provider in increment 4.

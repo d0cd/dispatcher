@@ -55,15 +55,18 @@ complete:
 
 ## Theme 6 — Confidential computing (secure jobs)
 
-Run a workload on a TEE-backed VM so the cloud host can't read its memory.
-**Not supported today** — no flag, no `VMOptions` field, absent from the
-capability/risk model. Design: [confidential-computing.md](confidential-computing.md).
+Run a workload on a TEE-backed VM (hardware-encrypted memory) of a requested type
+**and prove it via attestation**. Design: [confidential-computing.md](confidential-computing.md).
+The deterministic-core gate (requirement/capability/feasibility) shipped as a
+boolean; the rest evolves it to the typed model below.
 
 | Item | Effort | Impact |
 |---|---|---|
-| **MVP — provision a confidential VM.** A `confidential` workload requirement → `VMOptions.Confidential` → the per-provider create flag (GCP `--confidential-compute-type`, AWS `--cpu-options AmdSevSnp=enabled`, Azure `--security-type ConfidentialVM`). Capability + feasibility wiring (only some instance types/regions qualify), mirroring the GPU-unschedulable pattern — reject where unsupported rather than silently launching a non-confidential VM. | M | Medium |
-| **Attestation** — surface/verify the TEE attestation report so a run can *prove* it executed confidentially. The real "secure jobs" guarantee; substantial, its own design. | L | Medium |
-| Nitro Enclaves / k8s Confidential Containers — different, larger models (enclave-within-instance, custom tooling/images). Out of scope until demand. | — | — |
+| ✅ Deterministic core: `confidential` requirement + capability + feasibility rejection (shipped as a bool). | M | Medium |
+| **Typed model** — top-level `confidential: {type, attestation}`; `Requirements.Confidential`/`Capabilities.Resources.Confidential` carry the TEE type (SEV/SEV-SNP/TDX); type-aware feasibility (mirrors GPU-model matching). | S | Medium |
+| **Provisioning** — thread the type into each provider's `CreateVM` flag (GCP `--confidential-compute-type`, AWS `--cpu-options AmdSevSnp=enabled`, Azure `--security-type ConfidentialVM`), argv-tested; mark builtins/catalog confidential-capable with their types; reject Hetzner/Lima. | M | Medium |
+| **Attestation** — a `RunStateAttesting` stage that fetches + verifies the TEE report to the hardware/cloud root, records the verdict, and **fails closed** before running the workload when `attestation: required`. Per-provider (Azure MAA first, then AWS SEV-SNP/KDS, GCP). The larger, cryptographic half. | L | High |
+| Nitro Enclaves / k8s Confidential Containers — different, larger models. Out of scope until demand. | — | — |
 
 ## Solid — no action
 
