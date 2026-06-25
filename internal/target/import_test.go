@@ -1,6 +1,7 @@
 package target
 
 import (
+	"context"
 	"os"
 	"testing"
 
@@ -9,6 +10,52 @@ import (
 
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// stubRunTF replaces the runTF seam so the terraform output path can be tested
+// without a real binary.
+func stubRunTF(t *testing.T, fn func(ctx context.Context, binary, dir string) ([]byte, error)) {
+	t.Helper()
+	prev := runTF
+	runTF = fn
+	t.Cleanup(func() { runTF = prev })
+}
+
+func TestFetchTerraformTargets_ExtractsEnvelopeValue(t *testing.T) {
+	stubRunTF(t, func(_ context.Context, _, _ string) ([]byte, error) {
+		return []byte(`{"dispatcher_targets":{"sensitive":false,"type":["object",{}],"value":{"targets":[{"id":"a","kind":"ssh","ssh":{"host":"h"}}]}}}`), nil
+	})
+	blob, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{Binary: "terraform"})
+	require.NoError(t, err)
+	got, err := ParseDispatcherTargets(blob)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a", got[0].ID)
+}
+
+func TestFetchTerraformTargets_NoOutputIsSentinel(t *testing.T) {
+	stubRunTF(t, func(_ context.Context, _, _ string) ([]byte, error) { return []byte(`{}`), nil })
+	_, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{})
+	assert.ErrorIs(t, err, ErrNoTargetsOutput)
+}
+
+func TestFetchTerraformTargets_SensitiveRefusedUnlessAllowed(t *testing.T) {
+	blob := `{"dispatcher_targets":{"sensitive":true,"value":{"targets":[]}}}`
+	stubRunTF(t, func(_ context.Context, _, _ string) ([]byte, error) { return []byte(blob), nil })
+
+	_, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sensitive")
+
+	_, err = FetchTerraformTargets(context.Background(), "/x", TerraformOptions{AllowSensitive: true})
+	require.NoError(t, err)
+}
+
+func TestFetchTerraformTargets_ExecErrorWrapped(t *testing.T) {
+	stubRunTF(t, func(_ context.Context, _, _ string) ([]byte, error) { return nil, assert.AnError })
+	_, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{Binary: "terraform"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "terraform")
+}
 
 func TestDefaultCapabilities(t *testing.T) {
 	for _, k := range []types.TargetKind{

@@ -1,9 +1,12 @@
 package target
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 
@@ -12,6 +15,58 @@ import (
 	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// ErrNoTargetsOutput means the source has no dispatcher_targets output, so an
+// import is a no-op (the managed file is left untouched) rather than a
+// delete-all.
+var ErrNoTargetsOutput = errors.New("no dispatcher_targets output found")
+
+// TerraformOptions configures the --from-terraform source.
+type TerraformOptions struct {
+	Binary         string // "terraform" (default) or "tofu"
+	AllowSensitive bool   // import even if the dispatcher_targets output is marked sensitive
+}
+
+// runTF runs `<binary> -chdir=<dir> output -json`. It's a package-level seam so
+// the terraform path is tested without a real binary. `output` is read-only —
+// it never refreshes state or mutates resources.
+var runTF = func(ctx context.Context, binary, dir string) ([]byte, error) {
+	return exec.CommandContext(ctx, binary, "-chdir="+dir, "output", "-json").Output()
+}
+
+// FetchTerraformTargets runs `terraform output -json`, extracts the
+// dispatcher_targets output's value (the {"targets":[...]} blob), and returns it
+// ready for ImportFromJSON. Returns ErrNoTargetsOutput if the output is absent.
+// Sensitive outputs are refused unless opts.AllowSensitive. The raw terraform
+// output and stderr are never echoed — they may carry unrelated secrets.
+func FetchTerraformTargets(ctx context.Context, dir string, opts TerraformOptions) (json.RawMessage, error) {
+	binary := opts.Binary
+	if binary == "" {
+		binary = "terraform"
+	}
+	out, err := runTF(ctx, binary, dir)
+	if err != nil {
+		// %w on an *exec.ExitError yields "exit status N" — not the stderr — so
+		// this does not leak secrets from the workspace.
+		return nil, fmt.Errorf("%s output -json failed (is the workspace initialized?): %w", binary, err)
+	}
+
+	var outputs map[string]struct {
+		Sensitive bool            `json:"sensitive"`
+		Value     json.RawMessage `json:"value"`
+	}
+	if err := json.Unmarshal(out, &outputs); err != nil {
+		return nil, fmt.Errorf("parse %s outputs", binary) // never include the raw bytes
+	}
+	o, ok := outputs["dispatcher_targets"]
+	if !ok {
+		return nil, ErrNoTargetsOutput
+	}
+	if o.Sensitive && !opts.AllowSensitive {
+		return nil, fmt.Errorf("the dispatcher_targets output is marked sensitive; re-run with --allow-sensitive to import it")
+	}
+	return o.Value, nil
+}
 
 // managedImportFile is the single file all imported targets are written to, so
 // re-import can reconcile them wholesale without touching hand-added targets.

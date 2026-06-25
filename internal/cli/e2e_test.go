@@ -29,6 +29,9 @@ func setupE2E(t *testing.T) {
 	runFlags.yes = false
 	gcFlags.dryRun = false
 	importFlags.fromJSON = ""
+	importFlags.fromTerraform = ""
+	importFlags.binary = ""
+	importFlags.allowSensitive = false
 	importFlags.dryRun = false
 }
 
