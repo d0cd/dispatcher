@@ -3,8 +3,7 @@
 Remaining work on dispatcher, grouped by theme. The tool is mature — the
 provisioning/pricing pipeline, durable execution, the bring-your-own-hosts
 importer, and the audit backlog have all landed — so what's left is a coherent
-set of *completeness* gaps. (Shipped feature designs live in their own docs, e.g.
-[terraform-interop.md](terraform-interop.md).)
+set of *completeness* gaps, plus one new capability (confidential computing).
 
 Effort: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days. Impact is user-facing
 severity.
@@ -53,6 +52,18 @@ complete:
 | **Coverage reporting + a floor** on the cost/security-critical packages (cloudvm, adapter, run, target). | S | Medium |
 | **golangci-lint** (or staticcheck) beyond `go vet`, plus a `govulncheck` job for dependency CVEs. | S | Medium |
 | **Build & smoke-test the release binary** (`--version` / `--help` smoke run); if downloadable binaries are offered, a GoReleaser dry-run. | S | Low |
+
+## Theme 6 — Confidential computing (secure jobs)
+
+Run a workload on a TEE-backed VM so the cloud host can't read its memory.
+**Not supported today** — no flag, no `VMOptions` field, absent from the
+capability/risk model. Design: [confidential-computing.md](confidential-computing.md).
+
+| Item | Effort | Impact |
+|---|---|---|
+| **MVP — provision a confidential VM.** A `confidential` workload requirement → `VMOptions.Confidential` → the per-provider create flag (GCP `--confidential-compute-type`, AWS `--cpu-options AmdSevSnp=enabled`, Azure `--security-type ConfidentialVM`). Capability + feasibility wiring (only some instance types/regions qualify), mirroring the GPU-unschedulable pattern — reject where unsupported rather than silently launching a non-confidential VM. | M | Medium |
+| **Attestation** — surface/verify the TEE attestation report so a run can *prove* it executed confidentially. The real "secure jobs" guarantee; substantial, its own design. | L | Medium |
+| Nitro Enclaves / k8s Confidential Containers — different, larger models (enclave-within-instance, custom tooling/images). Out of scope until demand. | — | — |
 
 ## Solid — no action
 

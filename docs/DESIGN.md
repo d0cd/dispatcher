@@ -75,7 +75,7 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 - **dispatcher.yaml**: Declarative config that overrides auto-detection (name, command, GPU, service port, budget, timeout, target)
 - **Cost estimation**: Per-target rate cards, historical run data, instance catalog with ~50 cloud VM types
 - **Risk analysis**: 10 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging)
-- **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [terraform-interop.md](terraform-interop.md).
+- **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [USAGE.md](USAGE.md#bring-your-own-hosts).
 - **Policy gates**: Per-run Unix-socket approval gate. In-process approver (terminal / `--yes`) races an external `dispatcher approve <id>`; filesystem perms (0700 dir, 0600 socket) are the auth boundary.
 - **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer
 - **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits
@@ -103,7 +103,7 @@ internal/
   state/              # State-dir resolution + 0700 enforcement
   dlog/               # Structured JSON log file
   types/              # Shared Go types and constants
-docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, terraform-interop (host import)
+docs/                 # DESIGN, USAGE, SECURITY, ROADMAP
 ```
 
 ## Security

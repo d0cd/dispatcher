@@ -34,7 +34,7 @@ internal/
   state/              # State-dir resolution + 0700 enforcement
   dlog/               # Structured JSON log file
   types/              # Shared Go types and constants
-docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, terraform-interop (host import)
+docs/                 # DESIGN, USAGE, SECURITY, ROADMAP
 ```
 
 ## Commands
