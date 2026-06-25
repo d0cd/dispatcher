@@ -132,12 +132,18 @@ output "dispatcher_targets" {
 Notes:
 
 - **SSH only** today; other kinds are rejected at import.
+- Prints an add/update/remove **plan and asks for confirmation**; pass `--yes`
+  (`-y`) to skip the prompt for scripting.
 - **Re-import reconciles** add/update/remove against the previous import and
-  never shadows a hand-added target. An empty `targets` list clears all imported
-  targets; an absent `dispatcher_targets` output is a no-op.
-- **Sensitive** Terraform outputs are refused unless `--allow-sensitive`.
+  never shadows a target that already exists (builtin, hand-added, or project
+  `dispatcher.yaml`). An empty `targets` list clears all imported targets; an
+  absent `dispatcher_targets` output is a no-op.
+- **Sensitive** Terraform outputs are refused unless `--allow-sensitive`;
+  `--workspace` reads a specific Terraform workspace.
 - `host`/`user`/`key_file` are validated at the boundary (no shell or ssh-option
-  metacharacters), and `--binary` selects `terraform` (default) or `tofu`.
+  metacharacters); a leading `~` in `key_file` is expanded. A missing or
+  group/world-accessible key is warned (`--strict` makes it an error).
+- `--binary` selects `terraform` (default) or `tofu`.
 
 ## `dispatcher.yaml`
 

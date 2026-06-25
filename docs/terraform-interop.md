@@ -284,11 +284,14 @@ No new execution path or adapter — but not "no new code."
 - **Hermetic source seam:** stub `runTF` (canned JSON), mirroring the
   `runCLI`/`provider_argv_test.go` pattern — no real terraform binary.
 
-## 15. Open questions
+## 15. Open questions — resolved
 
-- **`key_file` `~`-expansion vs. require-absolute:** pick one (lean: expand `~`
-  at import, store absolute) and document it.
-- **Workspaces:** `output -json` reflects the selected workspace; confirm whether
-  a `--workspace` flag is worth it or `TF_WORKSPACE` suffices.
-- **`tofu` parity:** OpenTofu's `output -json` is format-compatible; auto-detect
-  order vs. explicit default.
+- **`key_file` `~`-expansion** — resolved: a leading `~` is expanded to an
+  absolute path at import; missing/insecure keys are warned (`--strict` errors).
+- **Workspaces** — resolved: `--workspace` sets `TF_WORKSPACE` for the read.
+- **`tofu` parity** — resolved: binary auto-detects `terraform` then `tofu`;
+  `--binary` overrides.
+
+All seven post-review gaps (confirmation prompt + `--yes`, `--strict`, key_file
+expansion/perms, terraform error hints, project-config collision, `--workspace`,
+and a live-terraform e2e) are implemented; see commit `f94aa46`.
