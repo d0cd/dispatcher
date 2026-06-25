@@ -167,6 +167,9 @@ gpu:                          # GPU requirements
 service:                      # Long-running service
   port: 8080
 sandbox: true                 # Run in an isolated sandbox target
+confidential:                 # Run on a TEE-backed (memory-encrypted) VM
+  type: sev-snp               # sev | sev-snp | tdx | any   (default: any)
+  attestation: required       # required | off              (default: required)
 maxCost: 50                   # Hard budget in USD
 maxTime: 2h                   # Wall-clock cap
 target: hetzner-vm            # Force a specific target
@@ -178,6 +181,8 @@ retryTransientFailures: true  # Retry once on transient failure (OOM/SIGKILL); C
 ```
 
 **GPU workloads:** dispatcher provisions the catalog instance that matches the GPU requirement. If no catalog instance matches (an unknown `gpu.model`, or a provider with no GPU inventory), `plan` flags a `gpu-unschedulable` risk and `run` refuses rather than silently launching a CPU-only box.
+
+**Confidential computing:** `confidential:` requests a TEE-backed VM (hardware-encrypted memory) of the given `type`, so the cloud host can't read the workload's memory. Supported on GCP (`sev`/`sev-snp`/`tdx`), AWS (`sev-snp` only), and Azure (`sev-snp`/`tdx`); a job whose `type` no target offers is rejected (it never silently lands on a non-confidential VM). `attestation` defaults to `required` — which currently **fails closed** ("attestation verification not yet implemented"), since dispatcher provisions the TEE but does not yet verify its attestation report. Set `attestation: off` to provision the encrypted-memory VM without verification today; report verification is the next increment. See [SECURITY.md](SECURITY.md).
 
 State lives in `.dispatcher/` (per-project, found by walking up from cwd) or `~/.dispatcher/` (fallback). Override with `$DISPATCHER_HOME` or the global `--state-dir` flag.
 

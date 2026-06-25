@@ -56,6 +56,13 @@ Both directions use `--protect-args` to disable remote-shell re-tokenization of 
 
 The cloud-VM host-key pinning above does not apply to imported targets: they are long-lived operator infra reached with the operator's own key and `known_hosts`, not dispatcher-generated per-run identities.
 
+## Confidential computing
+
+`confidential:` provisions a TEE-backed VM (AMD SEV/SEV-SNP, Intel TDX) so the cloud host/hypervisor can't read the workload's memory — a *data-in-use* protection orthogonal to the operator-boundary hardening above. Boundaries:
+
+- **No silent downgrade.** A confidential job is only feasible on a target/type that supports it; otherwise it's rejected, never run on a normal VM. The provider create flag is emitted from a verified mapping (GCP `--confidential-compute-type`, AWS `--cpu-options AmdSevSnp=enabled`, Azure `--security-type ConfidentialVM`), and unsupported type/provider combos error before launch.
+- **Attestation — current state.** A TEE encrypts memory, but the *proof* is a signed attestation report. Dispatcher does **not yet verify** that report, so `attestation: required` (the default) **fails closed** rather than running as if attested; `attestation: off` is an explicit opt-in to encrypted-memory-without-verification. Report verification (per-provider: Azure MAA, AWS SEV-SNP/AMD-KDS, GCP) is the next increment and will gate the run on a verified measurement.
+
 ## Cloud CLI argument discipline
 
 Cloud CLIs (gcloud, az, aws, hcloud) each have their own tokenization rules for `--tag`, `--label`, `--metadata`, `--custom-data`. Dispatcher follows two rules:
