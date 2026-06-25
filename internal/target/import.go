@@ -1,6 +1,7 @@
 package target
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -24,14 +26,40 @@ var ErrNoTargetsOutput = errors.New("no dispatcher_targets output found")
 // TerraformOptions configures the --from-terraform source.
 type TerraformOptions struct {
 	Binary         string // "terraform" (default) or "tofu"
+	Workspace      string // TF workspace to read; empty = the currently-selected one
 	AllowSensitive bool   // import even if the dispatcher_targets output is marked sensitive
 }
 
-// runTF runs `<binary> -chdir=<dir> output -json`. It's a package-level seam so
-// the terraform path is tested without a real binary. `output` is read-only —
-// it never refreshes state or mutates resources.
-var runTF = func(ctx context.Context, binary, dir string) ([]byte, error) {
-	return exec.CommandContext(ctx, binary, "-chdir="+dir, "output", "-json").Output()
+// runTF runs `<binary> -chdir=<dir> output -json`, returning stdout and stderr
+// separately. It's a package-level seam so the terraform path is tested without
+// a real binary. `output` is read-only — it never refreshes state or mutates
+// resources.
+var runTF = func(ctx context.Context, binary, dir, workspace string) (stdout, stderr []byte, err error) {
+	cmd := exec.CommandContext(ctx, binary, "-chdir="+dir, "output", "-json")
+	if workspace != "" {
+		cmd.Env = append(os.Environ(), "TF_WORKSPACE="+workspace)
+	}
+	var out, errb bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	err = cmd.Run()
+	return out.Bytes(), errb.Bytes(), err
+}
+
+// tfErrorHint derives a safe, actionable hint from terraform's stderr WITHOUT
+// echoing the raw stderr, which can carry unrelated secrets.
+func tfErrorHint(stderr []byte) string {
+	s := strings.ToLower(string(stderr))
+	switch {
+	case strings.Contains(s, "initiali"): // "has not been initialized", "terraform init"
+		return " (run `terraform init` in that directory first)"
+	case strings.Contains(s, "no state") || strings.Contains(s, "state file"):
+		return " (no state — has the workspace been applied?)"
+	case strings.Contains(s, "no configuration files") || strings.Contains(s, "not a directory"):
+		return " (is that a Terraform workspace directory?)"
+	default:
+		return ""
+	}
 }
 
 // FetchTerraformTargets runs `terraform output -json`, extracts the
@@ -44,11 +72,9 @@ func FetchTerraformTargets(ctx context.Context, dir string, opts TerraformOption
 	if binary == "" {
 		binary = "terraform"
 	}
-	out, err := runTF(ctx, binary, dir)
+	out, stderr, err := runTF(ctx, binary, dir, opts.Workspace)
 	if err != nil {
-		// %w on an *exec.ExitError yields "exit status N" — not the stderr — so
-		// this does not leak secrets from the workspace.
-		return nil, fmt.Errorf("%s output -json failed (is the workspace initialized?): %w", binary, err)
+		return nil, fmt.Errorf("%s output -json failed%s: %w", binary, tfErrorHint(stderr), err)
 	}
 
 	var outputs map[string]struct {
@@ -80,60 +106,124 @@ type ImportResult struct {
 	Removed []string
 }
 
-// ImportFromJSON parses a dispatcher_targets blob and reconciles it into the
-// managed import file. An empty target list legitimately clears all previously
-// imported targets.
-func ImportFromJSON(blob []byte) (*ImportResult, error) {
+// ImportPlan is a computed-but-not-yet-written import: the targets to install
+// plus the add/update/remove delta against the previous import. Commit writes it.
+type ImportPlan struct {
+	targets []types.TargetConfig
+	Added   []string
+	Updated []string
+	Removed []string
+}
+
+// Targets returns the targets that would be written (for warning checks/preview).
+func (p *ImportPlan) Targets() []types.TargetConfig { return p.targets }
+
+// HasChanges reports whether committing would change anything.
+func (p *ImportPlan) HasChanges() bool {
+	return len(p.Added)+len(p.Updated)+len(p.Removed) > 0
+}
+
+// Commit atomically writes the planned targets to the managed import file.
+func (p *ImportPlan) Commit() (string, error) {
+	return WriteTargetsFile(managedImportFile, p.targets)
+}
+
+// PlanImport parses a dispatcher_targets blob and computes the import WITHOUT
+// writing: it rejects collisions with any existing target that isn't one of its
+// own previously-imported ones (builtins, hand-added <id>.yaml, or project
+// dispatcher.yaml — load order would otherwise decide who wins), and computes
+// the add/update/remove delta. An empty target list legitimately clears all
+// previously imported targets.
+func PlanImport(blob []byte) (*ImportPlan, error) {
 	targets, err := ParseDispatcherTargets(blob)
 	if err != nil {
 		return nil, err
 	}
-	return reconcileImport(targets)
-}
-
-// reconcileImport rejects collisions with hand-added targets, computes the
-// add/update/remove delta against the previous import, and atomically rewrites
-// the managed file.
-func reconcileImport(targets []types.TargetConfig) (*ImportResult, error) {
 	dir, err := state.Subdir("targets")
 	if err != nil {
 		return nil, err
 	}
+	managed := managedIDs(filepath.Join(dir, managedImportFile))
 
-	// A collision with a hand-added <id>.yaml is resolved by filename sort order
-	// at load time, so refuse it outright rather than silently shadow.
+	reg := NewRegistry()
+	reg.LoadBuiltins()
+	_ = reg.LoadUserConfig()
 	for _, t := range targets {
-		if _, err := os.Stat(filepath.Join(dir, t.ID+".yaml")); err == nil {
-			return nil, fmt.Errorf("target %q already exists as a hand-added target (%s.yaml); refusing to shadow it", t.ID, t.ID)
+		if _, exists := reg.Get(t.ID); exists && !managed[t.ID] {
+			return nil, fmt.Errorf("target %q already exists (builtin, hand-added, or project config); refusing to shadow it", t.ID)
 		}
 	}
 
-	prev := managedIDs(filepath.Join(dir, managedImportFile))
 	next := make(map[string]bool, len(targets))
-	res := &ImportResult{}
+	plan := &ImportPlan{targets: targets}
 	for _, t := range targets {
 		next[t.ID] = true
-		if prev[t.ID] {
-			res.Updated = append(res.Updated, t.ID)
+		if managed[t.ID] {
+			plan.Updated = append(plan.Updated, t.ID)
 		} else {
-			res.Added = append(res.Added, t.ID)
+			plan.Added = append(plan.Added, t.ID)
 		}
 	}
-	for id := range prev {
+	for id := range managed {
 		if !next[id] {
-			res.Removed = append(res.Removed, id)
+			plan.Removed = append(plan.Removed, id)
 		}
 	}
-	sort.Strings(res.Added)
-	sort.Strings(res.Updated)
-	sort.Strings(res.Removed)
+	sort.Strings(plan.Added)
+	sort.Strings(plan.Updated)
+	sort.Strings(plan.Removed)
+	return plan, nil
+}
 
-	path, err := WriteTargetsFile(managedImportFile, targets)
+// ImportFromJSON plans and commits in one step (non-interactive callers/tests).
+func ImportFromJSON(blob []byte) (*ImportResult, error) {
+	plan, err := PlanImport(blob)
 	if err != nil {
 		return nil, err
 	}
-	res.Path = path
-	return res, nil
+	path, err := plan.Commit()
+	if err != nil {
+		return nil, err
+	}
+	return &ImportResult{Path: path, Added: plan.Added, Updated: plan.Updated, Removed: plan.Removed}, nil
+}
+
+// expandTilde resolves a leading ~ in a path to the user's home directory, so
+// an imported key_file is stored as an absolute path. Returns the input
+// unchanged if it has no leading ~ or the home dir can't be resolved.
+func expandTilde(p string) string {
+	if p != "~" && !strings.HasPrefix(p, "~/") {
+		return p
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
+}
+
+// KeyFileWarnings checks each target's key_file at import time and returns
+// human-readable warnings for missing files or group/world-accessible perms —
+// surfacing problems now rather than letting them fail opaquely at run time.
+func KeyFileWarnings(targets []types.TargetConfig) []string {
+	var warns []string
+	for _, t := range targets {
+		if t.SSH == nil || t.SSH.KeyFile == "" {
+			continue
+		}
+		info, err := os.Stat(t.SSH.KeyFile)
+		if err != nil {
+			warns = append(warns, fmt.Sprintf("%s: key_file %q does not exist", t.ID, t.SSH.KeyFile))
+			continue
+		}
+		if info.Mode().Perm()&0o077 != 0 {
+			warns = append(warns, fmt.Sprintf("%s: key_file %q is group/world-accessible (%#o); ssh may refuse it", t.ID, t.SSH.KeyFile, info.Mode().Perm()))
+		}
+	}
+	return warns
 }
 
 // managedIDs returns the ids currently in the managed import file (empty if it
@@ -207,7 +297,7 @@ func ParseDispatcherTargets(blob []byte) ([]types.TargetConfig, error) {
 		if e.SSH == nil {
 			return nil, fmt.Errorf("target %q: missing ssh block", e.ID)
 		}
-		ssh := &types.SSHTargetConfig{Host: e.SSH.Host, User: e.SSH.User, Port: e.SSH.Port, KeyFile: e.SSH.KeyFile}
+		ssh := &types.SSHTargetConfig{Host: e.SSH.Host, User: e.SSH.User, Port: e.SSH.Port, KeyFile: expandTilde(e.SSH.KeyFile)}
 		if ssh.Port == 0 {
 			ssh.Port = 22
 		}

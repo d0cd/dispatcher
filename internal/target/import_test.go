@@ -3,6 +3,8 @@ package target
 import (
 	"context"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -13,7 +15,7 @@ import (
 
 // stubRunTF replaces the runTF seam so the terraform output path can be tested
 // without a real binary.
-func stubRunTF(t *testing.T, fn func(ctx context.Context, binary, dir string) ([]byte, error)) {
+func stubRunTF(t *testing.T, fn func(ctx context.Context, binary, dir, workspace string) (stdout, stderr []byte, err error)) {
 	t.Helper()
 	prev := runTF
 	runTF = fn
@@ -21,8 +23,8 @@ func stubRunTF(t *testing.T, fn func(ctx context.Context, binary, dir string) ([
 }
 
 func TestFetchTerraformTargets_ExtractsEnvelopeValue(t *testing.T) {
-	stubRunTF(t, func(_ context.Context, _, _ string) ([]byte, error) {
-		return []byte(`{"dispatcher_targets":{"sensitive":false,"type":["object",{}],"value":{"targets":[{"id":"a","kind":"ssh","ssh":{"host":"h"}}]}}}`), nil
+	stubRunTF(t, func(_ context.Context, _, _, _ string) ([]byte, []byte, error) {
+		return []byte(`{"dispatcher_targets":{"sensitive":false,"type":["object",{}],"value":{"targets":[{"id":"a","kind":"ssh","ssh":{"host":"h"}}]}}}`), nil, nil
 	})
 	blob, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{Binary: "terraform"})
 	require.NoError(t, err)
@@ -33,14 +35,14 @@ func TestFetchTerraformTargets_ExtractsEnvelopeValue(t *testing.T) {
 }
 
 func TestFetchTerraformTargets_NoOutputIsSentinel(t *testing.T) {
-	stubRunTF(t, func(_ context.Context, _, _ string) ([]byte, error) { return []byte(`{}`), nil })
+	stubRunTF(t, func(_ context.Context, _, _, _ string) ([]byte, []byte, error) { return []byte(`{}`), nil, nil })
 	_, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{})
 	assert.ErrorIs(t, err, ErrNoTargetsOutput)
 }
 
 func TestFetchTerraformTargets_SensitiveRefusedUnlessAllowed(t *testing.T) {
 	blob := `{"dispatcher_targets":{"sensitive":true,"value":{"targets":[]}}}`
-	stubRunTF(t, func(_ context.Context, _, _ string) ([]byte, error) { return []byte(blob), nil })
+	stubRunTF(t, func(_ context.Context, _, _, _ string) ([]byte, []byte, error) { return []byte(blob), nil, nil })
 
 	_, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{})
 	require.Error(t, err)
@@ -51,10 +53,78 @@ func TestFetchTerraformTargets_SensitiveRefusedUnlessAllowed(t *testing.T) {
 }
 
 func TestFetchTerraformTargets_ExecErrorWrapped(t *testing.T) {
-	stubRunTF(t, func(_ context.Context, _, _ string) ([]byte, error) { return nil, assert.AnError })
+	stubRunTF(t, func(_ context.Context, _, _, _ string) ([]byte, []byte, error) { return nil, nil, assert.AnError })
 	_, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{Binary: "terraform"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "terraform")
+}
+
+func TestFetchTerraformTargets_InitHintNoStderrLeak(t *testing.T) {
+	stubRunTF(t, func(_ context.Context, _, _, _ string) ([]byte, []byte, error) {
+		return nil, []byte(`Error: Backend initialization required, please run "terraform init"`), assert.AnError
+	})
+	_, err := FetchTerraformTargets(context.Background(), "/x", TerraformOptions{Binary: "terraform"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "terraform init", "should give an actionable hint")
+	assert.NotContains(t, err.Error(), "Backend initialization", "raw stderr must not be echoed")
+}
+
+func TestFetchTerraformTargets_WorkspacePassedThrough(t *testing.T) {
+	var gotWS string
+	stubRunTF(t, func(_ context.Context, _, _, ws string) ([]byte, []byte, error) {
+		gotWS = ws
+		return []byte(`{}`), nil, nil
+	})
+	_, _ = FetchTerraformTargets(context.Background(), "/x", TerraformOptions{Workspace: "staging"})
+	assert.Equal(t, "staging", gotWS)
+}
+
+func TestParseDispatcherTargets_ExpandsKeyFileTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	got, err := ParseDispatcherTargets([]byte(`{"targets":[{"id":"x","kind":"ssh","ssh":{"host":"h","key_file":"~/.ssh/id"}}]}`))
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, filepath.Join(home, ".ssh/id"), got[0].SSH.KeyFile, "leading ~ must expand to an absolute path")
+}
+
+func TestKeyFileWarnings(t *testing.T) {
+	dir := t.TempDir()
+	good := filepath.Join(dir, "good")
+	require.NoError(t, os.WriteFile(good, []byte("k"), 0o600))
+	bad := filepath.Join(dir, "bad")
+	require.NoError(t, os.WriteFile(bad, []byte("k"), 0o644))
+
+	warns := KeyFileWarnings([]types.TargetConfig{
+		{ID: "ok", SSH: &types.SSHTargetConfig{Host: "h", KeyFile: good}},
+		{ID: "perm", SSH: &types.SSHTargetConfig{Host: "h", KeyFile: bad}},
+		{ID: "missing", SSH: &types.SSHTargetConfig{Host: "h", KeyFile: filepath.Join(dir, "nope")}},
+		{ID: "nokey", SSH: &types.SSHTargetConfig{Host: "h"}},
+	})
+	require.Len(t, warns, 2)
+	joined := strings.Join(warns, "\n")
+	assert.Contains(t, joined, "does not exist")
+	assert.Contains(t, joined, "accessible")
+}
+
+func TestPlanImport_DoesNotWriteUntilCommit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	plan, err := PlanImport([]byte(`{"targets":[{"id":"a","kind":"ssh","ssh":{"host":"h"}}]}`))
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"a"}, plan.Added)
+	assert.True(t, plan.HasChanges())
+
+	reg := NewRegistry()
+	require.NoError(t, reg.LoadUserConfig())
+	_, ok := reg.Get("a")
+	assert.False(t, ok, "PlanImport must not write anything")
+
+	_, err = plan.Commit()
+	require.NoError(t, err)
+	reg2 := NewRegistry()
+	require.NoError(t, reg2.LoadUserConfig())
+	_, ok = reg2.Get("a")
+	assert.True(t, ok, "Commit must persist the plan")
 }
 
 func TestDefaultCapabilities(t *testing.T) {

@@ -31,7 +31,10 @@ func setupE2E(t *testing.T) {
 	importFlags.fromJSON = ""
 	importFlags.fromTerraform = ""
 	importFlags.binary = ""
+	importFlags.workspace = ""
 	importFlags.allowSensitive = false
+	importFlags.strict = false
+	importFlags.yes = false
 	importFlags.dryRun = false
 }
 
@@ -63,7 +66,7 @@ func TestE2E_ImportTargetThenPlan(t *testing.T) {
 	require.NoError(t, os.WriteFile(jf,
 		[]byte(`{"targets":[{"id":"byo-box","kind":"ssh","ssh":{"host":"h.example","user":"ubuntu"}}]}`), 0o644))
 
-	_, _, err := executeCommand("targets", "import", "--from-json", jf)
+	_, _, err := executeCommand("targets", "import", "--from-json", jf, "--yes")
 	require.NoError(t, err)
 
 	_, _, err = executeCommand("plan", dir, "--target", "byo-box")
