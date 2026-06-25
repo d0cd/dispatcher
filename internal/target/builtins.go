@@ -206,6 +206,10 @@ func BuiltinTargets() []types.TargetConfig {
 						Supported: true,
 						Models:    []string{"t4", "a10g", "a100"},
 					},
+					Confidential: types.ConfidentialCapability{
+						Supported: true,
+						Types:     []string{"sev-snp"},
+					},
 				},
 				Networking: types.NetworkingCapability{
 					PublicEndpoint:   true,
@@ -289,6 +293,10 @@ func BuiltinTargets() []types.TargetConfig {
 					GPU: types.GPUCapability{
 						Supported: true,
 						Models:    []string{"t4", "a100"},
+					},
+					Confidential: types.ConfidentialCapability{
+						Supported: true,
+						Types:     []string{"sev-snp", "tdx"},
 					},
 				},
 				Networking: types.NetworkingCapability{

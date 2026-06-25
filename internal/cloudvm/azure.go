@@ -73,6 +73,22 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		"--output", "json",
 	}
 
+	if opts.ConfidentialType != "" {
+		// Azure Confidential VMs are SEV-SNP (DCasv5/ECasv5) or TDX
+		// (DCesv5/ECesv5) — selected by the VM size, so the create flag is
+		// type-agnostic. There's no plain-SEV offering. VMGuestStateOnly
+		// encrypts the guest state without requiring a customer disk-encryption
+		// set (the simpler default).
+		if opts.ConfidentialType == "sev" {
+			return nil, fmt.Errorf("azure confidential VMs are sev-snp or tdx (chosen by SKU), not plain sev")
+		}
+		args = append(args,
+			"--security-type", "ConfidentialVM",
+			"--enable-vtpm", "true",
+			"--enable-secure-boot", "true",
+			"--os-disk-security-encryption-type", "VMGuestStateOnly")
+	}
+
 	if opts.UserData != "" {
 		// Azure CLI's `--custom-data @<path>` reads from a file. Keeps the
 		// (potentially large, potentially shell-special) blob entirely off

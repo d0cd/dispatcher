@@ -84,6 +84,15 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--output", "json",
 	}
 
+	if opts.ConfidentialType != "" {
+		// AWS confidential VMs are AMD SEV-SNP only (no SEV, no TDX), on
+		// specific M6a/R6a/C6a types — the catalog must pick a compatible one.
+		if opts.ConfidentialType != "sev-snp" && opts.ConfidentialType != "any" {
+			return nil, fmt.Errorf("aws supports only sev-snp confidential VMs, not %q", opts.ConfidentialType)
+		}
+		args = append(args, "--cpu-options", "AmdSevSnp=enabled")
+	}
+
 	if opts.UserData != "" {
 		// Pass user-data via `file://` so it never appears in argv (visible
 		// to other users on the host via `ps`). Today user-data is just the

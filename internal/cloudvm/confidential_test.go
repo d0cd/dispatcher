@@ -1,12 +1,28 @@
 package cloudvm
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+func TestAWSCreateVM_RejectsNonSevSnpConfidential(t *testing.T) {
+	_, err := NewAWSProvider("us-east-2").CreateVM(context.Background(),
+		VMOptions{Name: "x", ConfidentialType: "tdx"})
+	require.Error(t, err, "aws has no TDX; must reject before launching")
+	assert.Contains(t, err.Error(), "sev-snp")
+}
+
+func TestAzureCreateVM_RejectsPlainSevConfidential(t *testing.T) {
+	_, err := NewAzureProvider("rg", "eastus").CreateVM(context.Background(),
+		VMOptions{Name: "x", ConfidentialType: "sev"})
+	require.Error(t, err, "azure confidential is sev-snp/tdx by SKU, not plain sev")
+	assert.Contains(t, err.Error(), "sev")
+}
 
 func confidentialPlan(req types.ConfidentialRequirement) *types.Plan {
 	return &types.Plan{
