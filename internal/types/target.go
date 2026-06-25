@@ -60,6 +60,10 @@ type ResourceCapability struct {
 	CPU    bool          `yaml:"cpu" json:"cpu"`
 	Memory bool          `yaml:"memory" json:"memory"`
 	GPU    GPUCapability `yaml:"gpu" json:"gpu"`
+	// Confidential is true when the target can provision a TEE-backed
+	// (memory-encrypted) VM. Only such targets are feasible for a workload
+	// that requires confidential computing.
+	Confidential bool `yaml:"confidential,omitempty" json:"confidential,omitempty"`
 }
 
 // SSHTargetConfig holds SSH connection details for SSH targets.

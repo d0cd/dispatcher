@@ -20,9 +20,12 @@ type DispatcherConfig struct {
 	GPU     *DispatchGPUConfig `yaml:"gpu,omitempty"`
 	Service *DispatchService   `yaml:"service,omitempty"`
 	Sandbox bool               `yaml:"sandbox,omitempty"`
-	MaxCost float64            `yaml:"maxCost,omitempty"`
-	MaxTime string             `yaml:"maxTime,omitempty"`
-	Target  string             `yaml:"target,omitempty"`
+	// Confidential requests a TEE-backed (memory-encrypted) VM. Only
+	// confidential-capable targets are feasible when true.
+	Confidential bool    `yaml:"confidential,omitempty"`
+	MaxCost      float64 `yaml:"maxCost,omitempty"`
+	MaxTime      string  `yaml:"maxTime,omitempty"`
+	Target       string  `yaml:"target,omitempty"`
 	// Outputs lists workload-relative paths that should be retrieved before
 	// the VM is destroyed (e.g. ["results/", "model.bin"]). When empty,
 	// dispatcher attempts to retrieve a default "outputs/" directory if it
@@ -69,7 +72,7 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		dec.KnownFields(true)
 		var cfg DispatcherConfig
 		if err := dec.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, gpu, service, sandbox, maxCost, maxTime, target, outputs, watchdogTtl, retryTransientFailures)", path, err)
+			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, gpu, service, sandbox, confidential, maxCost, maxTime, target, outputs, watchdogTtl, retryTransientFailures)", path, err)
 		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate %s: %w", path, err)
@@ -139,6 +142,10 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 		if spec.DetectedKind == types.WorkloadKindUnknown {
 			spec.DetectedKind = types.WorkloadKindScript
 		}
+	}
+
+	if cfg.Confidential {
+		spec.Requirements.Confidential = true
 	}
 
 	if cfg.GPU != nil {

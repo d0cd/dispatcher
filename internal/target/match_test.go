@@ -7,6 +7,31 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestCheckFeasibility_Confidential(t *testing.T) {
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{Confidential: true},
+	}
+	target := types.TargetConfig{
+		Enabled: true,
+		Capabilities: types.Capabilities{
+			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindScript},
+		},
+	}
+
+	res := CheckFeasibility(target, w)
+	assert.False(t, res.Feasible, "non-confidential target must be infeasible for a confidential job")
+	var joined string
+	for _, r := range res.Reasons {
+		joined += r + " "
+	}
+	assert.Contains(t, joined, "confidential")
+
+	target.Capabilities.Resources.Confidential = true
+	res = CheckFeasibility(target, w)
+	assert.True(t, res.Feasible, res.Reasons)
+}
+
 func TestCheckFeasibility_SimpleScript(t *testing.T) {
 	registry := NewRegistry()
 	registry.LoadBuiltins()

@@ -48,6 +48,11 @@ type ResourceRequirements struct {
 	CPU    string         `yaml:"cpu,omitempty" json:"cpu,omitempty"`
 	Memory string         `yaml:"memory,omitempty" json:"memory,omitempty"`
 	GPU    GPURequirement `yaml:"gpu" json:"gpu"`
+	// Confidential requires a TEE-backed VM (hardware-encrypted memory:
+	// AMD SEV/SEV-SNP, Intel TDX). Only confidential-capable targets/instances
+	// are feasible when set. Note: provisions the TEE but does not yet verify
+	// attestation (see docs/confidential-computing.md).
+	Confidential bool `yaml:"confidential,omitempty" json:"confidential,omitempty"`
 }
 
 // PackagePlan describes how to package a workload for execution.

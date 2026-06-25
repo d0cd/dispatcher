@@ -26,6 +26,11 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 		reasons = append(reasons, "GPU required but target does not support GPU")
 	}
 
+	// Check confidential-computing requirements
+	if w.Requirements.Confidential && !t.Capabilities.Resources.Confidential {
+		reasons = append(reasons, "confidential computing required but target does not support it")
+	}
+
 	// Check service-specific requirements
 	if w.DetectedKind == types.WorkloadKindService {
 		for _, ns := range t.Capabilities.NotSupported {

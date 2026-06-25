@@ -9,6 +9,21 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func TestApplyConfig_Confidential(t *testing.T) {
+	spec := &types.WorkloadSpec{}
+	ApplyConfig(spec, &DispatcherConfig{Confidential: true})
+	assert.True(t, spec.Requirements.Confidential, "confidential config must set the requirement")
+}
+
+func TestLoadConfig_ParsesConfidential(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: secure\nconfidential: true\n")
+	cfg, err := LoadConfig(dir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.True(t, cfg.Confidential)
+}
+
 func TestLoadConfig_Found(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "dispatcher.yaml", `
