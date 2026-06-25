@@ -60,10 +60,16 @@ type ResourceCapability struct {
 	CPU    bool          `yaml:"cpu" json:"cpu"`
 	Memory bool          `yaml:"memory" json:"memory"`
 	GPU    GPUCapability `yaml:"gpu" json:"gpu"`
-	// Confidential is true when the target can provision a TEE-backed
-	// (memory-encrypted) VM. Only such targets are feasible for a workload
-	// that requires confidential computing.
-	Confidential bool `yaml:"confidential,omitempty" json:"confidential,omitempty"`
+	// Confidential describes the target's TEE support. Only confidential-capable
+	// targets offering the requested type are feasible for a confidential job.
+	Confidential ConfidentialCapability `yaml:"confidential,omitempty" json:"confidential,omitempty"`
+}
+
+// ConfidentialCapability describes a target's confidential-computing support.
+type ConfidentialCapability struct {
+	Supported bool `yaml:"supported" json:"supported"`
+	// Types lists the TEE technologies offered, e.g. ["sev-snp","tdx"].
+	Types []string `yaml:"types,omitempty" json:"types,omitempty"`
 }
 
 // SSHTargetConfig holds SSH connection details for SSH targets.

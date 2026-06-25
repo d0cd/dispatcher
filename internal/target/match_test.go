@@ -10,7 +10,9 @@ import (
 func TestCheckFeasibility_Confidential(t *testing.T) {
 	w := types.WorkloadSpec{
 		DetectedKind: types.WorkloadKindScript,
-		Requirements: types.ResourceRequirements{Confidential: true},
+		Requirements: types.ResourceRequirements{
+			Confidential: types.ConfidentialRequirement{Required: true, Type: "tdx"},
+		},
 	}
 	target := types.TargetConfig{
 		Enabled: true,
@@ -19,17 +21,33 @@ func TestCheckFeasibility_Confidential(t *testing.T) {
 		},
 	}
 
+	// No confidential support at all → infeasible.
 	res := CheckFeasibility(target, w)
-	assert.False(t, res.Feasible, "non-confidential target must be infeasible for a confidential job")
-	var joined string
-	for _, r := range res.Reasons {
-		joined += r + " "
-	}
-	assert.Contains(t, joined, "confidential")
+	assert.False(t, res.Feasible, "non-confidential target must be infeasible")
+	assert.Contains(t, joinReasons(res), "confidential")
 
-	target.Capabilities.Resources.Confidential = true
+	// Confidential, but only offers SEV → a TDX job is still infeasible.
+	target.Capabilities.Resources.Confidential = types.ConfidentialCapability{Supported: true, Types: []string{"sev"}}
 	res = CheckFeasibility(target, w)
-	assert.True(t, res.Feasible, res.Reasons)
+	assert.False(t, res.Feasible, "type mismatch must be infeasible")
+	assert.Contains(t, joinReasons(res), "tdx")
+
+	// Offers TDX → feasible.
+	target.Capabilities.Resources.Confidential.Types = []string{"sev", "tdx"}
+	assert.True(t, CheckFeasibility(target, w).Feasible, CheckFeasibility(target, w).Reasons)
+
+	// type "any" → any confidential-capable target works.
+	w.Requirements.Confidential.Type = "any"
+	target.Capabilities.Resources.Confidential = types.ConfidentialCapability{Supported: true, Types: []string{"sev"}}
+	assert.True(t, CheckFeasibility(target, w).Feasible)
+}
+
+func joinReasons(r FeasibilityResult) string {
+	out := ""
+	for _, s := range r.Reasons {
+		out += s + " "
+	}
+	return out
 }
 
 func TestCheckFeasibility_SimpleScript(t *testing.T) {

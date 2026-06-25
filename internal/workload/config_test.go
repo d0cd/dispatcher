@@ -11,17 +11,35 @@ import (
 
 func TestApplyConfig_Confidential(t *testing.T) {
 	spec := &types.WorkloadSpec{}
-	ApplyConfig(spec, &DispatcherConfig{Confidential: true})
-	assert.True(t, spec.Requirements.Confidential, "confidential config must set the requirement")
+	ApplyConfig(spec, &DispatcherConfig{Confidential: &DispatchConfidentialConfig{Type: "sev-snp"}})
+	assert.True(t, spec.Requirements.Confidential.Required)
+	assert.Equal(t, "sev-snp", spec.Requirements.Confidential.Type)
+	assert.Equal(t, "required", spec.Requirements.Confidential.Attestation, "attestation defaults to required")
+}
+
+func TestApplyConfig_ConfidentialAttestationOff(t *testing.T) {
+	spec := &types.WorkloadSpec{}
+	ApplyConfig(spec, &DispatcherConfig{Confidential: &DispatchConfidentialConfig{Attestation: "off"}})
+	assert.True(t, spec.Requirements.Confidential.Required)
+	assert.Equal(t, "off", spec.Requirements.Confidential.Attestation)
 }
 
 func TestLoadConfig_ParsesConfidential(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "dispatcher.yaml", "name: secure\nconfidential: true\n")
+	writeFile(t, dir, "dispatcher.yaml", "name: secure\nconfidential:\n  type: tdx\n  attestation: required\n")
 	cfg, err := LoadConfig(dir)
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
-	assert.True(t, cfg.Confidential)
+	require.NotNil(t, cfg.Confidential)
+	assert.Equal(t, "tdx", cfg.Confidential.Type)
+}
+
+func TestConfig_RejectsBadConfidentialType(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: x\nconfidential:\n  type: bogus\n")
+	_, err := LoadConfig(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "confidential.type")
 }
 
 func TestLoadConfig_Found(t *testing.T) {

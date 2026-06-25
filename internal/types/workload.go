@@ -48,11 +48,20 @@ type ResourceRequirements struct {
 	CPU    string         `yaml:"cpu,omitempty" json:"cpu,omitempty"`
 	Memory string         `yaml:"memory,omitempty" json:"memory,omitempty"`
 	GPU    GPURequirement `yaml:"gpu" json:"gpu"`
-	// Confidential requires a TEE-backed VM (hardware-encrypted memory:
-	// AMD SEV/SEV-SNP, Intel TDX). Only confidential-capable targets/instances
-	// are feasible when set. Note: provisions the TEE but does not yet verify
-	// attestation (see docs/confidential-computing.md).
-	Confidential bool `yaml:"confidential,omitempty" json:"confidential,omitempty"`
+	// Confidential, when Required, demands a TEE-backed VM (hardware-encrypted
+	// memory: AMD SEV/SEV-SNP, Intel TDX). Only confidential-capable
+	// targets/instances offering the requested Type are feasible.
+	Confidential ConfidentialRequirement `yaml:"confidential,omitempty" json:"confidential,omitempty"`
+}
+
+// ConfidentialRequirement describes a workload's confidential-computing demand.
+type ConfidentialRequirement struct {
+	Required bool `yaml:"required" json:"required"`
+	// Type is the TEE technology: "sev" | "sev-snp" | "tdx" | "" (any).
+	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+	// Attestation is "required" (default — the run only proceeds after the TEE
+	// report verifies) or "off" (provision the TEE but skip verification).
+	Attestation string `yaml:"attestation,omitempty" json:"attestation,omitempty"`
 }
 
 // PackagePlan describes how to package a workload for execution.

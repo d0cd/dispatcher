@@ -1,6 +1,10 @@
 package target
 
-import "github.com/d0cd/dispatcher/internal/types"
+import (
+	"strings"
+
+	"github.com/d0cd/dispatcher/internal/types"
+)
 
 // FeasibilityResult describes whether a target can run a workload.
 type FeasibilityResult struct {
@@ -27,8 +31,13 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 	}
 
 	// Check confidential-computing requirements
-	if w.Requirements.Confidential && !t.Capabilities.Resources.Confidential {
-		reasons = append(reasons, "confidential computing required but target does not support it")
+	if c := w.Requirements.Confidential; c.Required {
+		cap := t.Capabilities.Resources.Confidential
+		if !cap.Supported {
+			reasons = append(reasons, "confidential computing required but target does not support it")
+		} else if c.Type != "" && c.Type != "any" && !inSlice(cap.Types, c.Type) {
+			reasons = append(reasons, "confidential type "+c.Type+" not offered by target (offers: "+strings.Join(cap.Types, ", ")+")")
+		}
 	}
 
 	// Check service-specific requirements

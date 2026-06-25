@@ -20,12 +20,12 @@ type DispatcherConfig struct {
 	GPU     *DispatchGPUConfig `yaml:"gpu,omitempty"`
 	Service *DispatchService   `yaml:"service,omitempty"`
 	Sandbox bool               `yaml:"sandbox,omitempty"`
-	// Confidential requests a TEE-backed (memory-encrypted) VM. Only
-	// confidential-capable targets are feasible when true.
-	Confidential bool    `yaml:"confidential,omitempty"`
-	MaxCost      float64 `yaml:"maxCost,omitempty"`
-	MaxTime      string  `yaml:"maxTime,omitempty"`
-	Target       string  `yaml:"target,omitempty"`
+	// Confidential requests a TEE-backed (memory-encrypted) VM. Presence means
+	// "required"; the block selects the TEE type and attestation policy.
+	Confidential *DispatchConfidentialConfig `yaml:"confidential,omitempty"`
+	MaxCost      float64                     `yaml:"maxCost,omitempty"`
+	MaxTime      string                      `yaml:"maxTime,omitempty"`
+	Target       string                      `yaml:"target,omitempty"`
 	// Outputs lists workload-relative paths that should be retrieved before
 	// the VM is destroyed (e.g. ["results/", "model.bin"]). When empty,
 	// dispatcher attempts to retrieve a default "outputs/" directory if it
@@ -41,6 +41,13 @@ type DispatcherConfig struct {
 	// transient failure. Pointer so an unset value is distinguishable from
 	// false, letting the CLI flag take precedence during merge.
 	RetryTransientFailures *bool `yaml:"retryTransientFailures,omitempty"`
+}
+
+// DispatchConfidentialConfig describes confidential-computing requirements in
+// dispatcher.yaml. Type defaults to "any"; Attestation defaults to "required".
+type DispatchConfidentialConfig struct {
+	Type        string `yaml:"type,omitempty"`        // sev | sev-snp | tdx | any
+	Attestation string `yaml:"attestation,omitempty"` // required | off
 }
 
 // DispatchGPUConfig describes GPU requirements in dispatcher.yaml.
@@ -106,6 +113,18 @@ func (c *DispatcherConfig) Validate() error {
 	if c.GPU != nil && c.GPU.Count < 0 {
 		return fmt.Errorf("gpu.count must be non-negative")
 	}
+	if c.Confidential != nil {
+		switch c.Confidential.Type {
+		case "", "any", "sev", "sev-snp", "tdx":
+		default:
+			return fmt.Errorf("confidential.type %q is invalid (sev|sev-snp|tdx|any)", c.Confidential.Type)
+		}
+		switch c.Confidential.Attestation {
+		case "", "required", "off":
+		default:
+			return fmt.Errorf("confidential.attestation %q is invalid (required|off)", c.Confidential.Attestation)
+		}
+	}
 	return nil
 }
 
@@ -144,8 +163,16 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 		}
 	}
 
-	if cfg.Confidential {
-		spec.Requirements.Confidential = true
+	if cfg.Confidential != nil {
+		attestation := cfg.Confidential.Attestation
+		if attestation == "" {
+			attestation = "required" // secure default
+		}
+		spec.Requirements.Confidential = types.ConfidentialRequirement{
+			Required:    true,
+			Type:        cfg.Confidential.Type,
+			Attestation: attestation,
+		}
 	}
 
 	if cfg.GPU != nil {
