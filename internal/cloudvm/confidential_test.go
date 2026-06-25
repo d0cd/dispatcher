@@ -70,11 +70,11 @@ func TestExecute_FailsClosedWhenAttestationRequired(t *testing.T) {
 	assert.Equal(t, 0, mock.VMCount(), "must not provision a VM it can't attest")
 }
 
-func TestValidateConfidentialAttestation_OffIsAllowed(t *testing.T) {
+func TestAttestationPreflight_OffIsAllowed(t *testing.T) {
 	w := types.WorkloadSpec{Requirements: types.ResourceRequirements{
 		Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp", Attestation: "off"},
 	}}
-	assert.NoError(t, validateConfidentialAttestation(w), "attestation:off provisions the TEE without verification")
+	assert.NoError(t, confidentialAttestationPreflight(w, ProviderGCP), "attestation:off provisions the TEE without verification")
 }
 
 func TestGCPConfidentialComputeType(t *testing.T) {

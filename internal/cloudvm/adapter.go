@@ -137,19 +137,6 @@ func validateGPUInstance(w types.WorkloadSpec, instanceType string) error {
 	return nil
 }
 
-// validateConfidentialAttestation fails closed: when a workload requires
-// attestation but TEE attestation verification isn't implemented yet, we refuse
-// to provision rather than run as if the VM were attested. `attestation: off`
-// opts out (provision the TEE without verification).
-func validateConfidentialAttestation(w types.WorkloadSpec) error {
-	c := w.Requirements.Confidential
-	if c.Required && c.Attestation != "off" {
-		return fmt.Errorf("confidential attestation is required but TEE attestation verification is not yet implemented; " +
-			"set `confidential.attestation: off` to provision the TEE without verification (see docs/confidential-computing.md)")
-	}
-	return nil
-}
-
 func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	w := p.Workload
 
@@ -189,7 +176,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	if err := validateGPUInstance(w, opts.InstanceType); err != nil {
 		return nil, err
 	}
-	if err := validateConfidentialAttestation(w); err != nil {
+	if err := confidentialAttestationPreflight(w, a.config.ProviderID); err != nil {
 		return nil, err
 	}
 
@@ -283,6 +270,16 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	}
 	state.SSHWrapper = wrapper
 	earlyCleanup = append(earlyCleanup, wrapper)
+
+	// Verify TEE attestation before running anything on a confidential VM. A
+	// rejection or error returns here, and the destroyOnErr defer tears the VM
+	// down — we never run a workload on a VM we couldn't prove.
+	if att, err := verifyConfidential(ctx, a.config.ProviderID, vmInfo, effectiveKey, effectiveUser, w.Requirements.Confidential); err != nil {
+		return nil, err
+	} else if att != nil {
+		state.Attestation = att
+		dlog.L().Info("cloudvm.attested", "run", p.Metadata.ID, "vm_id", vmInfo.ID, "type", att.Type)
+	}
 
 	// cloud-init restarts sshd during its "final" phase; wait for it to
 	// avoid mid-flight exit-255 failures. No-op on images without cloud-init.
