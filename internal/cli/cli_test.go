@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/d0cd/dispatcher/internal/target"
 )
 
 // TestMain disables the live pricing fetch for the whole CLI test suite.
@@ -40,6 +42,14 @@ func executeCommand(args ...string) (string, string, error) {
 	rootFlags.json = false
 	rootFlags.stateDir = ""
 	rootFlags.noColor = false
+	importFlags.fromJSON = ""
+	importFlags.fromTerraform = ""
+	importFlags.binary = ""
+	importFlags.workspace = ""
+	importFlags.allowSensitive = false
+	importFlags.strict = false
+	importFlags.yes = false
+	importFlags.dryRun = false
 
 	return stdout.String(), stderr.String(), err
 }
@@ -67,6 +77,89 @@ func TestCLI_TargetsDoctor_NotFoundListsAvailable(t *testing.T) {
 	assert.Contains(t, err.Error(), "available targets:")
 	// A known builtin should be listed so the user can correct a typo.
 	assert.Contains(t, err.Error(), "local-docker")
+}
+
+func TestCLI_TargetsImport_FromJSON(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	jf := filepath.Join(t.TempDir(), "t.json")
+	require.NoError(t, os.WriteFile(jf,
+		[]byte(`{"targets":[{"id":"byo","kind":"ssh","ssh":{"host":"h.example","user":"ubuntu"}}]}`), 0o644))
+
+	_, _, err := executeCommand("targets", "import", "--from-json", jf, "--yes")
+	require.NoError(t, err)
+
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	tc, ok := r.Get("byo")
+	require.True(t, ok)
+	assert.True(t, tc.Enabled)
+	require.NotNil(t, tc.SSH)
+	assert.Equal(t, "h.example", tc.SSH.Host)
+}
+
+func TestCLI_TargetsImport_AbortsWithoutYes(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	jf := filepath.Join(t.TempDir(), "t.json")
+	require.NoError(t, os.WriteFile(jf,
+		[]byte(`{"targets":[{"id":"byo","kind":"ssh","ssh":{"host":"h.example"}}]}`), 0o644))
+
+	// No --yes and a non-terminal stdin → the prompt reads EOF and aborts.
+	_, _, err := executeCommand("targets", "import", "--from-json", jf)
+	require.NoError(t, err)
+
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	_, ok := r.Get("byo")
+	assert.False(t, ok, "import must not persist without confirmation")
+}
+
+func TestCLI_TargetsImport_StrictRejectsMissingKeyFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	jf := filepath.Join(t.TempDir(), "t.json")
+	require.NoError(t, os.WriteFile(jf,
+		[]byte(`{"targets":[{"id":"byo","kind":"ssh","ssh":{"host":"h.example","key_file":"/no/such/key"}}]}`), 0o644))
+
+	_, _, err := executeCommand("targets", "import", "--from-json", jf, "--yes", "--strict")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "strict")
+
+	// Without --strict it warns but imports.
+	_, _, err = executeCommand("targets", "import", "--from-json", jf, "--yes")
+	require.NoError(t, err)
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	_, ok := r.Get("byo")
+	assert.True(t, ok)
+}
+
+func TestCLI_TargetsImport_DryRunWritesNothing(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	jf := filepath.Join(t.TempDir(), "t.json")
+	require.NoError(t, os.WriteFile(jf,
+		[]byte(`{"targets":[{"id":"byo","kind":"ssh","ssh":{"host":"h.example"}}]}`), 0o644))
+
+	_, _, err := executeCommand("targets", "import", "--from-json", jf, "--dry-run")
+	require.NoError(t, err)
+
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	_, ok := r.Get("byo")
+	assert.False(t, ok, "--dry-run must not persist anything")
+}
+
+func TestCLI_TargetsAdd_KeyFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	_, _, err := executeCommand("targets", "add", "box",
+		"--kind", "ssh", "--host", "h.example", "--key-file", "/tmp/k")
+	require.NoError(t, err)
+
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	tc, ok := r.Get("box")
+	require.True(t, ok)
+	require.NotNil(t, tc.SSH)
+	assert.Equal(t, "/tmp/k", tc.SSH.KeyFile)
 }
 
 func TestCLI_TargetsRemove(t *testing.T) {

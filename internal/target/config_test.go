@@ -149,6 +149,40 @@ func TestSaveTarget(t *testing.T) {
 	assert.Equal(t, types.TargetKindSSH, loaded.Kind)
 }
 
+func TestValidateSSHTarget(t *testing.T) {
+	require.NoError(t, ValidateSSHTarget(&types.SSHTargetConfig{
+		Host: "host.example.com", User: "ubuntu", KeyFile: "/home/me/.ssh/id_ed25519",
+	}))
+
+	assert.Error(t, ValidateSSHTarget(nil), "nil ssh config must be rejected")
+
+	bad := map[string]*types.SSHTargetConfig{
+		"empty host":            {Host: ""},
+		"host with colon":       {Host: "h:22"},
+		"host option-inject":    {Host: "-oProxyCommand=evil"},
+		"host with at":          {Host: "a@b"},
+		"host with slash":       {Host: "a/b"},
+		"host with space":       {Host: "a b"},
+		"user metachar":         {Host: "h", User: "a;b"},
+		"user leading dash":     {Host: "h", User: "-x"},
+		"key_file with newline": {Host: "h", KeyFile: "/k\nevil"},
+		"key_file flag-like":    {Host: "h", KeyFile: "-k"},
+	}
+	for name, c := range bad {
+		t.Run(name, func(t *testing.T) { assert.Error(t, ValidateSSHTarget(c)) })
+	}
+}
+
+func TestSaveTarget_RejectsUnsafeSSHHost(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	_, err := SaveTarget(types.TargetConfig{
+		ID: "box", Kind: types.TargetKindSSH,
+		SSH: &types.SSHTargetConfig{Host: "-oProxyCommand=evil"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "host")
+}
+
 func TestDeleteTarget(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

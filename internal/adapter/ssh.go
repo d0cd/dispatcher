@@ -4,11 +4,20 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
+	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// runRsync runs rsync. It's a package-level seam so artifact retrieval can be
+// tested by capturing argv without a live SSH host.
+var runRsync = func(ctx context.Context, args ...string) error {
+	return exec.CommandContext(ctx, "rsync", args...).Run()
+}
 
 // strictHostKeyChecking pins ssh's StrictHostKeyChecking mode. `accept-new`
 // trusts a host's key on first contact (so legitimate first connections work)
@@ -158,7 +167,7 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 	return &RunHandle{
 		ID:       fmt.Sprintf("ssh-%s-%s", SanitizeName(w.Name), p.Metadata.ID),
 		TargetID: "ssh",
-		State:    &sshState{cmd: cmd},
+		State:    &sshState{cmd: cmd, outputs: w.Outputs},
 	}, nil
 }
 
@@ -198,12 +207,79 @@ func (s *SSHAdapter) Logs(_ context.Context, _ *RunHandle, _ io.Writer) error {
 	return nil
 }
 
-// Artifacts is unimplemented for SSH targets. The runner has no convention
-// for where a remote workload might write artifacts, so we explicitly return
-// (nil, nil) — empty list, no error — to signal "no artifacts available"
-// rather than failure. A future change could scp a configured directory back.
-func (s *SSHAdapter) Artifacts(_ context.Context, _ *RunHandle) ([]ArtifactRef, error) {
-	return nil, nil
+// Artifacts retrieves each workload-declared output path from the remote
+// working dir into the run's local artifacts tree via rsync. It mirrors the
+// cloud-VM adapter's hardening: output paths that are absolute, contain `..`,
+// or would escape the artifacts root are rejected; `--safe-links` blocks a
+// workload from planting a symlink to a host file, and `--protect-args` stops
+// the remote shell from re-tokenizing the path.
+func (s *SSHAdapter) Artifacts(ctx context.Context, h *RunHandle) ([]ArtifactRef, error) {
+	ss, ok := h.State.(*sshState)
+	if !ok || len(ss.outputs) == 0 {
+		return nil, nil
+	}
+
+	indexKey := h.RunID
+	if indexKey == "" {
+		indexKey = h.ID
+	}
+	dest, err := state.Subdir(filepath.Join("runs", indexKey, "artifacts"))
+	if err != nil {
+		return nil, fmt.Errorf("create artifacts dir: %w", err)
+	}
+	rootAbs, err := filepath.Abs(dest)
+	if err != nil {
+		return nil, fmt.Errorf("resolve artifacts dir: %w", err)
+	}
+
+	eArg := rsyncSSHCmd(s.config)
+
+	var refs []ArtifactRef
+	var firstErr error
+	for _, out := range ss.outputs {
+		if filepath.IsAbs(out) || strings.Contains(out, "..") {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rejected output path %q (absolute or traversal)", out)
+			}
+			continue
+		}
+		remoteSrc := fmt.Sprintf("%s@%s:%s/%s", s.config.User, s.config.Host, s.config.RemoteDir, out)
+		localDest := filepath.Join(dest, filepath.Clean(out))
+		destAbs, err := filepath.Abs(localDest)
+		if err != nil || !strings.HasPrefix(destAbs+string(filepath.Separator), rootAbs+string(filepath.Separator)) {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("output %q escapes artifacts root", out)
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(localDest), 0o700); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("mkdir %s: %w", filepath.Dir(localDest), err)
+			}
+			continue
+		}
+
+		args := []string{"-az", "--safe-links", "--protect-args"}
+		if eArg != "" {
+			args = append(args, "-e", eArg)
+		}
+		args = append(args, remoteSrc, localDest)
+		if err := runRsync(ctx, args...); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("rsync %s: %w", out, err)
+			}
+			continue
+		}
+
+		_ = filepath.Walk(localDest, func(p string, info os.FileInfo, _ error) error {
+			if info == nil || info.IsDir() {
+				return nil
+			}
+			refs = append(refs, ArtifactRef{Name: filepath.Base(p), Path: p, Size: info.Size()})
+			return nil
+		})
+	}
+	return refs, firstErr
 }
 
 func (s *SSHAdapter) Terminate(ctx context.Context, h *RunHandle) error {
@@ -322,5 +398,6 @@ func rsyncSSHCmd(cfg SSHConfig) string {
 }
 
 type sshState struct {
-	cmd *exec.Cmd
+	cmd     *exec.Cmd
+	outputs []string
 }

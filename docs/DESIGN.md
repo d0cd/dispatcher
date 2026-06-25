@@ -26,13 +26,14 @@ The reconciler audits what happened.
 
 ## What's Built
 
-### CLI Commands (19 top-level + 3 `targets` subcommands)
+### CLI Commands (20 top-level + 5 `targets` subcommands)
 
 ```bash
 dispatcher init [path]              # Scaffold dispatcher.yaml from workload inspection
 dispatcher plan <path> [--ai]       # Generate execution plan with cost/risk analysis
 dispatcher audit <path>             # Pre-run risk audit (workload + targets)
 dispatcher run <path>               # Plan and execute a workload
+dispatcher validate [path]          # Validate dispatcher.yaml without planning or running
 dispatcher stop <run-id>            # Terminate and clean up a running workload
 dispatcher status <run-id>          # Show run status (reconnects to live VMs)
 dispatcher logs <run-id>            # Stream logs (reconnects to live VMs)
@@ -44,7 +45,9 @@ dispatcher history                  # Historical run statistics per target
 dispatcher approve <run-id>         # Approve a pending policy gate (out-of-band)
 dispatcher deny <run-id>            # Deny a pending policy gate
 dispatcher targets list             # List configured targets
-dispatcher targets add <id>         # Add a new target
+dispatcher targets add <id>         # Add a new target (--kind/--host/--user/--port/--key-file)
+dispatcher targets remove <id>      # Remove a target you added (alias rm)
+dispatcher targets import           # Import hosts as SSH targets (--from-json/--from-terraform)
 dispatcher targets doctor <id>      # Health check a target
 dispatcher renew <run-id>           # Extend a running cloud run's self-destruct watchdog
 dispatcher gc [--dry-run]           # Find and destroy orphaned cloud resources
@@ -71,7 +74,8 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 - **Workload inspection**: Recursive scanning for runtime, entrypoints, ports, GPU, secrets, data deps, monorepo detection
 - **dispatcher.yaml**: Declarative config that overrides auto-detection (name, command, GPU, service port, budget, timeout, target)
 - **Cost estimation**: Per-target rate cards, historical run data, instance catalog with ~50 cloud VM types
-- **Risk analysis**: 9 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, credentials, data egress, public endpoint, network, packaging)
+- **Risk analysis**: 10 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging)
+- **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [terraform-interop.md](terraform-interop.md).
 - **Policy gates**: Per-run Unix-socket approval gate. In-process approver (terminal / `--yes`) races an external `dispatcher approve <id>`; filesystem perms (0700 dir, 0600 socket) are the auth boundary.
 - **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer
 - **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits
@@ -99,7 +103,7 @@ internal/
   state/              # State-dir resolution + 0700 enforcement
   dlog/               # Structured JSON log file
   types/              # Shared Go types and constants
-docs/                 # Design doc, implementation plan
+docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, terraform-interop (host import)
 ```
 
 ## Security

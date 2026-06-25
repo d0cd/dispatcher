@@ -14,6 +14,12 @@ cd dispatcher
 go build -o dispatcher ./cmd/dispatcher
 ```
 
+Shell completion is available via the standard Cobra command, e.g.:
+
+```bash
+dispatcher completion bash > /etc/bash_completion.d/dispatcher   # or zsh/fish/powershell
+```
+
 ## Quick start
 
 All commands default to the current directory; pass an explicit path to operate elsewhere.
@@ -36,6 +42,7 @@ dispatcher stop <run-id>       # Stop and clean up
 |---|---|
 | `init [path] [--force]` | Scaffold `dispatcher.yaml` from workload inspection. `--force`/`-f` overwrites an existing file. |
 | `plan <path>` | Generate execution plan with cost / risk analysis. Flags: `--ai` (LLM-driven planner), `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--gpu <spec>`. |
+| `validate [path]` | Validate `dispatcher.yaml` (schema + semantic checks) without planning or running. |
 | `audit <path>` | Pre-run risk audit: cost surprises, missing secrets, missing Dockerfile, no-feasible-target. |
 | `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; Hetzner only — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
 | `explain <plan-id>` | Verbose recommendation for a saved plan. |
@@ -73,7 +80,9 @@ dispatcher stop <run-id>       # Stop and clean up
 | Command | Purpose |
 |---|---|
 | `targets list` | List configured targets. |
-| `targets add <id>` | Add a target. |
+| `targets add <id>` | Add a target. `--kind docker\|ssh\|kubernetes\|cloud-vm` (default `docker`), `--enabled` (default true), and `--host/--user/--port/--key-file` for SSH. |
+| `targets remove <id>` | Remove a target you added (alias `rm`). |
+| `targets import` | Import hosts as SSH targets (see [Bring your own hosts](#bring-your-own-hosts)). |
 | `targets doctor <id>` | Health check a target. |
 
 ## Supported targets
@@ -91,6 +100,57 @@ dispatcher stop <run-id>       # Stop and clean up
 | `hetzner-vm` | builtin | `hcloud` |
 
 User-defined targets (any SSH host, custom cloud) are added with `dispatcher targets add`.
+
+## Bring your own hosts
+
+If your hosts are already provisioned — by Terraform/OpenTofu, Pulumi, or any
+script — `dispatcher targets import` registers them as SSH targets so the
+plan/cost/risk/approval/teardown layer can run jobs on them. Dispatcher reads
+your infra; it never mutates it.
+
+```bash
+dispatcher targets import --from-json hosts.json        # or - for stdin
+dispatcher targets import --from-terraform ./infra      # runs `terraform output -json`
+dispatcher targets import --from-terraform ./infra --dry-run
+```
+
+The contract is a single `dispatcher_targets` value — a `{"targets":[...]}`
+object where each entry maps to an SSH target:
+
+```json
+{ "targets": [
+  { "id": "trainer", "kind": "ssh",
+    "ssh": { "host": "203.0.113.10", "user": "ubuntu", "port": 22, "key_file": "/home/me/.ssh/id_ed25519" } }
+] }
+```
+
+For Terraform, expose exactly that as an output named `dispatcher_targets`:
+
+```hcl
+output "dispatcher_targets" {
+  value = { targets = [{
+    id   = "trainer"
+    kind = "ssh"
+    ssh  = { host = aws_instance.trainer.public_ip, user = "ubuntu", port = 22, key_file = "/home/me/.ssh/id_ed25519" }
+  }] }
+}
+```
+
+Notes:
+
+- **SSH only** today; other kinds are rejected at import.
+- Prints an add/update/remove **plan and asks for confirmation**; pass `--yes`
+  (`-y`) to skip the prompt for scripting.
+- **Re-import reconciles** add/update/remove against the previous import and
+  never shadows a target that already exists (builtin, hand-added, or project
+  `dispatcher.yaml`). An empty `targets` list clears all imported targets; an
+  absent `dispatcher_targets` output is a no-op.
+- **Sensitive** Terraform outputs are refused unless `--allow-sensitive`;
+  `--workspace` reads a specific Terraform workspace.
+- `host`/`user`/`key_file` are validated at the boundary (no shell or ssh-option
+  metacharacters); a leading `~` in `key_file` is expanded. A missing or
+  group/world-accessible key is warned (`--strict` makes it an error).
+- `--binary` selects `terraform` (default) or `tofu`.
 
 ## `dispatcher.yaml`
 

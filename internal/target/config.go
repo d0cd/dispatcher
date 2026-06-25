@@ -82,17 +82,88 @@ func (r *Registry) LoadUserConfig() error {
 	return nil
 }
 
+// validateTargetID rejects empty ids and ids that could escape the targets
+// directory. Shared by SaveTarget, DeleteTarget, and the importer.
+func validateTargetID(id string) error {
+	if id == "" {
+		return fmt.Errorf("target id is empty")
+	}
+	if strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
+		return fmt.Errorf("invalid target id %q: contains path separator or traversal", id)
+	}
+	return nil
+}
+
+// ValidateSSHTarget checks an SSH target's connection fields at the trust
+// boundary. host and user are interpolated into ssh/rsync argv as `user@host`,
+// so they must not carry shell or ssh-option metacharacters; key_file is a path.
+// Shared by SaveTarget, `targets add`, and the bring-your-own-hosts importer so
+// no path can persist a target that would inject into ssh.
+func ValidateSSHTarget(c *types.SSHTargetConfig) error {
+	if c == nil {
+		return fmt.Errorf("ssh config is nil")
+	}
+	if err := validateSSHHost(c.Host); err != nil {
+		return err
+	}
+	if c.User != "" {
+		if err := validateSSHWord("user", c.User); err != nil {
+			return err
+		}
+	}
+	if c.KeyFile != "" {
+		if err := validateSSHKeyFile(c.KeyFile); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateSSHHost(host string) error {
+	if host == "" {
+		return fmt.Errorf("ssh host is empty")
+	}
+	if strings.HasPrefix(host, "-") {
+		return fmt.Errorf("ssh host %q is flag-like (leading '-')", host)
+	}
+	for _, r := range host {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '-') {
+			return fmt.Errorf("ssh host %q contains characters outside [a-zA-Z0-9.-] (no ':' '/' '@'; IPv6 literals unsupported)", host)
+		}
+	}
+	return nil
+}
+
+func validateSSHWord(field, val string) error {
+	if strings.HasPrefix(val, "-") {
+		return fmt.Errorf("ssh %s %q is flag-like (leading '-')", field, val)
+	}
+	for _, r := range val {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.' || r == '-') {
+			return fmt.Errorf("ssh %s %q contains characters outside [a-zA-Z0-9_.-]", field, val)
+		}
+	}
+	return nil
+}
+
+func validateSSHKeyFile(path string) error {
+	if strings.HasPrefix(path, "-") {
+		return fmt.Errorf("ssh key_file %q is flag-like (leading '-')", path)
+	}
+	if strings.ContainsAny(path, "\x00\n\r") {
+		return fmt.Errorf("ssh key_file %q contains a NUL or newline", path)
+	}
+	return nil
+}
+
 // DeleteTarget removes the user-defined target file at
 // <state-dir>/targets/<id>.yaml (the file SaveTarget writes). Builtins and
 // project-local `dispatcher.yaml` targets have no such file and aren't
 // removable here. Applies the same id validation as SaveTarget so a crafted
 // id can't escape the targets directory.
 func DeleteTarget(id string) (string, error) {
-	if id == "" {
-		return "", fmt.Errorf("target id is empty")
-	}
-	if strings.ContainsAny(id, "/\\") || strings.Contains(id, "..") {
-		return "", fmt.Errorf("invalid target id %q: contains path separator or traversal", id)
+	if err := validateTargetID(id); err != nil {
+		return "", err
 	}
 	dir, err := state.Subdir("targets")
 	if err != nil {
@@ -125,11 +196,13 @@ func (r *Registry) LoadProjectConfig(dir string) error {
 // `dispatcher targets add --id "../etc/passwd"` invocation can't escape the
 // targets directory.
 func SaveTarget(t types.TargetConfig) (string, error) {
-	if t.ID == "" {
-		return "", fmt.Errorf("target id is empty")
+	if err := validateTargetID(t.ID); err != nil {
+		return "", err
 	}
-	if strings.ContainsAny(t.ID, "/\\") || strings.Contains(t.ID, "..") {
-		return "", fmt.Errorf("invalid target id %q: contains path separator or traversal", t.ID)
+	if t.SSH != nil {
+		if err := ValidateSSHTarget(t.SSH); err != nil {
+			return "", fmt.Errorf("invalid ssh target %q: %w", t.ID, err)
+		}
 	}
 	dir, err := state.Subdir("targets")
 	if err != nil {

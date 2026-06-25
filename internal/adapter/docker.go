@@ -196,7 +196,15 @@ func (d *DockerAdapter) FailureDetails(h *RunHandle) FailureDetails {
 	if err != nil {
 		return FailureDetails{Message: "docker inspect unavailable (container may have been removed)"}
 	}
-	parts := strings.SplitN(strings.TrimSpace(string(out)), "|", 3)
+	return parseDockerInspect(string(out))
+}
+
+// parseDockerInspect turns the `{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}`
+// inspect output into FailureDetails. Separated from the exec so the
+// classification (OOM→SIGKILL, exit code, secret-truncated message) is testable
+// without a docker daemon.
+func parseDockerInspect(raw string) FailureDetails {
+	parts := strings.SplitN(strings.TrimSpace(raw), "|", 3)
 	if len(parts) < 2 {
 		return FailureDetails{Message: "docker inspect returned unexpected shape"}
 	}

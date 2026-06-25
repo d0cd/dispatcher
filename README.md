@@ -31,6 +31,10 @@ dispatcher stop <id>
   VM or your money.
 - **No lock-in.** Swap or add providers without rewriting your workload. Leaving
   a cloud is a config change, not a migration.
+- **Bring your own hosts.** Already provisioned with Terraform/OpenTofu, Pulumi,
+  or a script? `dispatcher targets import` registers those hosts as targets and
+  runs jobs on them — read-only with respect to your IaC. See
+  [docs/terraform-interop.md](docs/terraform-interop.md).
 
 ## Documentation
 
@@ -43,7 +47,7 @@ dispatcher stop <id>
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher
-go test ./...                # ~450 tests across 15 packages
+go test ./...                # ~540 tests across 15 packages
 go vet ./...
 ```
 
