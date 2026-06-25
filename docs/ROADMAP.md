@@ -45,7 +45,7 @@ never launches.**
 
 | Item | Effort | Impact |
 |---|---|---|
-| Artifacts retrieval is cloud-VM-only; `outputs:` silently no-ops on local/docker/ssh/k8s. Implement `docker cp` / `kubectl cp` / scp-back; at minimum warn when `outputs:` is set but unretrievable instead of returning `(nil, nil)`. | M | Medium |
+| **✅ SSH done** (`1eb0550`, on `byo-hosts`). Artifacts retrieval is cloud-VM-only; `outputs:` silently no-ops on local/docker/ssh/k8s. Implement `docker cp` / `kubectl cp` / scp-back; at minimum warn when `outputs:` is set but unretrievable instead of returning `(nil, nil)`. *Done: SSH scp-back. Residual: docker/k8s/local.* | M | Medium |
 | Per-run firewall (`--allow-ssh-from`) is Hetzner-only; AWS security groups and Azure NSGs are natural fits. Opt-in and fail-closed today, so no silent insecurity. | L | Medium |
 | No spot/preemptible support, despite lowest-cost-success being the headline and the planner advising spot. Surface as "variable/evictable, not estimable" rather than a wrong precise price. | L | Medium |
 
@@ -84,17 +84,15 @@ framework; and docs-vs-code alignment overall. No TODO/FIXME/panic debt.
 ## Suggested order
 
 The original top three (provisioning gap; `run` silent-failure + watchdog
-renewal; provider-argv seam) have all landed this cycle. Remaining priorities:
+renewal; provider-argv seam) have all landed, as has Theme 7 Phase 1 (with its
+SSH-artifact prerequisite). Remaining priorities:
 
-1. **SSH artifact retrieval (Theme 3).** `outputs:` silently no-ops on SSH — and
-   it's the gating prerequisite for Theme 7. Implement scp-back or warn loudly.
-2. **Region/zone selection + GPU-model matching (Theme 1 residuals).** Needed for
+1. **Region/zone selection + GPU-model matching (Theme 1 residuals).** Needed for
    reliable GPU and region-pinned runs.
-3. **Remaining cost-critical coverage (Theme 4).** Executor transient-retry,
+2. **Remaining cost-critical coverage (Theme 4).** Executor transient-retry,
    `startLongRunning`, `sshCmdArgs`, the Docker adapter.
-
-Theme 7 (bring-your-own-hosts import) shares no code with the cloud path and can
-land alongside, gated only on item 1.
+3. **Docker/k8s/local artifact retrieval + spot/preemptible (Theme 3).** Extend
+   the artifact retrieval just shipped for SSH; price evictable capacity honestly.
 
 ## Theme 6 — Complete CI
 
@@ -110,6 +108,10 @@ complete:
 | **Build & smoke-test the release binary** (`go build` is covered; add a `--version` / `--help` smoke run) and, if downloadable binaries are ever offered, a GoReleaser dry-run. | S | Low |
 
 ## Theme 7 — Bring your own hosts (IaC interop)
+
+**✅ Phase 1 shipped** (`1eb0550`…`8ec7c8d` on the `byo-hosts` branch): the three
+prerequisites and `targets import --from-json`/`--from-terraform`. The rows below
+are done; k8s/cloud/`--from-state` remain cancelled.
 
 Terraform/OpenTofu/Pulumi own the **durable substrate**; dispatcher runs
 **transient jobs** on it, adding the layer they skip — pre-flight cost/risk, an
@@ -133,10 +135,10 @@ a real `targets add --key-file` flag (none today).
 
 | Item | Effort | Impact |
 |---|---|---|
-| `targets import --from-json`/`--from-terraform` (SSH only) via a testable `runTF` seam → SSH `TargetConfig`s with **`Enabled: true`** and populated `Capabilities` (else the planner drops them — `CheckFeasibility` rejects disabled/uncapable targets). Factor `defaultCapabilitiesForKind` into `internal/target`. | M | High |
-| **Validation/security:** three purpose-built validators — `host` (hostname/IP, reject `:`/`/`/`@`/leading-`-`), `user` (strict), `key_file` (path, `~`-aware) — **not** `isSafeArg` (too permissive for ssh/rsync URIs, too strict for `~` paths). Refuse to persist targets from `sensitive` outputs (`--allow-sensitive` to override); never log raw `output -json`/stderr. | M | High |
-| **Persistence:** new `target.WriteTargetsFile` (atomic temp+fsync+rename, `0600`) for one managed `terraform-import.yaml`. Idempotent re-import (add/update/remove); explicit empty-list = delete-all vs no-output = no-op. **Deterministically** reject id collisions with builtins (mis-route risk) and hand-added targets, and duplicate ids within the blob — load order is filename-sorted, so "warn" is not a boundary. | S | High |
-| Document the `dispatcher_targets` contract in `docs/USAGE.md`; qualify "read-only" (true for IaC state/lifecycle; dispatcher still `rm -rf`s its working dir on the host). | S | Medium |
+| ✅ `targets import --from-json`/`--from-terraform` (SSH only) via a testable `runTF` seam → SSH `TargetConfig`s with **`Enabled: true`** and populated `Capabilities` (else the planner drops them — `CheckFeasibility` rejects disabled/uncapable targets). Factor `defaultCapabilitiesForKind` into `internal/target`. | M | High |
+| ✅ **Validation/security:** three purpose-built validators — `host` (hostname/IP, reject `:`/`/`/`@`/leading-`-`), `user` (strict), `key_file` (path, `~`-aware) — **not** `isSafeArg` (too permissive for ssh/rsync URIs, too strict for `~` paths). Refuse to persist targets from `sensitive` outputs (`--allow-sensitive` to override); never log raw `output -json`/stderr. | M | High |
+| ✅ **Persistence:** new `target.WriteTargetsFile` (atomic temp+fsync+rename, `0600`) for one managed `terraform-import.yaml`. Idempotent re-import (add/update/remove); explicit empty-list = delete-all vs no-output = no-op. **Deterministically** reject id collisions with builtins (mis-route risk) and hand-added targets, and duplicate ids within the blob — load order is filename-sorted, so "warn" is not a boundary. | S | High |
+| ✅ Document the `dispatcher_targets` contract in `docs/USAGE.md`; qualify "read-only" (true for IaC state/lifecycle; dispatcher still `rm -rf`s its working dir on the host). | S | Medium |
 
 **Cancelled as standing commitments:** k8s import (needs `K8sTargetConfig` +
 `adapterForTarget` wiring), cloud-target import, and `--from-state` parsing

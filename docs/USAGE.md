@@ -73,7 +73,9 @@ dispatcher stop <run-id>       # Stop and clean up
 | Command | Purpose |
 |---|---|
 | `targets list` | List configured targets. |
-| `targets add <id>` | Add a target. |
+| `targets add <id>` | Add a target (`--host/--user/--port/--key-file` for SSH). |
+| `targets remove <id>` | Remove a target you added (alias `rm`). |
+| `targets import` | Import hosts as SSH targets (see [Bring your own hosts](#bring-your-own-hosts)). |
 | `targets doctor <id>` | Health check a target. |
 
 ## Supported targets
@@ -91,6 +93,51 @@ dispatcher stop <run-id>       # Stop and clean up
 | `hetzner-vm` | builtin | `hcloud` |
 
 User-defined targets (any SSH host, custom cloud) are added with `dispatcher targets add`.
+
+## Bring your own hosts
+
+If your hosts are already provisioned — by Terraform/OpenTofu, Pulumi, or any
+script — `dispatcher targets import` registers them as SSH targets so the
+plan/cost/risk/approval/teardown layer can run jobs on them. Dispatcher reads
+your infra; it never mutates it.
+
+```bash
+dispatcher targets import --from-json hosts.json        # or - for stdin
+dispatcher targets import --from-terraform ./infra      # runs `terraform output -json`
+dispatcher targets import --from-terraform ./infra --dry-run
+```
+
+The contract is a single `dispatcher_targets` value — a `{"targets":[...]}`
+object where each entry maps to an SSH target:
+
+```json
+{ "targets": [
+  { "id": "trainer", "kind": "ssh",
+    "ssh": { "host": "203.0.113.10", "user": "ubuntu", "port": 22, "key_file": "/home/me/.ssh/id_ed25519" } }
+] }
+```
+
+For Terraform, expose exactly that as an output named `dispatcher_targets`:
+
+```hcl
+output "dispatcher_targets" {
+  value = { targets = [{
+    id   = "trainer"
+    kind = "ssh"
+    ssh  = { host = aws_instance.trainer.public_ip, user = "ubuntu", port = 22, key_file = "/home/me/.ssh/id_ed25519" }
+  }] }
+}
+```
+
+Notes:
+
+- **SSH only** today; other kinds are rejected at import.
+- **Re-import reconciles** add/update/remove against the previous import and
+  never shadows a hand-added target. An empty `targets` list clears all imported
+  targets; an absent `dispatcher_targets` output is a no-op.
+- **Sensitive** Terraform outputs are refused unless `--allow-sensitive`.
+- `host`/`user`/`key_file` are validated at the boundary (no shell or ssh-option
+  metacharacters), and `--binary` selects `terraform` (default) or `tofu`.
 
 ## `dispatcher.yaml`
 

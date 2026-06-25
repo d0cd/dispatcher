@@ -1,7 +1,14 @@
 # Design: `targets import` — bring your own hosts (v2)
 
-**Status:** Proposed (v2 — revised after adversarial + product review)
+**Status:** Implemented — Phase 1 (v2 design, revised after adversarial + product review)
 **Related:** ROADMAP Theme 7. Reuses the target registry (`internal/target`).
+
+> Phase 1 shipped: prerequisites (SSH artifact retrieval, the shared SSH-field
+> validator, `targets add --key-file`) and `targets import --from-json` /
+> `--from-terraform` with `Enabled:true`/capabilities, the atomic
+> `WriteTargetsFile`, deterministic collision rejection, sensitive-output
+> refusal, and add/update/remove reconciliation. See `docs/USAGE.md` →
+> "Bring your own hosts". k8s/cloud/`--from-state` remain cancelled (§13).
 
 ## 1. The pitch (read this first)
 
