@@ -17,6 +17,19 @@ func TestAnalyze_LowConfidenceCost(t *testing.T) {
 	assert.Contains(t, categories, "cost-uncertainty")
 }
 
+func TestAnalyze_ConfidentialDiskResidual(t *testing.T) {
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{
+			Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp"},
+		},
+	}
+	assert.Contains(t, riskCategories(Analyze(w, types.TargetConfig{}, types.CostEstimate{})), "confidential-disk-residual")
+
+	plain := types.WorkloadSpec{DetectedKind: types.WorkloadKindScript}
+	assert.NotContains(t, riskCategories(Analyze(plain, types.TargetConfig{}, types.CostEstimate{})), "confidential-disk-residual")
+}
+
 func TestAnalyze_GPUCapacityRisk(t *testing.T) {
 	w := types.WorkloadSpec{
 		DetectedKind: types.WorkloadKindGPUJob,
