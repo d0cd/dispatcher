@@ -278,7 +278,11 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 		return nil, err
 	} else if att != nil {
 		state.Attestation = att
-		dlog.L().Info("cloudvm.attested", "run", p.Metadata.ID, "vm_id", vmInfo.ID, "type", att.Type)
+		if att.Verified {
+			dlog.L().Info("cloudvm.attested", "run", p.Metadata.ID, "vm_id", vmInfo.ID, "type", att.Type)
+		} else {
+			dlog.L().Warn("cloudvm.attestation_unverified", "run", p.Metadata.ID, "vm_id", vmInfo.ID, "verdict", att.Verdict)
+		}
 	}
 
 	// cloud-init restarts sshd during its "final" phase; wait for it to

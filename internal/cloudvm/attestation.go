@@ -11,9 +11,12 @@ import (
 // Persisted on the run state so `diagnose`/`status` can show whether a
 // confidential run was actually proven, and which TEE type.
 type AttestationResult struct {
-	Verified bool   `json:"verified"`
-	Type     string `json:"type,omitempty"`    // the TEE type proven (e.g. "sev-snp")
-	Verdict  string `json:"verdict,omitempty"` // human-readable reason
+	Verified    bool   `json:"verified"`
+	Type        string `json:"type,omitempty"`        // the TEE type proven (e.g. "sev-snp")
+	Measurement string `json:"measurement,omitempty"` // hex launch measurement (R13/G5)
+	TCB         uint64 `json:"tcb,omitempty"`         // reported TCB version
+	Nonce       string `json:"nonce,omitempty"`       // hex per-run challenge
+	Verdict     string `json:"verdict,omitempty"`     // human-readable reason
 }
 
 // Attester fetches and verifies a TEE's attestation evidence for a booted VM.
@@ -39,8 +42,13 @@ func attesterFor(id ProviderID) Attester { return attesters[id] }
 // when the run isn't confidential or attestation is off, and an error that must
 // abort the run (and destroy the VM) on rejection or failure.
 func verifyConfidential(ctx context.Context, provider ProviderID, vm *VMInfo, sshKey, sshUser string, c types.ConfidentialRequirement) (*AttestationResult, error) {
-	if !c.Required || c.Attestation == "off" {
+	if !c.Required {
 		return nil, nil
+	}
+	if c.Attestation == "off" {
+		// Explicit opt-out (N4): provision the TEE (encrypted memory) without
+		// verification. Record an unverified verdict so status/diagnose are honest.
+		return &AttestationResult{Verified: false, Verdict: "attestation off — provisioned TEE without verification (N4)"}, nil
 	}
 	att := attesterFor(provider)
 	if att == nil {

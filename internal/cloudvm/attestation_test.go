@@ -65,11 +65,13 @@ func TestVerifyConfidential(t *testing.T) {
 		assert.Nil(t, res)
 	})
 
-	t.Run("attestation off is a no-op", func(t *testing.T) {
+	t.Run("attestation off records an unverified verdict", func(t *testing.T) {
 		res, err := verifyConfidential(context.Background(), ProviderGCP, vm, "/k", "u",
 			types.ConfidentialRequirement{Required: true, Attestation: "off"})
 		require.NoError(t, err)
-		assert.Nil(t, res)
+		require.NotNil(t, res, "off must record a verdict (N4), not a silent no-op")
+		assert.False(t, res.Verified)
+		assert.Contains(t, res.Verdict, "off")
 	})
 
 	t.Run("verified records the result", func(t *testing.T) {
