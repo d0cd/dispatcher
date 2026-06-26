@@ -77,6 +77,56 @@ func TestAttestationPreflight_OffIsAllowed(t *testing.T) {
 	assert.NoError(t, confidentialAttestationPreflight(w, ProviderGCP), "attestation:off provisions the TEE without verification")
 }
 
+func TestGCPConfidentialArgs(t *testing.T) {
+	assert.Nil(t, gcpConfidentialArgs(VMOptions{}), "non-confidential VM adds no flags")
+	assert.Equal(t,
+		[]string{"--confidential-compute-type=SEV_SNP", "--maintenance-policy=TERMINATE"},
+		gcpConfidentialArgs(VMOptions{ConfidentialType: "any"}),
+		"confidential VMs can't live-migrate, so maintenance must TERMINATE")
+	assert.Equal(t,
+		[]string{"--confidential-compute-type=TDX", "--maintenance-policy=TERMINATE"},
+		gcpConfidentialArgs(VMOptions{ConfidentialType: "tdx"}))
+}
+
+func TestAWSConfidentialArgs(t *testing.T) {
+	args, err := awsConfidentialArgs(VMOptions{})
+	require.NoError(t, err)
+	assert.Nil(t, args, "non-confidential VM adds no flags")
+
+	args, err = awsConfidentialArgs(VMOptions{ConfidentialType: "sev-snp"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"--cpu-options", "AmdSevSnp=enabled"}, args)
+
+	args, err = awsConfidentialArgs(VMOptions{ConfidentialType: "any"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"--cpu-options", "AmdSevSnp=enabled"}, args, "any resolves to AWS's only TEE")
+
+	_, err = awsConfidentialArgs(VMOptions{ConfidentialType: "tdx"})
+	require.Error(t, err, "aws has no TDX")
+	assert.Contains(t, err.Error(), "sev-snp")
+}
+
+func TestAzureConfidentialArgs(t *testing.T) {
+	args, err := azureConfidentialArgs(VMOptions{})
+	require.NoError(t, err)
+	assert.Nil(t, args, "non-confidential VM adds no flags")
+
+	args, err = azureConfidentialArgs(VMOptions{ConfidentialType: "sev-snp"})
+	require.NoError(t, err)
+	assert.Equal(t,
+		[]string{"--security-type", "ConfidentialVM", "--enable-vtpm", "true",
+			"--enable-secure-boot", "true", "--os-disk-security-encryption-type", "VMGuestStateOnly"},
+		args)
+
+	args, err = azureConfidentialArgs(VMOptions{ConfidentialType: "tdx"})
+	require.NoError(t, err)
+	assert.Equal(t, "ConfidentialVM", args[1], "tdx uses the same type-agnostic create flag")
+
+	_, err = azureConfidentialArgs(VMOptions{ConfidentialType: "sev"})
+	require.Error(t, err, "azure has no plain-sev offering")
+	assert.Contains(t, err.Error(), "sev")
+}
+
 func TestGCPConfidentialComputeType(t *testing.T) {
 	assert.Equal(t, "SEV", gcpConfidentialComputeType("sev"))
 	assert.Equal(t, "SEV_SNP", gcpConfidentialComputeType("sev-snp"))

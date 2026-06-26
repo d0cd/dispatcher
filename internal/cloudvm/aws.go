@@ -42,6 +42,19 @@ func (a *AWSProvider) CheckCLI(ctx context.Context) error {
 	return nil
 }
 
+// awsConfidentialArgs returns the run-instances flags for a confidential VM (or
+// nil for non-confidential). AWS confidential VMs are AMD SEV-SNP only (no SEV,
+// no TDX), on specific M6a/R6a/C6a types — the catalog must pick a compatible one.
+func awsConfidentialArgs(opts VMOptions) ([]string, error) {
+	if opts.ConfidentialType == "" {
+		return nil, nil
+	}
+	if opts.ConfidentialType != "sev-snp" && opts.ConfidentialType != "any" {
+		return nil, fmt.Errorf("aws supports only sev-snp confidential VMs, not %q", opts.ConfidentialType)
+	}
+	return []string{"--cpu-options", "AmdSevSnp=enabled"}, nil
+}
+
 func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
 	region := opts.Region
 	if region == "" {
@@ -84,14 +97,11 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--output", "json",
 	}
 
-	if opts.ConfidentialType != "" {
-		// AWS confidential VMs are AMD SEV-SNP only (no SEV, no TDX), on
-		// specific M6a/R6a/C6a types — the catalog must pick a compatible one.
-		if opts.ConfidentialType != "sev-snp" && opts.ConfidentialType != "any" {
-			return nil, fmt.Errorf("aws supports only sev-snp confidential VMs, not %q", opts.ConfidentialType)
-		}
-		args = append(args, "--cpu-options", "AmdSevSnp=enabled")
+	confArgs, err := awsConfidentialArgs(opts)
+	if err != nil {
+		return nil, err
 	}
+	args = append(args, confArgs...)
 
 	if opts.UserData != "" {
 		// Pass user-data via `file://` so it never appears in argv (visible

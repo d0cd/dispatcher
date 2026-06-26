@@ -41,6 +41,27 @@ func (a *AzureProvider) CheckCLI(ctx context.Context) error {
 	return nil
 }
 
+// azureConfidentialArgs returns the vm-create flags for a confidential VM (or
+// nil for non-confidential). Azure Confidential VMs are SEV-SNP (DCasv5/ECasv5)
+// or TDX (DCesv5/ECesv5) — selected by the VM size, so the create flag is
+// type-agnostic; there's no plain-SEV offering. VMGuestStateOnly encrypts the
+// guest state without requiring a customer disk-encryption set (the simpler
+// default; not full host-opaque OS-disk encryption — see N1).
+func azureConfidentialArgs(opts VMOptions) ([]string, error) {
+	if opts.ConfidentialType == "" {
+		return nil, nil
+	}
+	if opts.ConfidentialType == "sev" {
+		return nil, fmt.Errorf("azure confidential VMs are sev-snp or tdx (chosen by SKU), not plain sev")
+	}
+	return []string{
+		"--security-type", "ConfidentialVM",
+		"--enable-vtpm", "true",
+		"--enable-secure-boot", "true",
+		"--os-disk-security-encryption-type", "VMGuestStateOnly",
+	}, nil
+}
+
 func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
 	location := opts.Region
 	if location == "" {
@@ -73,21 +94,11 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		"--output", "json",
 	}
 
-	if opts.ConfidentialType != "" {
-		// Azure Confidential VMs are SEV-SNP (DCasv5/ECasv5) or TDX
-		// (DCesv5/ECesv5) — selected by the VM size, so the create flag is
-		// type-agnostic. There's no plain-SEV offering. VMGuestStateOnly
-		// encrypts the guest state without requiring a customer disk-encryption
-		// set (the simpler default).
-		if opts.ConfidentialType == "sev" {
-			return nil, fmt.Errorf("azure confidential VMs are sev-snp or tdx (chosen by SKU), not plain sev")
-		}
-		args = append(args,
-			"--security-type", "ConfidentialVM",
-			"--enable-vtpm", "true",
-			"--enable-secure-boot", "true",
-			"--os-disk-security-encryption-type", "VMGuestStateOnly")
+	confArgs, err := azureConfidentialArgs(opts)
+	if err != nil {
+		return nil, err
 	}
+	args = append(args, confArgs...)
 
 	if opts.UserData != "" {
 		// Azure CLI's `--custom-data @<path>` reads from a file. Keeps the

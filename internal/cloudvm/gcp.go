@@ -66,15 +66,7 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--quiet",
 	}
 
-	if opts.ConfidentialType != "" {
-		// Confidential VMs can't live-migrate, so maintenance must TERMINATE.
-		// The catalog is responsible for picking a compatible machine type
-		// (n2d/c2d for SEV-SNP, c3 for TDX) — if it doesn't, gcloud errors and
-		// the failure surfaces honestly.
-		args = append(args,
-			"--confidential-compute-type="+gcpConfidentialComputeType(opts.ConfidentialType),
-			"--maintenance-policy=TERMINATE")
-	}
+	args = append(args, gcpConfidentialArgs(opts)...)
 
 	if g.project != "" {
 		args = append(args, "--project", g.project)
@@ -182,6 +174,20 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 		return g.zone
 	}
 	return zone
+}
+
+// gcpConfidentialArgs returns the GCP create flags for a confidential VM (or
+// nil for a non-confidential one). Confidential VMs can't live-migrate, so
+// maintenance must TERMINATE. The catalog picks a compatible machine type
+// (n2d/c2d for SEV-SNP, c3 for TDX); if it doesn't, gcloud errors honestly.
+func gcpConfidentialArgs(opts VMOptions) []string {
+	if opts.ConfidentialType == "" {
+		return nil
+	}
+	return []string{
+		"--confidential-compute-type=" + gcpConfidentialComputeType(opts.ConfidentialType),
+		"--maintenance-policy=TERMINATE",
+	}
 }
 
 // gcpConfidentialComputeType maps a dispatcher TEE type to GCP's
