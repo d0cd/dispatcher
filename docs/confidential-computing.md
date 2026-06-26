@@ -60,7 +60,8 @@ dispatcher guarantees:
 - **G4 — Secret-after-proof.** No workload source, `.env`, or output crossed the
   channel before G1–G3 verified.
 - **G5 — Auditable.** The verdict (verified, type, measurement, TCB, nonce) is
-  recorded on the run and shown by `status`/`diagnose`.
+  recorded on the run (and present in `status --json`). Human-readable
+  `status`/`diagnose` surfacing lands with the verifier (§7 increment 5).
 
 **Explicit NON-guarantees** (state these plainly to users):
 
@@ -188,7 +189,9 @@ then sends source/secrets and runs → retrieves outputs → tears down.
 - Provider without host-opaque disk (GCP/AWS) → **warning** (N1), run proceeds.
 
 **Audit:** the run records `AttestationResult{verified, type, measurement, tcb,
-nonce}`; `status`/`diagnose` surface it. `attestation: off` is recorded and warned.
+nonce}` (visible today in `status --json`; human-readable `status`/`diagnose`
+surfacing lands with the verifier — §7 increment 5). `attestation: off` is
+recorded as an unverified verdict and warned.
 
 ---
 

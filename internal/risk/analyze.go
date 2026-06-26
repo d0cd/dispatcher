@@ -97,7 +97,7 @@ func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate)
 	if w.Requirements.Confidential.Required {
 		risks = append(risks, types.Risk{
 			Category:    "confidential-disk-residual",
-			Description: "confidential VM encrypts memory, but disk-at-rest is not host-opaque on this provider — keep durable secrets in memory (see docs/confidential-computing.md, N1)",
+			Description: "confidential VM encrypts memory, but the OS disk is not yet host-opaque (confidential OS-disk encryption is not wired) — keep durable secrets in memory (see docs/confidential-computing.md, N1)",
 		})
 	}
 
