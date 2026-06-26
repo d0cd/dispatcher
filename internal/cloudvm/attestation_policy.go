@@ -43,6 +43,19 @@ func bindingHash(nonce, channelKey []byte) []byte {
 // The caller must already have verified the signature chain (R3/R4). Returns nil
 // only when every check passes; any failure must abort and destroy the VM.
 func applyPolicy(c Claims, p VerificationPolicy) error {
+	// Self-defend on the binding inputs (R1/R2): never trust the caller to have
+	// populated them. An empty nonce/key would make the binding check below
+	// degenerate to matching bindingHash("","") = SHA-512(""), a public constant
+	// any host could place in REPORT_DATA with no genuine TEE or fresh challenge.
+	if len(p.Nonce) < 32 {
+		return fmt.Errorf("attestation: per-run nonce missing or too short (need >= 32 bytes) — R1")
+	}
+	if len(p.ChannelKey) == 0 {
+		return fmt.Errorf("attestation: in-TEE channel key missing — R2")
+	}
+	if len(c.ReportData) == 0 {
+		return fmt.Errorf("attestation: report has no REPORT_DATA to bind")
+	}
 	if c.DebugEnabled {
 		return fmt.Errorf("attestation: debug is enabled (policy.debug must be off)")
 	}

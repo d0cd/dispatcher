@@ -118,6 +118,47 @@ func TestVerifyJWS_UnknownKid(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestVerifyJWS_RejectsCritHeader(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	keys := map[string]crypto.PublicKey{"k1": &key.PublicKey}
+	hdr, _ := json.Marshal(map[string]any{"alg": "RS256", "kid": "k1", "crit": []string{"exp"}})
+	pl, _ := json.Marshal(map[string]any{"foo": "bar"})
+	signingInput := b64url(hdr) + "." + b64url(pl)
+	digest := sha256.Sum256([]byte(signingInput))
+	sig, _ := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
+	tok := signingInput + "." + b64url(sig)
+
+	_, err := verifyJWS(tok, keys)
+	assert.Error(t, err, "a crit header with unknown params must be rejected")
+}
+
+func TestVerifyJWS_ES256_Negative(t *testing.T) {
+	ec, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	t.Run("ES256 token against an RSA key", func(t *testing.T) {
+		rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
+		tok := mintJWT(t, "k1", "ES256", ec, map[string]any{"foo": "bar"})
+		_, err := verifyJWS(tok, map[string]crypto.PublicKey{"k1": &rsaKey.PublicKey})
+		assert.Error(t, err)
+	})
+
+	t.Run("ES256 signature of wrong length does not panic", func(t *testing.T) {
+		keys := map[string]crypto.PublicKey{"k1": &ec.PublicKey}
+		hdr, _ := json.Marshal(map[string]string{"alg": "ES256", "kid": "k1"})
+		pl, _ := json.Marshal(map[string]any{"foo": "bar"})
+		tok := b64url(hdr) + "." + b64url(pl) + "." + b64url(make([]byte, 63)) // 63 != 64
+		_, err := verifyJWS(tok, keys)
+		assert.Error(t, err)
+	})
+
+	t.Run("tampered ES256 signature", func(t *testing.T) {
+		keys := map[string]crypto.PublicKey{"k1": &ec.PublicKey}
+		tok := mintJWT(t, "k1", "ES256", ec, map[string]any{"foo": "bar"})
+		_, err := verifyJWS(tok[:len(tok)-6]+"AAAAAA", keys)
+		assert.Error(t, err)
+	})
+}
+
 func TestVerifyJWS_WrongKeyType(t *testing.T) {
 	ec, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)

@@ -1,11 +1,14 @@
 package cloudvm
 
 import (
+	"bytes"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+var testNonce = bytes.Repeat([]byte{0xAB}, 32)
 
 func validClaims() Claims {
 	return Claims{
@@ -14,7 +17,7 @@ func validClaims() Claims {
 		DebugEnabled:     false,
 		MigrationEnabled: false,
 		TCB:              10,
-		ReportData:       bindingHash([]byte("nonce"), []byte("key")),
+		ReportData:       bindingHash(testNonce, []byte("key")),
 	}
 }
 
@@ -23,9 +26,39 @@ func validPolicy() VerificationPolicy {
 		ExpectedType: "sev-snp",
 		Measurements: []string{"ABC123"}, // exact, case-insensitive hex
 		MinTCB:       5,
-		Nonce:        []byte("nonce"),
+		Nonce:        testNonce,
 		ChannelKey:   []byte("key"),
 	}
+}
+
+func TestApplyPolicy_FailsClosedOnMissingBindingInputs(t *testing.T) {
+	// Empty nonce/key/report-data must be rejected — otherwise the binding
+	// check degenerates to matching SHA-512(""), a public constant.
+	t.Run("empty nonce", func(t *testing.T) {
+		p := validPolicy()
+		p.Nonce = nil
+		assert.Error(t, applyPolicy(validClaims(), p))
+	})
+	t.Run("short nonce", func(t *testing.T) {
+		p := validPolicy()
+		p.Nonce = []byte("short")
+		assert.Error(t, applyPolicy(validClaims(), p))
+	})
+	t.Run("empty channel key", func(t *testing.T) {
+		p := validPolicy()
+		p.ChannelKey = nil
+		assert.Error(t, applyPolicy(validClaims(), p))
+	})
+	t.Run("empty report data", func(t *testing.T) {
+		c := validClaims()
+		c.ReportData = nil
+		assert.Error(t, applyPolicy(c, validPolicy()))
+	})
+	t.Run("the SHA-512 empty constant does not pass", func(t *testing.T) {
+		c := validClaims()
+		c.ReportData = bindingHash(nil, nil) // = SHA-512("")
+		assert.Error(t, applyPolicy(c, validPolicy()))
+	})
 }
 
 func TestApplyPolicy_AcceptsValid(t *testing.T) {

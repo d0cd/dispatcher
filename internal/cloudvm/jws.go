@@ -30,11 +30,17 @@ func verifyJWS(token string, keys map[string]crypto.PublicKey) ([]byte, error) {
 		return nil, fmt.Errorf("decode JWS header: %w", err)
 	}
 	var hdr struct {
-		Alg string `json:"alg"`
-		Kid string `json:"kid"`
+		Alg  string   `json:"alg"`
+		Kid  string   `json:"kid"`
+		Crit []string `json:"crit"`
 	}
 	if err := json.Unmarshal(headerBytes, &hdr); err != nil {
 		return nil, fmt.Errorf("parse JWS header: %w", err)
+	}
+	// RFC 7515 §4.1.11: a `crit` header lists extensions the verifier MUST
+	// understand. We understand none, so any crit parameter means reject.
+	if len(hdr.Crit) > 0 {
+		return nil, fmt.Errorf("JWS has unsupported critical header parameters %v", hdr.Crit)
 	}
 
 	key, ok := keys[hdr.Kid]
