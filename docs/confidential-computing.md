@@ -60,8 +60,8 @@ dispatcher guarantees:
 - **G4 — Secret-after-proof.** No workload source, `.env`, or output crossed the
   channel before G1–G3 verified.
 - **G5 — Auditable.** The verdict (verified, type, measurement, TCB, nonce) is
-  recorded on the run (and present in `status --json`). Human-readable
-  `status`/`diagnose` surfacing lands with the verifier (§7 increment 5).
+  recorded on the run, shown in `status --json`, and rendered in human-readable
+  `status` and `diagnose` output.
 
 **Explicit NON-guarantees** (state these plainly to users):
 
@@ -190,9 +190,9 @@ then sends source/secrets and runs → retrieves outputs → tears down.
 - Provider without host-opaque disk (GCP/AWS) → **warning** (N1), run proceeds.
 
 **Audit:** the run records `AttestationResult{verified, type, measurement, tcb,
-nonce}` (visible today in `status --json`; human-readable `status`/`diagnose`
-surfacing lands with the verifier — §7 increment 5). `attestation: off` is
-recorded as an unverified verdict and warned.
+nonce}` — shown in `status --json` and rendered in human-readable `status` and
+`diagnose` output. `attestation: off` is recorded as an unverified verdict and
+warned.
 
 ---
 
@@ -210,9 +210,14 @@ recorded as an unverified verdict and warned.
   binding (R1/R2) via `applyPolicy`.
 - **Measurement allowlist + minTCB** config (`confidential.measurements` /
   `minTCB`), threaded to the verifier (R7); empty allowlist fails closed.
+- **Pinned AMD ARK roots** (Milan/Genoa/Turin), embedded from AMD's KDS; the
+  SEV-SNP chain anchors on them (R4) and a captured ASK chains to a pinned ARK
+  offline.
 - **Readiness-gated registration**: the attesters are registered but report
   not-ready until a live evidence fetch is wired, so `attestation: required`
   still fails closed **before** provisioning.
+- **Audit surfacing (R13)**: the verdict is rendered in human-readable `status`
+  and `diagnose`, not just `status --json`.
 - Secret-free cloud-init (R11).
 
 **Gaps to close for the real guarantee (not yet built):**
@@ -228,7 +233,8 @@ recorded as an unverified verdict and warned.
   against a real captured sample before the fetch is trusted.
 - **MAA TCB mapping** — MAA reports per-component SVNs, not one TCB; `minTCB` on
   the MAA path is a no-op until those are mapped.
-- **Revocation** (R4) — VCEK/cert revocation checking on the live chain.
+- **Revocation** (R4) — the ARK roots are pinned, but VCEK/cert revocation
+  checking on the live chain is still pending.
 
 Until the fetch lands, a confidential run is usable only with `attestation: off`
 (encrypted memory, no proof — N4).
@@ -244,11 +250,12 @@ Until the fetch lands, a confidential run is usable only with `attestation: off`
 | ✅ | Verify-and-gate flow + fail-closed | safe scaffolding |
 | ✅ | Verifiers — **both** cores (synthetic-tested): SEV-SNP report (stdlib x509/ecdsa/binary) and MAA/token JWS (stdlib): chain + TCB + policy + exact-measurement + type + `REPORT_DATA` | the proof crypto |
 | ✅ | Measurement allowlist + minTCB config (R7) | policy inputs |
+| ✅ | Pinned AMD ARK roots (Milan/Genoa/Turin), embedded from KDS (R4) | SEV-SNP trust anchor |
+| ✅ | Audit surfacing in `status`/`diagnose` (R13) | usability + audit |
 | 1 | Provision hardening: pinned vendor images, confidential disk + warn, policy bits | safe, known launch |
 | 2 | In-TEE agent evidence fetch: nonce + ephemeral in-TEE key, `REPORT_DATA=H(N‖key)` (vendor-image agent, measured); flips attesters to ready | bound, fresh evidence |
 | 3 | Format bind + revocation: confirm SEV-SNP layout / MAA claims against a captured sample, VCEK revocation, MAA per-component TCB | live trust |
 | 4 | Channel binding: trust the channel key only after R2 verifies; wrap secrets to it (R9) | no MITM/relay |
-| 5 | Audit surfacing in `status`/`diagnose` (R13) | usability + audit |
 
 Each verifier core is unit-tested against synthetic evidence; the binary/claim
 formats are confirmed against a real captured sample before the live fetch (§7

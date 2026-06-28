@@ -109,20 +109,27 @@ func verifySNPSignature(r *snpReport, vcek *x509.Certificate) error {
 	return nil
 }
 
-// verifySNPChain checks VCEK <- ASK <- ARK, where ark is the pinned AMD root
-// (R4). It validates only the signature links: time validity and revocation are
-// the live-fetch layer's concern.
-func verifySNPChain(vcek, ask, ark *x509.Certificate) error {
-	if vcek == nil || ask == nil || ark == nil {
+// verifySNPChain checks VCEK <- ASK and that the ASK chains to one of the pinned
+// AMD ARK roots (R4). Trying each root avoids mapping the report's product line
+// (Milan/Genoa/Turin) to a specific ARK up front. It validates only the
+// signature links: time validity and revocation are the live-fetch layer's
+// concern.
+func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) error {
+	if vcek == nil || ask == nil {
 		return fmt.Errorf("snp cert chain incomplete")
 	}
-	if err := ask.CheckSignatureFrom(ark); err != nil {
-		return fmt.Errorf("snp ASK is not signed by the pinned ARK: %w", err)
+	if len(roots) == 0 {
+		return fmt.Errorf("snp: no pinned AMD roots configured")
 	}
 	if err := vcek.CheckSignatureFrom(ask); err != nil {
 		return fmt.Errorf("snp VCEK is not signed by the ASK: %w", err)
 	}
-	return nil
+	for _, ark := range roots {
+		if ask.CheckSignatureFrom(ark) == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("snp ASK chains to none of the %d pinned AMD roots", len(roots))
 }
 
 // snpEvidence is what the per-VM fetch returns: the raw report, the AMD cert
@@ -139,11 +146,11 @@ type snpEvidence struct {
 // image), so it is the one part that cannot be unit-tested offline.
 type snpFetch func(ctx context.Context, vm *VMInfo, sshKeyPath, sshUser string, nonce []byte) (snpEvidence, error)
 
-// snpAttester verifies AMD SEV-SNP reports for GCP and AWS. ark is the pinned
-// AMD root; isReady is false until a real fetch is wired, so the preflight fails
-// closed before provisioning rather than booting a VM it cannot attest.
+// snpAttester verifies AMD SEV-SNP reports for GCP and AWS. roots are the pinned
+// AMD ARK roots; isReady is false until a real fetch is wired, so the preflight
+// fails closed before provisioning rather than booting a VM it cannot attest.
 type snpAttester struct {
-	ark     *x509.Certificate
+	roots   []*x509.Certificate
 	fetch   snpFetch
 	isReady bool
 }
@@ -167,7 +174,7 @@ func (a *snpAttester) Verify(ctx context.Context, vm *VMInfo, sshKeyPath, sshUse
 	if err != nil {
 		return AttestationResult{}, fmt.Errorf("fetch snp evidence: %w", err)
 	}
-	if err := verifySNPChain(ev.vcek, ev.ask, a.ark); err != nil {
+	if err := verifySNPChain(ev.vcek, ev.ask, a.roots); err != nil {
 		return AttestationResult{}, err
 	}
 	report, err := parseSNPReport(ev.report)

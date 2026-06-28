@@ -54,8 +54,8 @@ type Attester interface {
 // attestation still fails closed *before* provisioning (see the preflight).
 // Tests inject ready attesters via withAttester.
 var attesters = map[ProviderID]Attester{
-	ProviderGCP:   &snpAttester{},
-	ProviderAWS:   &snpAttester{},
+	ProviderGCP:   &snpAttester{roots: amdRoots},
+	ProviderAWS:   &snpAttester{roots: amdRoots},
 	ProviderAzure: &azureAttester{},
 }
 

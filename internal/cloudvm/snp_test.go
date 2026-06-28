@@ -192,13 +192,18 @@ func rsaLeafCert(t *testing.T) *x509.Certificate {
 
 func TestVerifySNPChain(t *testing.T) {
 	ch := newSNPChain(t)
-	require.NoError(t, verifySNPChain(ch.vcek, ch.ask, ch.ark))
+	roots := []*x509.Certificate{ch.ark}
+	require.NoError(t, verifySNPChain(ch.vcek, ch.ask, roots))
 
 	// A foreign ARK must not validate this ASK.
-	other := newSNPChain(t)
-	assert.Error(t, verifySNPChain(ch.vcek, ch.ask, other.ark), "ASK not signed by the pinned ARK")
-	assert.Error(t, verifySNPChain(ch.vcek, other.ask, ch.ark), "VCEK not signed by the presented ASK")
-	assert.Error(t, verifySNPChain(nil, ch.ask, ch.ark), "an incomplete chain fails closed")
+	other := []*x509.Certificate{newSNPChain(t).ark}
+	assert.Error(t, verifySNPChain(ch.vcek, ch.ask, other), "ASK chains to no pinned ARK")
+	assert.Error(t, verifySNPChain(ch.vcek, newSNPChain(t).ask, roots), "VCEK not signed by the presented ASK")
+	assert.Error(t, verifySNPChain(nil, ch.ask, roots), "an incomplete chain fails closed")
+	assert.Error(t, verifySNPChain(ch.vcek, ch.ask, nil), "no pinned roots fails closed")
+
+	// Multiple pinned roots: the ASK is accepted if ANY pinned root signed it.
+	assert.NoError(t, verifySNPChain(ch.vcek, ch.ask, []*x509.Certificate{newSNPChain(t).ark, ch.ark}))
 }
 
 // --- end-to-end attester ---------------------------------------------------
@@ -208,7 +213,7 @@ func TestSNPAttester_VerifyAccepts(t *testing.T) {
 	meas := make48(0xAB)
 	channelKey := []byte("in-tee-channel-public-key")
 
-	att := &snpAttester{ark: ch.ark, isReady: true,
+	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
 		fetch: func(_ context.Context, _ *VMInfo, _, _ string, nonce []byte) (snpEvidence, error) {
 			// The guest binds this run: REPORT_DATA = SHA-512(nonce || channelKey).
 			rd := bindingHash(nonce, channelKey)
@@ -236,7 +241,7 @@ func TestSNPAttester_VerifyAccepts(t *testing.T) {
 func TestSNPAttester_VerifyRejectsWrongMeasurement(t *testing.T) {
 	ch := newSNPChain(t)
 	channelKey := []byte("k")
-	att := &snpAttester{ark: ch.ark, isReady: true,
+	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
 		fetch: func(_ context.Context, _ *VMInfo, _, _ string, nonce []byte) (snpEvidence, error) {
 			return snpEvidence{
 				report: buildSNPReport(t, make48(0x01), bindingHash(nonce, channelKey), 5, 0, ch.vcekKey),
@@ -257,7 +262,7 @@ func TestSNPAttester_VerifyRejectsReplay(t *testing.T) {
 	// The guest binds a STALE nonce (not the one Verify generated) -> binding fails.
 	stale := bytesRepeat(0xEE, 32)
 	channelKey := []byte("k")
-	att := &snpAttester{ark: ch.ark, isReady: true,
+	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
 		fetch: func(_ context.Context, _ *VMInfo, _, _ string, _ []byte) (snpEvidence, error) {
 			return snpEvidence{
 				report: buildSNPReport(t, meas, bindingHash(stale, channelKey), 5, 0, ch.vcekKey),
@@ -281,7 +286,7 @@ func TestSNPAttester_RejectsTDXRequest(t *testing.T) {
 }
 
 func TestSNPAttester_PropagatesFetchFailure(t *testing.T) {
-	att := &snpAttester{ark: newSNPChain(t).ark, isReady: true,
+	att := &snpAttester{roots: []*x509.Certificate{newSNPChain(t).ark}, isReady: true,
 		fetch: func(_ context.Context, _ *VMInfo, _, _ string, _ []byte) (snpEvidence, error) {
 			return snpEvidence{}, fmt.Errorf("guest unreachable")
 		}}
