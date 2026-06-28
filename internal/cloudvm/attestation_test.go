@@ -17,7 +17,7 @@ type stubAttester struct {
 	called bool
 }
 
-func (s *stubAttester) Verify(_ context.Context, _ *VMInfo, _, _, _ string) (AttestationResult, error) {
+func (s *stubAttester) Verify(_ context.Context, _ *VMInfo, _, _ string, _ types.ConfidentialRequirement) (AttestationResult, error) {
 	s.called = true
 	return s.result, s.err
 }
@@ -41,7 +41,8 @@ func TestConfidentialAttestationPreflight(t *testing.T) {
 		Confidential: types.ConfidentialRequirement{Required: true, Attestation: "required"},
 	}}
 
-	// No verifier registered → fail closed before provisioning.
+	// Verifier present but not ready (no live evidence fetch) → fail closed
+	// before provisioning, just as an absent verifier would.
 	require.Error(t, confidentialAttestationPreflight(required, ProviderGCP))
 
 	// attestation: off → allowed.

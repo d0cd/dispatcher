@@ -17,6 +17,29 @@ func TestApplyConfig_Confidential(t *testing.T) {
 	assert.Equal(t, "required", spec.Requirements.Confidential.Attestation, "attestation defaults to required")
 }
 
+func TestApplyConfig_ConfidentialMeasurementsAndTCB(t *testing.T) {
+	spec := &types.WorkloadSpec{}
+	ApplyConfig(spec, &DispatcherConfig{Confidential: &DispatchConfidentialConfig{
+		Type:         "sev-snp",
+		Measurements: []string{"ab12", "cd34"},
+		MinTCB:       7,
+	}})
+	assert.Equal(t, []string{"ab12", "cd34"}, spec.Requirements.Confidential.Measurements,
+		"the exact measurement allowlist must reach the verifier (R7)")
+	assert.Equal(t, uint64(7), spec.Requirements.Confidential.MinTCB)
+}
+
+func TestLoadConfig_ParsesConfidentialMeasurements(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml",
+		"name: secure\nconfidential:\n  type: sev-snp\n  measurements:\n    - deadbeef\n  minTCB: 5\n")
+	cfg, err := LoadConfig(dir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Confidential)
+	assert.Equal(t, []string{"deadbeef"}, cfg.Confidential.Measurements)
+	assert.Equal(t, uint64(5), cfg.Confidential.MinTCB)
+}
+
 func TestApplyConfig_ConfidentialAttestationOff(t *testing.T) {
 	spec := &types.WorkloadSpec{}
 	ApplyConfig(spec, &DispatcherConfig{Confidential: &DispatchConfidentialConfig{Attestation: "off"}})

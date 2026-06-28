@@ -46,8 +46,10 @@ type DispatcherConfig struct {
 // DispatchConfidentialConfig describes confidential-computing requirements in
 // dispatcher.yaml. Type defaults to "any"; Attestation defaults to "required".
 type DispatchConfidentialConfig struct {
-	Type        string `yaml:"type,omitempty"`        // sev | sev-snp | tdx | any
-	Attestation string `yaml:"attestation,omitempty"` // required | off
+	Type         string   `yaml:"type,omitempty"`         // sev | sev-snp | tdx | any
+	Attestation  string   `yaml:"attestation,omitempty"`  // required | off
+	Measurements []string `yaml:"measurements,omitempty"` // exact launch-measurement allowlist (hex), R7
+	MinTCB       uint64   `yaml:"minTCB,omitempty"`       // minimum acceptable reported TCB
 }
 
 // DispatchGPUConfig describes GPU requirements in dispatcher.yaml.
@@ -169,9 +171,11 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 			attestation = "required" // secure default
 		}
 		spec.Requirements.Confidential = types.ConfidentialRequirement{
-			Required:    true,
-			Type:        cfg.Confidential.Type,
-			Attestation: attestation,
+			Required:     true,
+			Type:         cfg.Confidential.Type,
+			Attestation:  attestation,
+			Measurements: cfg.Confidential.Measurements,
+			MinTCB:       cfg.Confidential.MinTCB,
 		}
 	}
 

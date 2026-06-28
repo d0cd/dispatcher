@@ -62,6 +62,13 @@ type ConfidentialRequirement struct {
 	// Attestation is "required" (default — the run only proceeds after the TEE
 	// report verifies) or "off" (provision the TEE but skip verification).
 	Attestation string `yaml:"attestation,omitempty" json:"attestation,omitempty"`
+	// Measurements is the EXACT allowlist of acceptable launch measurements (hex)
+	// the verifier enforces (R7). An empty allowlist fails closed under
+	// attestation: required — there is no genuine measurement to trust.
+	Measurements []string `yaml:"measurements,omitempty" json:"measurements,omitempty"`
+	// MinTCB is the minimum acceptable reported TCB/firmware version. Reports
+	// below it are rejected as running known-vulnerable platform firmware.
+	MinTCB uint64 `yaml:"minTCB,omitempty" json:"minTCB,omitempty"`
 }
 
 // PackagePlan describes how to package a workload for execution.

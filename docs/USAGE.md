@@ -170,6 +170,9 @@ sandbox: true                 # Run in an isolated sandbox target
 confidential:                 # Run on a TEE-backed (memory-encrypted) VM
   type: sev-snp               # sev | sev-snp | tdx | any   (default: any)
   attestation: required       # required | off              (default: required)
+  measurements:               # exact allowlist of accepted launch measurements (hex)
+    - <hex-launch-measurement>
+  minTCB: 0                   # minimum accepted reported TCB version
 maxCost: 50                   # Hard budget in USD
 maxTime: 2h                   # Wall-clock cap
 target: hetzner-vm            # Force a specific target
@@ -182,7 +185,7 @@ retryTransientFailures: true  # Retry once on transient failure (OOM/SIGKILL); C
 
 **GPU workloads:** dispatcher provisions the catalog instance that matches the GPU requirement. If no catalog instance matches (an unknown `gpu.model`, or a provider with no GPU inventory), `plan` flags a `gpu-unschedulable` risk and `run` refuses rather than silently launching a CPU-only box.
 
-**Confidential computing:** `confidential:` requests a TEE-backed VM (hardware-encrypted memory) of the given `type`, so the cloud host can't read the workload's memory. Supported on GCP (`sev`/`sev-snp`/`tdx`), AWS (`sev-snp` only), and Azure (`sev-snp`/`tdx`); a job whose `type` no target offers is rejected (it never silently lands on a non-confidential VM). `attestation` defaults to `required` — which currently **fails closed** (the run is refused because no attestation verifier is wired yet), since dispatcher provisions the TEE but does not yet verify its attestation report. Set `attestation: off` to provision the encrypted-memory VM without verification today (recorded as an unverified run); report verification is the next increment. See [SECURITY.md](SECURITY.md).
+**Confidential computing:** `confidential:` requests a TEE-backed VM (hardware-encrypted memory) of the given `type`, so the cloud host can't read the workload's memory. Supported on GCP (`sev`/`sev-snp`/`tdx`), AWS (`sev-snp` only), and Azure (`sev-snp`/`tdx`); a job whose `type` no target offers is rejected (it never silently lands on a non-confidential VM). `attestation` defaults to `required`. The report verifiers are built (SEV-SNP report + AMD cert chain for GCP/AWS, MAA token for Azure) and enforce an exact `measurements` allowlist and `minTCB`, but they still **fail closed before provisioning** because the in-TEE evidence channel (the measured guest agent that produces a fresh, bound report) isn't deployed yet — so a `required` run is refused rather than launched. Set `attestation: off` to provision the encrypted-memory VM without verification today (recorded as an unverified run). `measurements` is an exact allowlist (an empty allowlist fails closed under `required`); `minTCB` rejects reports below a firmware version (no-op on the Azure/MAA path until per-component TCB mapping lands). See [docs/confidential-computing.md](confidential-computing.md) and [SECURITY.md](SECURITY.md).
 
 State lives in `.dispatcher/` (per-project, found by walking up from cwd) or `~/.dispatcher/` (fallback). Override with `$DISPATCHER_HOME` or the global `--state-dir` flag.
 

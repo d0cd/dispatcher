@@ -180,8 +180,9 @@ then sends source/secrets and runs → retrieves outputs → tears down.
 
 **Failure modes the operator sees (all fail closed):**
 - No confidential-capable target for the requested type → **infeasible** at plan.
-- `attestation: required` but no verifier for the provider → refused **before**
-  provisioning (no VM billed).
+- `attestation: required` but the provider's evidence channel isn't ready (today:
+  always, until the guest-agent fetch lands) → refused **before** provisioning
+  (no VM billed).
 - Measurement not on the allowlist → **rejected**, showing the actual measurement so
   a legitimate new image can be added.
 - Policy/TCB/revocation/type/binding failure → VM **destroyed**, run fails with the
@@ -197,25 +198,39 @@ recorded as an unverified verdict and warned.
 
 ## 6. Status & gap analysis (built vs. this spec)
 
-**Built (safe scaffolding):**
+**Built (safe scaffolding + verifier crypto):**
 - Typed requirement/capability and the **no-silent-downgrade** feasibility gate
   (right type or rejected).
 - Provisioning flags (GCP/AWS/Azure) + confidential-capable builtins.
-- The **verify-and-gate flow**: pluggable per-provider `Attester`, pre-provision
-  fail-closed when no verifier exists, post-boot verify that **destroys the VM** on
-  failure, verdict recorded on run state.
+- The **verify-and-gate flow**: pluggable per-provider `Attester`, post-boot
+  verify that **destroys the VM** on failure, verdict recorded on run state.
+- **Both verifier cores** (synthetic-tested, stdlib only): SEV-SNP report parse +
+  ECDSA-P384/SHA-384 signature + VCEK←ASK←ARK chain (GCP/AWS); MAA token JWS +
+  compliance/type/measurement claims (Azure). Each enforces R3–R8 + freshness/
+  binding (R1/R2) via `applyPolicy`.
+- **Measurement allowlist + minTCB** config (`confidential.measurements` /
+  `minTCB`), threaded to the verifier (R7); empty allowlist fails closed.
+- **Readiness-gated registration**: the attesters are registered but report
+  not-ready until a live evidence fetch is wired, so `attestation: required`
+  still fails closed **before** provisioning.
 - Secret-free cloud-init (R11).
 
 **Gaps to close for the real guarantee (not yet built):**
+- **In-TEE agent + evidence fetch** — the measured guest-agent that, given the
+  verifier's per-run nonce, generates the in-TEE ephemeral key, sets `REPORT_DATA
+  = H(N ‖ key)`, and returns the report/token (R1/R2/G3). *The most important
+  gap;* it needs a live confidential VM and is the only thing flipping the
+  attesters to ready. Until it lands the verifier crypto is exercised only
+  against synthetic vectors.
 - **Provision hardening** — pinned vendor images (R7), confidential disk where
   offered + warn (R10/N1), explicit policy bits (R6).
-- **In-TEE agent + binding** — fresh nonce, in-TEE ephemeral key, `REPORT_DATA =
-  H(N ‖ key)` (R1/R2/G3). *The most important gap;* without it the channel is
-  relay-vulnerable.
-- **The two verifiers** — SEV-SNP hardware report and MAA/token, doing R3–R8.
-- **Measurement allowlist** (R7) and **revocation/TCB** (R4/R5).
+- **Format bind** — the SEV-SNP byte layout and MAA claim names are confirmed
+  against a real captured sample before the fetch is trusted.
+- **MAA TCB mapping** — MAA reports per-component SVNs, not one TCB; `minTCB` on
+  the MAA path is a no-op until those are mapped.
+- **Revocation** (R4) — VCEK/cert revocation checking on the live chain.
 
-Until those land, a confidential run is usable only with `attestation: off`
+Until the fetch lands, a confidential run is usable only with `attestation: off`
 (encrypted memory, no proof — N4).
 
 ---
@@ -227,14 +242,17 @@ Until those land, a confidential run is usable only with `attestation: off`
 | ✅ | Typed requirement/capability/feasibility | no silent downgrade |
 | ✅ | Provisioning flags + builtins | the TEE itself |
 | ✅ | Verify-and-gate flow + fail-closed | safe scaffolding |
+| ✅ | Verifiers — **both** cores (synthetic-tested): SEV-SNP report (stdlib x509/ecdsa/binary) and MAA/token JWS (stdlib): chain + TCB + policy + exact-measurement + type + `REPORT_DATA` | the proof crypto |
+| ✅ | Measurement allowlist + minTCB config (R7) | policy inputs |
 | 1 | Provision hardening: pinned vendor images, confidential disk + warn, policy bits | safe, known launch |
-| 2 | In-TEE agent evidence: nonce + ephemeral in-TEE key, `REPORT_DATA=H(N‖key)` (vendor-image agent, measured) | bound, fresh evidence |
-| 3 | Verifiers — **both**: SEV-SNP report (stdlib x509/ecdsa/binary) and MAA/token (`go-jose`): chain + revocation + TCB + policy + exact-measurement + type + `REPORT_DATA` | the proof |
+| 2 | In-TEE agent evidence fetch: nonce + ephemeral in-TEE key, `REPORT_DATA=H(N‖key)` (vendor-image agent, measured); flips attesters to ready | bound, fresh evidence |
+| 3 | Format bind + revocation: confirm SEV-SNP layout / MAA claims against a captured sample, VCEK revocation, MAA per-component TCB | live trust |
 | 4 | Channel binding: trust the channel key only after R2 verifies; wrap secrets to it (R9) | no MITM/relay |
-| 5 | Measurement allowlist config + audit surfacing in `status`/`diagnose` (R7/R13) | usability + audit |
+| 5 | Audit surfacing in `status`/`diagnose` (R13) | usability + audit |
 
-Each verifier is unit-tested against synthetic evidence; the binary/claim formats
-are confirmed against a real captured sample before trusting them.
+Each verifier core is unit-tested against synthetic evidence; the binary/claim
+formats are confirmed against a real captured sample before the live fetch (§7
+increment 2/3) is trusted.
 
 ---
 
@@ -250,7 +268,8 @@ are confirmed against a real captured sample before trusting them.
   its measurement. A cloud-init-injected agent is **rejected** — it runs after the
   measured boot, so it's host-swappable and defeats R7.
 - **Verifiers — BOTH formats** behind the `Attester` interface: SEV-SNP hardware
-  report (stdlib) and MAA/token JWS (`go-jose`); shared nonce/measurement/policy/
-  binding checks.
+  report and MAA/token JWS, **both stdlib-only** (the JWS path is a hardened
+  RS256/ES256 verifier, not `go-jose`, to keep the dependency footprint at three
+  direct deps); shared nonce/measurement/policy/binding checks via `applyPolicy`.
 - **Disk-at-rest — allow both, warn (R10/N1).** Confidential disk where the provider
   offers it; elsewhere run but warn + record that disk-at-rest isn't host-opaque.
