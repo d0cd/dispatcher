@@ -42,16 +42,29 @@ secret, but don't commit them.
 
 ### 1. Launch a confidential VM
 
-GCP (SEV-SNP, n2d; the machine family must support SNP):
+GCP (SEV-SNP). `--min-cpu-platform="AMD Milan"` is required — without it the VM
+can land on AMD Rome, which only supports SEV (not SEV-SNP). Ubuntu 22.04 ships
+the `/dev/sev-guest` device; some images (e.g. Debian 12) don't.
 
 ```bash
+# Optional pre-checks: zone has Milan, and an SEV-SNP-capable image exists.
+gcloud compute zones describe us-central1-a --format="value(availableCpuPlatforms)"
+gcloud compute images list --filter="guestOsFeatures[].type:SEV_SNP_CAPABLE"
+
 gcloud compute instances create snp-experiment \
   --zone=us-central1-a \
   --machine-type=n2d-standard-2 \
+  --min-cpu-platform="AMD Milan" \
   --confidential-compute-type=SEV_SNP \
   --maintenance-policy=TERMINATE \
-  --image-family=ubuntu-2404-lts --image-project=ubuntu-os-cloud
+  --image-family=ubuntu-2204-lts --image-project=ubuntu-os-cloud
 ```
+
+> Note: recent GCP firmware emits **v4** SEV-SNP reports. The verifier was coded
+> to the documented ABI (the fields it reads — REPORT_DATA, MEASUREMENT,
+> REPORTED_TCB, signature — are stable across v3/v4). If `Golden_SNPReport` fails
+> the signature or REPORT_DATA check, that's a v4 layout change to fold into
+> `snp.go` — which is exactly what this experiment is for.
 
 AWS (SEV-SNP; M6a/C6a/R6a on a supported region/AMI):
 
