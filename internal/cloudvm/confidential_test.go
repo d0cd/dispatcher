@@ -79,13 +79,22 @@ func TestAttestationPreflight_OffIsAllowed(t *testing.T) {
 
 func TestGCPConfidentialArgs(t *testing.T) {
 	assert.Nil(t, gcpConfidentialArgs(VMOptions{}), "non-confidential VM adds no flags")
-	assert.Equal(t,
-		[]string{"--confidential-compute-type=SEV_SNP", "--maintenance-policy=TERMINATE"},
-		gcpConfidentialArgs(VMOptions{ConfidentialType: "any"}),
+
+	// SEV-SNP requires AMD Milan or newer; without pinning it the VM can land on
+	// AMD Rome (SEV-only) and never produce an SNP report. "any" resolves to SNP.
+	snp := []string{"--confidential-compute-type=SEV_SNP", "--maintenance-policy=TERMINATE", "--min-cpu-platform", "AMD Milan"}
+	assert.Equal(t, snp, gcpConfidentialArgs(VMOptions{ConfidentialType: "any"}),
 		"confidential VMs can't live-migrate, so maintenance must TERMINATE")
+	assert.Equal(t, snp, gcpConfidentialArgs(VMOptions{ConfidentialType: "sev-snp"}))
+
+	assert.Equal(t,
+		[]string{"--confidential-compute-type=SEV", "--maintenance-policy=TERMINATE"},
+		gcpConfidentialArgs(VMOptions{ConfidentialType: "sev"}),
+		"plain SEV runs on any N2D platform; no min-cpu-platform pin needed")
 	assert.Equal(t,
 		[]string{"--confidential-compute-type=TDX", "--maintenance-policy=TERMINATE"},
-		gcpConfidentialArgs(VMOptions{ConfidentialType: "tdx"}))
+		gcpConfidentialArgs(VMOptions{ConfidentialType: "tdx"}),
+		"TDX is Intel; the AMD min-cpu-platform must not be set")
 }
 
 func TestAWSConfidentialArgs(t *testing.T) {

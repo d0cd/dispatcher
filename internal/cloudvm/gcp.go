@@ -179,15 +179,23 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 // gcpConfidentialArgs returns the GCP create flags for a confidential VM (or
 // nil for a non-confidential one). Confidential VMs can't live-migrate, so
 // maintenance must TERMINATE. The catalog picks a compatible machine type
-// (n2d/c2d for SEV-SNP, c3 for TDX); if it doesn't, gcloud errors honestly.
+// (n2d for SEV/SEV-SNP, c3 for TDX); if it doesn't, gcloud errors honestly.
 func gcpConfidentialArgs(opts VMOptions) []string {
 	if opts.ConfidentialType == "" {
 		return nil
 	}
-	return []string{
-		"--confidential-compute-type=" + gcpConfidentialComputeType(opts.ConfidentialType),
+	ccType := gcpConfidentialComputeType(opts.ConfidentialType)
+	args := []string{
+		"--confidential-compute-type=" + ccType,
 		"--maintenance-policy=TERMINATE",
 	}
+	if ccType == "SEV_SNP" {
+		// SEV-SNP needs AMD Milan or newer. Without pinning the CPU platform an
+		// N2D instance can schedule onto AMD Rome, which supports only SEV — the
+		// VM would boot but never produce an SNP attestation report.
+		args = append(args, "--min-cpu-platform", "AMD Milan")
+	}
+	return args
 }
 
 // gcpConfidentialComputeType maps a dispatcher TEE type to GCP's
