@@ -2,6 +2,7 @@ package cloudvm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/d0cd/dispatcher/internal/types"
@@ -17,6 +18,23 @@ type AttestationResult struct {
 	TCB         uint64 `json:"tcb,omitempty"`         // reported TCB version
 	Nonce       string `json:"nonce,omitempty"`       // hex per-run challenge
 	Verdict     string `json:"verdict,omitempty"`     // human-readable reason
+}
+
+// AttestationFromHandleState extracts the attestation verdict from a persisted
+// run's adapter HandleState, or nil when the run isn't a confidential cloud VM
+// (or the state predates attestation). Lets status/diagnose surface the verdict
+// without depending on the rest of CloudVMState.
+func AttestationFromHandleState(raw json.RawMessage) *AttestationResult {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s struct {
+		Attestation *AttestationResult `json:"attestation"`
+	}
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil
+	}
+	return s.Attestation
 }
 
 // Attester fetches and verifies a TEE's attestation evidence for a booted VM.

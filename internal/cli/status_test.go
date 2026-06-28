@@ -16,6 +16,60 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
+// persistTerminalRunWithState writes a completed run carrying the given adapter
+// HandleState, so status renders without attempting a live reconnect.
+func persistTerminalRunWithState(t *testing.T, handleState string) string {
+	t.Helper()
+	p := &types.Plan{
+		Metadata:       types.PlanMetadata{ID: "plan_status"},
+		Recommendation: &types.Recommendation{Target: "test-target"},
+	}
+	r := run.NewRun(p)
+	require.NoError(t, r.Transition(types.RunStatePlanning))
+	require.NoError(t, r.Transition(types.RunStateValidated))
+	require.NoError(t, r.Transition(types.RunStatePreparing))
+	require.NoError(t, r.Transition(types.RunStateRunning))
+	r.HandleID = "h1"
+	r.HandleState = json.RawMessage(handleState)
+	r.MarkTerminal(types.RunStateCompleted)
+	_, err := r.Save()
+	require.NoError(t, err)
+	return r.ID
+}
+
+func TestStatus_RendersAttestation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	id := persistTerminalRunWithState(t,
+		`{"attestation":{"verified":true,"type":"sev-snp","measurement":"deadbeef","tcb":7,"verdict":"verified"}}`)
+	var err error
+	out := captureStdout(t, func() { err = runStatusByID(id) })
+	require.NoError(t, err)
+	assert.Contains(t, out, "Attestation:")
+	assert.Contains(t, out, "sev-snp")
+	assert.Contains(t, out, "deadbeef")
+}
+
+func TestStatus_RendersUnverifiedAttestation(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	id := persistTerminalRunWithState(t,
+		`{"attestation":{"verified":false,"verdict":"attestation off — provisioned TEE without verification (N4)"}}`)
+	var err error
+	out := captureStdout(t, func() { err = runStatusByID(id) })
+	require.NoError(t, err)
+	assert.Contains(t, out, "Attestation:")
+	assert.Contains(t, out, "UNVERIFIED")
+	assert.Contains(t, out, "attestation off")
+}
+
+func TestStatus_NoAttestationLineForPlainRun(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	id := persistTerminalRunWithState(t, `{}`)
+	var err error
+	out := captureStdout(t, func() { err = runStatusByID(id) })
+	require.NoError(t, err)
+	assert.NotContains(t, out, "Attestation:")
+}
+
 // fakeStatusAdapter is a durable adapter whose Status() and ExtendWatchdog()
 // behavior is controllable, for testing the status auto-renew path.
 type fakeStatusAdapter struct {

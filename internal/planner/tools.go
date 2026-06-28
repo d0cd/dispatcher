@@ -358,6 +358,10 @@ type RunInspection struct {
 	OOMKilled    bool   `json:"oomKilled,omitempty"`
 	FailureClass string `json:"failureClass,omitempty"` // permanent | transient | unknown
 	RetryCount   int    `json:"retryCount,omitempty"`
+	// Attestation surfaces a confidential run's TEE verdict (R13) so the
+	// diagnostician sees whether the run was actually proven. Nil for
+	// non-confidential runs.
+	Attestation *cloudvm.AttestationResult `json:"attestation,omitempty"`
 }
 
 const (
@@ -406,6 +410,7 @@ func (tr *ToolRegistry) execInspectRun(input json.RawMessage) ToolResult {
 		Signal:       rec.Failure.Signal,
 		OOMKilled:    rec.Failure.OOMKilled,
 		RetryCount:   rec.RetryCount,
+		Attestation:  cloudvm.AttestationFromHandleState(rec.HandleState),
 	}
 	if rec.State == types.RunStateExecutionFailed {
 		// Only classify when there's actually a failure to classify.

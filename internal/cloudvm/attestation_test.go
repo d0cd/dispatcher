@@ -2,6 +2,7 @@ package cloudvm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -10,6 +11,22 @@ import (
 
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+func TestAttestationFromHandleState(t *testing.T) {
+	raw, err := (&CloudVMState{Attestation: &AttestationResult{Verified: true, Type: "sev-snp", Measurement: "abcd"}}).MarshalHandleState()
+	require.NoError(t, err)
+	att := AttestationFromHandleState(raw)
+	require.NotNil(t, att)
+	assert.True(t, att.Verified)
+	assert.Equal(t, "sev-snp", att.Type)
+
+	noConf, err := (&CloudVMState{VMID: "x"}).MarshalHandleState()
+	require.NoError(t, err)
+	assert.Nil(t, AttestationFromHandleState(noConf), "a non-confidential run has no verdict")
+
+	assert.Nil(t, AttestationFromHandleState(nil))
+	assert.Nil(t, AttestationFromHandleState(json.RawMessage("not json")))
+}
 
 type stubAttester struct {
 	result AttestationResult

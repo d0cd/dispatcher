@@ -164,6 +164,44 @@ func TestDeterministicDiagnose_MissingRun(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// writeRunFixtureWithHandleState writes a run record carrying adapter
+// HandleState, used to test attestation surfacing in diagnose.
+func writeRunFixtureWithHandleState(t *testing.T, runID, state, handleState string) {
+	t.Helper()
+	stateRoot := os.Getenv("DISPATCHER_HOME")
+	if stateRoot == "" {
+		stateRoot = filepath.Join(os.Getenv("HOME"), ".dispatcher")
+	}
+	runsDir := filepath.Join(stateRoot, "runs")
+	require.NoError(t, os.MkdirAll(runsDir, 0o700))
+
+	rec := map[string]any{
+		"id":       runID,
+		"planId":   "plan_test",
+		"targetId": "gcp-vm",
+		"state":    state,
+		"cost": map[string]any{
+			"value": 0.0, "currency": "USD", "confidence": "medium",
+		},
+		"handleState": json.RawMessage(handleState),
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(runsDir, runID+".json"), data, 0o600))
+}
+
+func TestDeterministicDiagnose_SurfacesAttestation(t *testing.T) {
+	tools, _ := setupTestEnv(t)
+	writeRunFixtureWithHandleState(t, "run_att", "completed",
+		`{"attestation":{"verified":true,"type":"sev-snp","measurement":"abcd"}}`)
+
+	p := NewPlanner(nil, tools)
+	res, err := p.DeterministicDiagnose(context.Background(), "run_att")
+	require.NoError(t, err)
+	assert.Contains(t, res.Explanation, "attestation")
+	assert.Contains(t, res.Explanation, "sev-snp")
+}
+
 // writeRunFixtureWithFailure writes a serialized run record with full
 // failure detail so we can test the diagnostic surfacing path.
 func writeRunFixtureWithFailure(t *testing.T, runID string, exitCode int, signal string, oomKilled bool) {

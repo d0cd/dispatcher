@@ -150,14 +150,23 @@ func mergeDiagnoseStructured(res *DiagnoseResult, content string) {
 }
 
 func deterministicExplanation(i RunInspection) string {
+	var base string
 	switch {
 	case i.Error != "":
-		return fmt.Sprintf("Run %s ended in state %s with error: %s", i.ID, i.State, i.Error)
+		base = fmt.Sprintf("Run %s ended in state %s with error: %s", i.ID, i.State, i.Error)
 	case i.FinishedAt != "":
-		return fmt.Sprintf("Run %s finished in state %s after %.0fs on target %s", i.ID, i.State, i.DurationSec, i.TargetID)
+		base = fmt.Sprintf("Run %s finished in state %s after %.0fs on target %s", i.ID, i.State, i.DurationSec, i.TargetID)
 	default:
-		return fmt.Sprintf("Run %s is currently in state %s on target %s", i.ID, i.State, i.TargetID)
+		base = fmt.Sprintf("Run %s is currently in state %s on target %s", i.ID, i.State, i.TargetID)
 	}
+	if a := i.Attestation; a != nil {
+		if a.Verified {
+			base += fmt.Sprintf(" TEE attestation verified (%s).", a.Type)
+		} else {
+			base += " TEE attestation UNVERIFIED — the confidential run was not cryptographically proven."
+		}
+	}
+	return base
 }
 
 func deterministicLikelyCause(i RunInspection) string {
