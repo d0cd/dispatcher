@@ -5,12 +5,43 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/types"
 	"gopkg.in/yaml.v3"
 )
+
+// envRefPattern matches ${VAR} and ${VAR:-default}. Only the braced form is
+// expanded — a bare $VAR (e.g. inside a shell command meant to expand on the
+// remote host) is left untouched.
+var envRefPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+// expandEnvRefs substitutes ${VAR} / ${VAR:-default} references in the raw
+// config against the process environment. An undefined ${VAR} with no default
+// is an error rather than a silent empty string.
+func expandEnvRefs(raw []byte) ([]byte, error) {
+	var firstErr error
+	out := envRefPattern.ReplaceAllFunc(raw, func(match []byte) []byte {
+		inner := string(match[2 : len(match)-1]) // strip "${" and "}"
+		name, def, hasDefault := strings.Cut(inner, ":-")
+		if v, ok := os.LookupEnv(name); ok {
+			return []byte(v)
+		}
+		if hasDefault {
+			return []byte(def)
+		}
+		if firstErr == nil {
+			firstErr = fmt.Errorf("references undefined environment variable ${%s} (use ${%s:-default} to give a fallback)", name, name)
+		}
+		return match
+	})
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
+}
 
 // DispatcherConfig is the user-facing dispatcher.yaml structure.
 type DispatcherConfig struct {
@@ -76,6 +107,10 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
+		}
+		data, err = expandEnvRefs(data)
+		if err != nil {
+			return nil, fmt.Errorf("%s %w", path, err)
 		}
 		dec := yaml.NewDecoder(bytes.NewReader(data))
 		dec.KnownFields(true)

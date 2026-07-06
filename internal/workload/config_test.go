@@ -17,6 +17,35 @@ func TestApplyConfig_Confidential(t *testing.T) {
 	assert.Equal(t, "required", spec.Requirements.Confidential.Attestation, "attestation defaults to required")
 }
 
+func TestLoadConfig_ExpandsEnvVars(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DISPATCHER_TEST_TARGET", "gcp-vm")
+	writeFile(t, dir, "dispatcher.yaml",
+		"name: ${DISPATCHER_TEST_NAME:-fallback-app}\ntarget: ${DISPATCHER_TEST_TARGET}\n")
+	cfg, err := LoadConfig(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "gcp-vm", cfg.Target, "a set var is substituted")
+	assert.Equal(t, "fallback-app", cfg.Name, "an unset var falls back to its :- default")
+}
+
+func TestLoadConfig_UndefinedEnvVarErrors(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: ${DISPATCHER_TEST_UNSET_XYZ}\n")
+	_, err := LoadConfig(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DISPATCHER_TEST_UNSET_XYZ", "an undefined ${VAR} with no default fails loudly")
+}
+
+func TestLoadConfig_LeavesBareDollarUntouched(t *testing.T) {
+	dir := t.TempDir()
+	// A bare $VAR (common in a shell command meant for remote expansion) must
+	// NOT be expanded — only the explicit ${...} form is.
+	writeFile(t, dir, "dispatcher.yaml", "name: app\ncommand: [\"sh\", \"-c\", \"echo $HOME\"]\n")
+	cfg, err := LoadConfig(dir)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"sh", "-c", "echo $HOME"}, cfg.Command)
+}
+
 func TestApplyConfig_ConfidentialMeasurementsAndTCB(t *testing.T) {
 	spec := &types.WorkloadSpec{}
 	ApplyConfig(spec, &DispatcherConfig{Confidential: &DispatchConfidentialConfig{
