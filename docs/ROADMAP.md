@@ -25,13 +25,15 @@ severity.
 
 ## Theme 3 — Test coverage on cost-critical paths
 
+Most of this landed as it went — the roadmap below is kept for the residual.
+
 | Item | Effort | Impact |
 |---|---|---|
-| Executor transient-retry path (re-`Execute` + handle-swap + re-`Status`) — 0% covered. | M | High |
-| `startLongRunning` (durable handoff + initial watchdog TTL) — 0% covered. | M | High |
-| Watchdog SSH argv builder (`sshCmdArgs`) — 0% covered; decides `StrictHostKeyChecking`, the live MITM defense. Trivially table-testable. | S | High |
-| Provider `WaitReady`/create argv — still 0% (Destroy/Get/List now pinned via the `runCLI` seam). | M | Medium |
-| Docker adapter has no test file; `FailureDetails` (OOM→SIGKILL, exit code, secret truncation) and `runtimeCommand` are untested pure-parse logic. | M | Medium |
+| ✅ Executor transient-retry path — covered (`executor_retry_test.go`). | M | High |
+| ✅ `startLongRunning` (durable handoff + initial watchdog TTL) — 78.6% covered. | M | High |
+| ✅ Watchdog SSH argv builder (`sshCmdArgs`) — 100% (`watchdog_argv_test.go`); the `StrictHostKeyChecking` MITM defense is pinned. | S | High |
+| ✅ Runtime/parse logic — `parseDockerInspect` 100%, `RuntimeCommand`/`runtimeCommand` 100%; the docker adapter now has tests. | M | Medium |
+| Residual: `FailureDetails` (the `docker inspect` exec glue) and each provider's `WaitReady` are still 0% — both need a command seam or a live SSH host to exercise, low value to force. Provider create argv is now pinned for confidential/region flags. | M | Low |
 
 ## Theme 4 — UX & docs polish
 
@@ -122,8 +124,8 @@ docs-vs-code alignment overall. No TODO/FIXME/panic debt.
 ## Suggested order
 
 1. ✅ **Run timeline + `dispatcher trace` (Theme 7).** Shipped — the measurement foundation for the latency work.
-2. **Finish confidential attestation (Theme 6).** Run the format-bind experiment, then the live evidence fetch + secret wrapping — the remaining gate to a real guarantee.
-3. **Region/zone selection (Theme 1).** Needed for reliable GPU and region-pinned runs.
-4. **Cost-critical coverage (Theme 3).** Executor transient-retry, `startLongRunning`, `sshCmdArgs`, the Docker adapter.
+2. ✅ **Region/zone selection (Theme 1).** Shipped with correct teardown + AWS SSM AMI resolution.
+3. ✅ **Cost-critical coverage (Theme 3).** Retry, `startLongRunning`, `sshCmdArgs`, docker parse/runtime all covered; residual (`FailureDetails`/`WaitReady`) needs seams, low value.
+4. **Finish confidential attestation (Theme 6).** *On hold* — gated on a live GCP capture (format-bind experiment), then the evidence fetch + secret wrapping.
 5. **Complete CI (Theme 5).** Wire the e2e suites and a coverage floor so the above can't silently regress.
-6. **Low-latency burst execution (Theme 8).** Settle the backend/fan-out decisions first, then the sandbox adapter, then fan-out. The build cache and env expansion (Theme 7) slot in as cheap wins alongside.
+6. **Low-latency burst execution (Theme 8).** Settle the backend/fan-out decisions first, then the sandbox adapter, then fan-out.
