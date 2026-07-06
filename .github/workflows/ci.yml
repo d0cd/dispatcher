@@ -32,4 +32,22 @@ jobs:
       - name: go test
         env:
           DISPATCHER_DISABLE_LIVE_PRICING: "1"
-        run: go test -race -timeout 5m ./...
+        run: go test -race -timeout 5m -coverprofile=coverage.out ./...
+
+      - name: coverage report
+        run: go tool cover -func=coverage.out | tail -1
+
+      - name: build & smoke the binary
+        run: |
+          go build -o dispatcher ./cmd/dispatcher
+          ./dispatcher --version
+          ./dispatcher --help >/dev/null
+
+      # Dependency/stdlib CVE scan. Non-blocking: a freshly-disclosed stdlib
+      # advisory shouldn't red the build before the toolchain is patched — it
+      # surfaces as an annotation to act on.
+      - name: govulncheck
+        continue-on-error: true
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
