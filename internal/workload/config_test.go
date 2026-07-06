@@ -17,6 +17,45 @@ func TestApplyConfig_Confidential(t *testing.T) {
 	assert.Equal(t, "required", spec.Requirements.Confidential.Attestation, "attestation defaults to required")
 }
 
+func TestApplyConfig_Shard(t *testing.T) {
+	spec := &types.WorkloadSpec{}
+	ApplyConfig(spec, &DispatcherConfig{
+		Shard:     &DispatchShardConfig{Count: 8, Discover: "pytest --collect-only -q", MaxParallel: 4},
+		Aggregate: &DispatchAggregateConfig{Outputs: []string{"results/"}, OnShardFailure: "continue"},
+	})
+	assert.True(t, spec.Shard.Enabled())
+	assert.Equal(t, 8, spec.Shard.Count)
+	assert.Equal(t, "pytest --collect-only -q", spec.Shard.Discover)
+	assert.Equal(t, 4, spec.Shard.MaxParallel)
+	assert.Equal(t, []string{"results/"}, spec.Shard.Outputs)
+	assert.Equal(t, "continue", spec.Shard.OnShardFailure)
+}
+
+func TestLoadConfig_ParsesShard(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: app\nshard:\n  count: 20\n")
+	cfg, err := LoadConfig(dir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Shard)
+	assert.Equal(t, 20, cfg.Shard.Count)
+}
+
+func TestConfig_RejectsBadOnShardFailure(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: x\naggregate:\n  onShardFailure: explode\n")
+	_, err := LoadConfig(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "onShardFailure")
+}
+
+func TestConfig_RejectsNegativeShardCount(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: x\nshard:\n  count: -3\n")
+	_, err := LoadConfig(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "count")
+}
+
 func TestLoadConfig_ParsesRegion(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "dispatcher.yaml", "name: app\nregion: eu-west-1\n")

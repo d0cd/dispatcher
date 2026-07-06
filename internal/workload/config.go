@@ -74,6 +74,23 @@ type DispatcherConfig struct {
 	// transient failure. Pointer so an unset value is distinguishable from
 	// false, letting the CLI flag take precedence during merge.
 	RetryTransientFailures *bool `yaml:"retryTransientFailures,omitempty"`
+	// Shard fans the workload out across many runs; Aggregate controls how the
+	// shards' outputs are collected and how a shard failure is handled.
+	Shard     *DispatchShardConfig     `yaml:"shard,omitempty"`
+	Aggregate *DispatchAggregateConfig `yaml:"aggregate,omitempty"`
+}
+
+// DispatchShardConfig describes fan-out in dispatcher.yaml.
+type DispatchShardConfig struct {
+	Count       int    `yaml:"count,omitempty"`       // fixed shard count
+	Discover    string `yaml:"discover,omitempty"`    // command whose stdout lines are work items
+	MaxParallel int    `yaml:"maxParallel,omitempty"` // cap on concurrent shards (0 = engine default)
+}
+
+// DispatchAggregateConfig describes how shard outputs are collected.
+type DispatchAggregateConfig struct {
+	Outputs        []string `yaml:"outputs,omitempty"`        // per-shard paths to collect + merge
+	OnShardFailure string   `yaml:"onShardFailure,omitempty"` // fail | retry | continue
 }
 
 // DispatchConfidentialConfig describes confidential-computing requirements in
@@ -118,7 +135,7 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		dec.KnownFields(true)
 		var cfg DispatcherConfig
 		if err := dec.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, gpu, service, sandbox, confidential, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
+			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, gpu, service, sandbox, confidential, shard, aggregate, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
 		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate %s: %w", path, err)
@@ -162,6 +179,21 @@ func (c *DispatcherConfig) Validate() error {
 		case "", "required", "off":
 		default:
 			return fmt.Errorf("confidential.attestation %q is invalid (required|off)", c.Confidential.Attestation)
+		}
+	}
+	if c.Shard != nil {
+		if c.Shard.Count < 0 {
+			return fmt.Errorf("shard.count must be non-negative (got %d)", c.Shard.Count)
+		}
+		if c.Shard.MaxParallel < 0 {
+			return fmt.Errorf("shard.maxParallel must be non-negative (got %d)", c.Shard.MaxParallel)
+		}
+	}
+	if c.Aggregate != nil {
+		switch c.Aggregate.OnShardFailure {
+		case "", "fail", "retry", "continue":
+		default:
+			return fmt.Errorf("aggregate.onShardFailure %q is invalid (fail|retry|continue)", c.Aggregate.OnShardFailure)
 		}
 	}
 	return nil
@@ -214,6 +246,16 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 			Measurements: cfg.Confidential.Measurements,
 			MinTCB:       cfg.Confidential.MinTCB,
 		}
+	}
+
+	if cfg.Shard != nil {
+		spec.Shard.Count = cfg.Shard.Count
+		spec.Shard.Discover = cfg.Shard.Discover
+		spec.Shard.MaxParallel = cfg.Shard.MaxParallel
+	}
+	if cfg.Aggregate != nil {
+		spec.Shard.Outputs = cfg.Aggregate.Outputs
+		spec.Shard.OnShardFailure = cfg.Aggregate.OnShardFailure
 	}
 
 	if cfg.GPU != nil {

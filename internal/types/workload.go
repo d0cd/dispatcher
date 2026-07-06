@@ -110,6 +110,9 @@ type WorkloadSpec struct {
 	// remote execution targets before teardown. Populated by dispatcher.yaml
 	// or by auto-detecting a default `outputs/` directory.
 	Outputs []string `yaml:"outputs,omitempty" json:"outputs,omitempty"`
+	// Shard, when Enabled, fans this workload out across many runs. Populated
+	// from the dispatcher.yaml `shard:` / `aggregate:` blocks.
+	Shard ShardSpec `yaml:"shard,omitempty" json:"shard,omitempty"`
 }
 
 // WorkloadSource identifies where the workload came from.
