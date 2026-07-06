@@ -66,14 +66,22 @@ func (d *DockerAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	}
 
 	if w.Package.Dockerfile != "" {
-		// Build from existing Dockerfile
 		tag := fmt.Sprintf("dispatcher-%s:latest", SanitizeName(w.Name))
-		cmd := exec.CommandContext(ctx, "docker", "build",
-			"-t", tag,
-			"-f", w.Package.Dockerfile,
-			w.Source.Path,
-		)
-		output, err := cmd.CombinedOutput()
+
+		// Content-addressed skip: if the existing image was built from the same
+		// Dockerfile+source (recorded in a label), the rebuild is a no-op. A
+		// digest error falls back to an unconditional build rather than failing.
+		digest, err := buildDigest(w.Package.Dockerfile, w.Source.Path)
+		if err == nil && dockerImageLabel(ctx, tag, buildContentLabel) == digest {
+			return nil
+		}
+
+		args := []string{"build", "-t", tag}
+		if digest != "" {
+			args = append(args, "--label", buildContentLabel+"="+digest)
+		}
+		args = append(args, "-f", w.Package.Dockerfile, w.Source.Path)
+		output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("docker build failed: %s: %w", string(output), err)
 		}
@@ -82,6 +90,20 @@ func (d *DockerAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 
 	// No Dockerfile — for scripts, we'll run directly
 	return nil
+}
+
+// dockerImageLabel reads a single label off an image via `docker image inspect`,
+// or "" if the image or label is absent. Used to decide whether a rebuild can be
+// skipped without shelling out to a full build.
+func dockerImageLabel(ctx context.Context, tag, label string) string {
+	out, err := exec.CommandContext(ctx, "docker", "image", "inspect",
+		"--format", fmt.Sprintf("{{index .Config.Labels %q}}", label),
+		tag,
+	).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }
 
 func (d *DockerAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, error) {
