@@ -100,15 +100,18 @@ bursty work. Two coupled pieces — plus design decisions to settle first, becau
 this stretches dispatcher's identity from "place one workload well" toward "burst
 many."
 
+Design: [low-latency-execution.md](low-latency-execution.md). Decisions settled:
+backends built in order **Firecracker → cloud-native fast → Modal**; **fan-out is
+in-lane**, declared via a `shard:` config block (supporting both a fixed `count`
+and a `discover` command).
+
 | Item | Effort | Impact |
 |---|---|---|
-| **Fast ephemeral-sandbox backend** — a new `TargetAdapter` for seconds-not-minutes sandboxes (Modal / Firecracker / cloud-native microVM). Add a startup-latency dimension to feasibility so the planner prefers it for short jobs and VMs for long-running ones. | L | High |
-| **Intra-workload fan-out** — run N shards → schedule → aggregate. Reuses the duration history dispatcher already records (`internal/cost/history.go`) for LPT-style scheduling. The largest single item and the identity stretch. | L | High |
-
-**Open decisions (settle before building):**
-- **Backend first?** Modal (fastest to integrate; external dep + account) vs a self-hosted Firecracker/microVM path (more control, more work).
-- **Is fan-out in dispatcher's lane,** or should dispatcher stay a placer and a fan-out layer sit on top of it?
-- **Sharding contract** — shard generic workloads, or only ones that declare a shard/discovery command (as offload requires test discovery)?
+| **Firecracker microVM backend** — a `FirecrackerProvider` behind `CloudVMAdapter` (reuses SSH/rsync/runner/cleanup). Offline core (config-JSON + launch argv) is testable; the live launch needs a KVM host. | L | High |
+| **Cloud-native fast backend** — prebaked images / warm pools on the existing cloud providers to cut boot from minutes toward seconds. | M | Medium |
+| **Modal backend** — sub-second sandboxes via the modal CLI; weigh the external-dep cost against the 3-direct-dep minimum. | M | High |
+| **Startup-latency feasibility** — a latency dimension so the planner prefers fast backends for short jobs, VMs for long-running ones. | S | Medium |
+| **`shard:` config-declared fan-out** — `count` or `discover`; per-shard `SHARD_INDEX`/`SHARD_COUNT`, LPT scheduling over the fast backend (reusing `cost/history.go` durations), output aggregation + partial-failure policy. | L | High |
 
 Depends on Theme 7's phase-trace (you can't optimize burst latency you can't
 measure) and reuses the existing duration history for scheduling.
