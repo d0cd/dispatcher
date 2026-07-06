@@ -32,6 +32,13 @@ func clonePlanForShard(base *types.Plan, a shard.Assignment) *types.Plan {
 func runSharded(ctx context.Context, p *types.Plan, runShard shard.RunFunc) error {
 	spec := p.Workload.Shard
 
+	// Discover-mode items are handed to each shard via a host-local file
+	// (SHARD_ITEMS_FILE), which only a local target can read. Count mode (just
+	// SHARD_INDEX/SHARD_COUNT) works on any target.
+	if spec.Discover != "" && p.Recommendation.Target != "local-process" {
+		return fmt.Errorf("discover-mode sharding runs on local-process only for now (work items are delivered by a host-local file); count mode works on any target")
+	}
+
 	var items []string
 	if spec.Discover != "" {
 		var err error
@@ -62,6 +69,17 @@ func runSharded(ctx context.Context, p *types.Plan, runShard shard.RunFunc) erro
 // target, with the shard's identity injected as runtime env.
 func runOneShard(ctx context.Context, base *types.Plan, a shard.Assignment) error {
 	p := clonePlanForShard(base, a)
+
+	// Discover-mode work items travel by file, not env.
+	if len(a.Items) > 0 {
+		itemsFile, cleanup, err := shard.WriteItemsFile(a.Items)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		p.Workload.Env["SHARD_ITEMS_FILE"] = itemsFile
+	}
+
 	adapter, err := adapterForTarget(p.Recommendation.Target)
 	if err != nil {
 		return err

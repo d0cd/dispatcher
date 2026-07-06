@@ -58,6 +58,14 @@ func TestRunSharded_NoShardsIsAnError(t *testing.T) {
 	require.Error(t, err, "a shard config that yields nothing must fail loudly, not silently no-op")
 }
 
+func TestRunSharded_DiscoverRejectsNonLocalTarget(t *testing.T) {
+	p := shardPlan(types.ShardSpec{Discover: "ls", Count: 2})
+	p.Recommendation.Target = "aws-vm"
+	err := runSharded(context.Background(), p, func(context.Context, shard.Assignment) error { return nil })
+	require.Error(t, err, "discover-mode item files are host-local; non-local targets can't read them yet")
+	assert.Contains(t, err.Error(), "local-process")
+}
+
 func TestClonePlanForShard_SetsEnvWithoutMutatingBase(t *testing.T) {
 	base := shardPlan(types.ShardSpec{Count: 2})
 	base.Workload.Env = map[string]string{"BASE": "1"}

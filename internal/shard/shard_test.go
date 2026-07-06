@@ -2,6 +2,7 @@ package shard
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -81,4 +82,22 @@ func TestDiscover(t *testing.T) {
 func TestDiscover_CommandFailure(t *testing.T) {
 	_, err := Discover(context.Background(), "exit 3", t.TempDir())
 	require.Error(t, err)
+}
+
+func TestWriteItemsFile(t *testing.T) {
+	path, cleanup, err := WriteItemsFile([]string{"test_a", "test b", "test_c"})
+	require.NoError(t, err)
+	defer cleanup()
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "item file must be 0600")
+
+	body, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "test_a\ntest b\ntest_c\n", string(body), "one item per line (spaces preserved)")
+
+	cleanup()
+	_, err = os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "cleanup removes the file")
 }

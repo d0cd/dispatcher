@@ -5,6 +5,7 @@ package shard
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -27,6 +28,29 @@ func (a Assignment) Env() map[string]string {
 		"SHARD_INDEX": fmt.Sprintf("%d", a.Index),
 		"SHARD_COUNT": fmt.Sprintf("%d", a.Count),
 	}
+}
+
+// WriteItemsFile writes a shard's work items (one per line) to a 0600 temp file,
+// returning its path and a cleanup func. Items travel by file (SHARD_ITEMS_FILE),
+// not env, because they may contain spaces/newlines that would corrupt an
+// --env-file. os.CreateTemp already creates the file mode 0600.
+func WriteItemsFile(items []string) (path string, cleanup func(), err error) {
+	f, err := os.CreateTemp("", "dispatcher-shard-items-*.txt")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("write shard items file: %w", err)
+	}
+	for _, item := range items {
+		if _, err := fmt.Fprintln(f, item); err != nil {
+			f.Close()
+			_ = os.Remove(f.Name())
+			return "", func() {}, err
+		}
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", func() {}, err
+	}
+	return f.Name(), func() { _ = os.Remove(f.Name()) }, nil
 }
 
 // Discover runs the discovery command in dir and returns its work items — the
