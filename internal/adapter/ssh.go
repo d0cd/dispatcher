@@ -121,7 +121,7 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 	// Build a bash script that exports the workload's .env and execs the
 	// command. Stream it over stdin into `ssh ... bash -s` so the secret
 	// values never appear in local or remote process argv (visible via `ps`).
-	envExports, err := DotEnvExportScript(w.Source.Path)
+	envExports, err := DotEnvExportScript(w.Source.Path, w.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +135,7 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 		// We construct two stdin scripts — outer for cd+build, inner for
 		// docker via heredoc — keeping all secret material off any argv.
 		image := ShellQuote("dispatcher-" + tag + ":latest")
-		envFileLines, err := DotEnvFileLines(w.Source.Path)
+		envFileLines, err := DotEnvFileLines(w.Source.Path, w.Env)
 		if err != nil {
 			return nil, err
 		}

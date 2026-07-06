@@ -113,6 +113,10 @@ type WorkloadSpec struct {
 	// Shard, when Enabled, fans this workload out across many runs. Populated
 	// from the dispatcher.yaml `shard:` / `aggregate:` blocks.
 	Shard ShardSpec `yaml:"shard,omitempty" json:"shard,omitempty"`
+	// Env is extra runtime environment injected into the workload alongside its
+	// .env (Env wins on conflict). Used to hand a shard its SHARD_INDEX/
+	// SHARD_COUNT identity. Runtime-only — it never affects the build.
+	Env map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 // WorkloadSource identifies where the workload came from.

@@ -751,7 +751,7 @@ func startWorkloadOnVM(ctx context.Context, state *CloudVMState, w types.Workloa
 		return fmt.Errorf("no command or entrypoint for remote execution")
 	}
 
-	envExports, err := adapter.DotEnvExportScript(w.Source.Path)
+	envExports, err := adapter.DotEnvExportScript(w.Source.Path, w.Env)
 	if err != nil {
 		return err
 	}

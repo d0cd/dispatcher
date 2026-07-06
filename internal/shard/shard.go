@@ -18,17 +18,15 @@ type Assignment struct {
 	Items []string // work items for this shard (discover mode); nil in count mode
 }
 
-// Env is the shard's identity as KEY=VALUE environment entries: SHARD_INDEX and
-// SHARD_COUNT always, plus a newline-joined SHARD_ITEMS in discover mode.
-func (a Assignment) Env() []string {
-	env := []string{
-		fmt.Sprintf("SHARD_INDEX=%d", a.Index),
-		fmt.Sprintf("SHARD_COUNT=%d", a.Count),
+// Env is the shard's identity as environment entries: SHARD_INDEX and
+// SHARD_COUNT. Discover-mode work items are NOT passed here — newline-joined
+// values corrupt docker `--env-file` / SSH heredocs, so items are delivered via
+// a file (SHARD_ITEMS_FILE) by the runner instead.
+func (a Assignment) Env() map[string]string {
+	return map[string]string{
+		"SHARD_INDEX": fmt.Sprintf("%d", a.Index),
+		"SHARD_COUNT": fmt.Sprintf("%d", a.Count),
 	}
-	if len(a.Items) > 0 {
-		env = append(env, "SHARD_ITEMS="+strings.Join(a.Items, "\n"))
-	}
-	return env
 }
 
 // Discover runs the discovery command in dir and returns its work items — the

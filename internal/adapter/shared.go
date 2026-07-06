@@ -80,14 +80,32 @@ func ShellQuoteArgs(args []string) string {
 	return strings.Join(quoted, " ")
 }
 
+// applyExtraEnv merges the extra maps into kv (extra wins over .env), lazily
+// allocating kv. Used to inject runtime env (e.g. a shard's identity) alongside
+// the workload's .env. Extra values are trusted callers' own (not user .env),
+// but they still pass through the same downstream newline/heredoc validation.
+func applyExtraEnv(kv map[string]string, extra []map[string]string) map[string]string {
+	for _, m := range extra {
+		for k, v := range m {
+			if kv == nil {
+				kv = map[string]string{}
+			}
+			kv[k] = v
+		}
+	}
+	return kv
+}
+
 // injectDotEnv reads .env (and .env.local) from dir and returns base extended
-// with their KEY=VALUE pairs. Existing keys in base are overridden so workload
-// .env wins over the inherited shell environment.
-func injectDotEnv(base []string, dir string) ([]string, error) {
+// with their KEY=VALUE pairs, plus any extra env (which wins over both .env and
+// base). Existing keys in base are overridden so workload env wins over the
+// inherited shell environment.
+func injectDotEnv(base []string, dir string, extra ...map[string]string) ([]string, error) {
 	kv, err := workload.LoadDotEnv(dir)
 	if err != nil {
 		return nil, fmt.Errorf("load .env from %s: %w", dir, err)
 	}
+	kv = applyExtraEnv(kv, extra)
 	if len(kv) == 0 {
 		return base, nil
 	}
@@ -113,12 +131,13 @@ func injectDotEnv(base []string, dir string) ([]string, error) {
 // and returns the path plus a cleanup func. Empty .env returns ("", noop, nil).
 // Values stay off argv (where `ps` could see them); the file is the standard
 // way to feed env into docker --env-file or similar.
-func WriteDotEnvFile(dir string) (path string, cleanup func(), err error) {
+func WriteDotEnvFile(dir string, extra ...map[string]string) (path string, cleanup func(), err error) {
 	noop := func() {}
 	kv, err := workload.LoadDotEnv(dir)
 	if err != nil {
 		return "", noop, err
 	}
+	kv = applyExtraEnv(kv, extra)
 	if len(kv) == 0 {
 		return "", noop, nil
 	}
@@ -205,11 +224,12 @@ func expandTempPattern(p string) (string, error) {
 
 // DotEnvExportScript renders .env as `export K='V'` lines for stdin-piped
 // bash; values stay off argv. Empty string when no .env.
-func DotEnvExportScript(dir string) (string, error) {
+func DotEnvExportScript(dir string, extra ...map[string]string) (string, error) {
 	kv, err := workload.LoadDotEnv(dir)
 	if err != nil {
 		return "", err
 	}
+	kv = applyExtraEnv(kv, extra)
 	if len(kv) == 0 {
 		return "", nil
 	}
@@ -235,11 +255,12 @@ const dotEnvHeredocTerminator = "DISPATCHER_ENV_EOF"
 // literally). It returns an error if any value contains a newline or the
 // heredoc terminator token, which would corrupt a `--env-file /dev/stdin`
 // heredoc. Empty string when no .env.
-func DotEnvFileLines(dir string) (string, error) {
+func DotEnvFileLines(dir string, extra ...map[string]string) (string, error) {
 	kv, err := workload.LoadDotEnv(dir)
 	if err != nil {
 		return "", err
 	}
+	kv = applyExtraEnv(kv, extra)
 	if len(kv) == 0 {
 		return "", nil
 	}

@@ -2,7 +2,6 @@ package shard
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -62,12 +61,14 @@ func TestPlan_DiscoverMode_NoItems(t *testing.T) {
 
 func TestAssignment_Env(t *testing.T) {
 	env := Assignment{Index: 2, Count: 5}.Env()
-	assert.Contains(t, env, "SHARD_INDEX=2")
-	assert.Contains(t, env, "SHARD_COUNT=5")
-	assert.NotContains(t, strings.Join(env, ","), "SHARD_ITEMS", "no items → no SHARD_ITEMS")
+	assert.Equal(t, "2", env["SHARD_INDEX"])
+	assert.Equal(t, "5", env["SHARD_COUNT"])
 
+	// Items are never inlined as env (newlines would corrupt --env-file); they
+	// travel via SHARD_ITEMS_FILE, delivered by the runner.
 	withItems := Assignment{Index: 0, Count: 2, Items: []string{"test_a", "test_b"}}.Env()
-	assert.Contains(t, withItems, "SHARD_ITEMS=test_a\ntest_b")
+	_, hasItems := withItems["SHARD_ITEMS"]
+	assert.False(t, hasItems)
 }
 
 func TestDiscover(t *testing.T) {

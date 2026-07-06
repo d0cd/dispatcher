@@ -122,7 +122,7 @@ func (d *DockerAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle,
 	// Use --env-file to avoid leaking secret values via `ps`-visible argv.
 	// The temp file lives only until docker has read it; cleanup runs in a
 	// goroutine after the docker CLI has had time to consume it.
-	envFile, envCleanup, err := WriteDotEnvFile(w.Source.Path)
+	envFile, envCleanup, err := WriteDotEnvFile(w.Source.Path, w.Env)
 	if err != nil {
 		return nil, err
 	}

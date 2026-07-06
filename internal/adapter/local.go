@@ -103,7 +103,7 @@ func (l *LocalAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, 
 
 	cmd := exec.CommandContext(ctx, cmdArgs[0], cmdArgs[1:]...)
 	cmd.Dir = w.Source.Path
-	env, err := injectDotEnv(os.Environ(), w.Source.Path)
+	env, err := injectDotEnv(os.Environ(), w.Source.Path, w.Env)
 	if err != nil {
 		return nil, err
 	}
