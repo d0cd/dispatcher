@@ -284,6 +284,14 @@ func (tr *ToolRegistry) execEvaluateAll(spec *types.WorkloadSpec) ToolResult {
 			est := cost.EstimateCostWithHistory(*spec, t, tr.history, tr.catalog)
 			eval.Cost = &est
 			eval.Risks = risk.Analyze(*spec, t, est)
+			if tr.history != nil {
+				if s := tr.history.Flakiness(spec.Name, t.ID); s.Flaky {
+					eval.Risks = append(eval.Risks, types.Risk{
+						Category:    "flaky-history",
+						Description: fmt.Sprintf("historically unstable: failed %d of %d recent runs on this target — a pass here isn't a guarantee", s.Failures, s.Runs),
+					})
+				}
+			}
 			eval.Approvals = policy.Evaluate(*spec, t, est)
 		}
 

@@ -86,6 +86,42 @@ func TestToolRegistry_EvaluateAllTargets(t *testing.T) {
 	assert.NotNil(t, localEval.Cost)
 }
 
+func TestToolRegistry_EvaluateAllTargets_FlakyHistory(t *testing.T) {
+	tools, dir := setupTestEnv(t)
+
+	inspect := tools.Execute(ToolCall{
+		Name:  "inspect_workload",
+		Input: mustJSON(map[string]string{"path": dir}),
+	}, nil)
+	spec := inspect.Result.(types.WorkloadSpec)
+
+	// Seed a mixed pass/fail history for this workload on local-process.
+	require.NoError(t, tools.history.Record(cost.RunHistory{WorkloadName: spec.Name, TargetID: "local-process", Success: true}))
+	require.NoError(t, tools.history.Record(cost.RunHistory{WorkloadName: spec.Name, TargetID: "local-process", Success: false}))
+
+	result := tools.Execute(ToolCall{
+		Name:  "evaluate_all_targets",
+		Input: json.RawMessage("{}"),
+	}, &spec)
+	evals := result.Result.([]TargetEvaluation)
+
+	var local *TargetEvaluation
+	for i := range evals {
+		if evals[i].TargetID == "local-process" {
+			local = &evals[i]
+			break
+		}
+	}
+	require.NotNil(t, local)
+	var flaky bool
+	for _, r := range local.Risks {
+		if r.Category == "flaky-history" {
+			flaky = true
+		}
+	}
+	assert.True(t, flaky, "mixed pass/fail history must surface a flaky-history risk")
+}
+
 func TestToolRegistry_EvaluateAllTargets_NilSpec(t *testing.T) {
 	tools, _ := setupTestEnv(t)
 

@@ -188,6 +188,38 @@ func (h *HistoryStore) ConfidenceForTarget(targetID string) types.Confidence {
 	return types.ConfidenceLow
 }
 
+// StabilityReport summarizes a workload's recent stability on a target.
+type StabilityReport struct {
+	Runs     int  `json:"runs"`
+	Failures int  `json:"failures"`
+	Flaky    bool `json:"flaky"`
+}
+
+// Flakiness reports whether a workload has been unstable on a target: among its
+// retained runs, both successes and failures appear. A workload that always
+// passes — or always fails — is not flaky; a consistent failure is a different
+// signal (broken, not flaky). Needs at least two runs to have a basis.
+func (h *HistoryStore) Flakiness(workloadName, targetID string) StabilityReport {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	var rep StabilityReport
+	var successes int
+	for _, e := range h.entries {
+		if e.WorkloadName != workloadName || e.TargetID != targetID {
+			continue
+		}
+		rep.Runs++
+		if e.Success {
+			successes++
+		} else {
+			rep.Failures++
+		}
+	}
+	rep.Flaky = rep.Runs >= 2 && successes > 0 && rep.Failures > 0
+	return rep
+}
+
 // Stats returns summary statistics for a target.
 func (h *HistoryStore) Stats(targetID string) TargetStats {
 	h.mu.RLock()
