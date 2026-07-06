@@ -3,7 +3,8 @@
 Remaining work on dispatcher, grouped by theme. The tool is mature — the
 provisioning/pricing pipeline, durable execution, the bring-your-own-hosts
 importer, and the audit backlog have all landed — so what's left is a coherent
-set of *completeness* gaps, plus one new capability (confidential computing).
+set of *completeness* gaps, plus new capabilities: confidential computing (in
+flight), efficiency/observability borrows, and low-latency burst execution.
 
 Effort: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days. Impact is user-facing
 severity.
@@ -12,7 +13,7 @@ severity.
 
 | Item | Effort | Impact |
 |---|---|---|
-| Region/zone selection (`--region` / config). AWS AMIs are region-pinned, so a region→AMI map is needed and per-VM `Region` must be honored on teardown. Prerequisite for reliable GPU runs (SKU availability). | M | Medium |
+| ✅ Region/zone selection (`--region` / `region:`; flag wins). Region rides the plan (create) and `CloudVMState` (reconnect); providers gain `SetRegion` so **teardown hits the VM's region** (was leaking non-default-region AWS VMs). AWS resolves its region-correct AMI via SSM (no hand-maintained region→AMI map). Feasibility isn't region-filtered yet — GPU-SKU-per-region is a follow-up. | M | Medium |
 
 ## Theme 2 — Provider parity
 
@@ -63,10 +64,52 @@ boolean; the rest evolves it to the typed model below.
 | Item | Effort | Impact |
 |---|---|---|
 | ✅ Deterministic core: `confidential` requirement + capability + feasibility rejection (shipped as a bool). | M | Medium |
-| **Typed model** — top-level `confidential: {type, attestation}`; `Requirements.Confidential`/`Capabilities.Resources.Confidential` carry the TEE type (SEV/SEV-SNP/TDX); type-aware feasibility (mirrors GPU-model matching). | S | Medium |
-| **Provisioning** — thread the type into each provider's `CreateVM` flag (GCP `--confidential-compute-type`, AWS `--cpu-options AmdSevSnp=enabled`, Azure `--security-type ConfidentialVM`), argv-tested; mark builtins/catalog confidential-capable with their types; reject Hetzner/Lima. | M | Medium |
-| **Attestation** — a `RunStateAttesting` stage that fetches + verifies the TEE report to the hardware/cloud root, records the verdict, and **fails closed** before running the workload when `attestation: required`. Per-provider (Azure MAA first, then AWS SEV-SNP/KDS, GCP). The larger, cryptographic half. | L | High |
+| ✅ **Typed model** — top-level `confidential: {type, attestation, measurements, minTCB}`; typed feasibility (mirrors GPU-model matching). | S | Medium |
+| ✅ **Provisioning** — per-provider `CreateVM` flags (GCP `--confidential-compute-type` + `--min-cpu-platform="AMD Milan"` for SEV-SNP, AWS `AmdSevSnp=enabled`, Azure `ConfidentialVM`), argv-tested; confidential-capable builtins/catalog by type; Hetzner/Lima rejected. | M | Medium |
+| ✅ **Verifier cores + trust anchor** — SEV-SNP report/chain + MAA token verifiers (stdlib, synthetic-tested); pinned AMD ARK roots (Milan/Genoa/Turin, embedded from KDS); measurement allowlist + minTCB; readiness-gated registration (fails closed *before* provisioning); audit surfacing in `status`/`diagnose` (R13). | L | High |
+| **Live evidence fetch** — the measured guest-agent that binds the per-run nonce + in-TEE key (`REPORT_DATA=H(N‖key)`) and returns the report/token, flipping the attesters to *ready*. Needs a live confidential VM (see `experiments/confidential-attestation`). The remaining gate to a real guarantee. | L | High |
+| **Format-bind + secret wrapping** — run the capture experiment (GCP now emits v4 SEV-SNP reports) to pin the ABI/claim layout as golden vectors; then secret wrapping (R9 — source/secrets only into the proven TEE), VCEK revocation, MAA per-component TCB. | M | High |
 | Nitro Enclaves / k8s Confidential Containers — different, larger models. Out of scope until demand. | — | — |
+
+## Theme 7 — Efficiency & observability (borrowed from imbue-ai/offload)
+
+`offload` is a parallel *test* runner, but several of its mechanics transfer to
+dispatcher's placer/runner model. (Its historical-duration feedback loop we
+already have — `internal/cost/history.go` records `ActualDuration`/`ActualCost`
+and `EstimateCostWithHistory` uses the median + a confidence recalibration.)
+
+| Item | Effort | Impact |
+|---|---|---|
+| ✅ **Per-phase run timeline + `dispatcher trace`** — each phase's entry time is stamped on the run state (`Timeline []PhaseMark`, seeded at `Created`, appended on every transition incl. `SetError`/`MarkTerminal`); `dispatcher trace <run-id>` emits Chrome/Perfetto trace JSON. The measurement foundation for the latency work (Theme 8). | M | High |
+| ✅ **Content-addressed build cache** — the docker adapter records a content digest (Dockerfile + source tree) as an image label and skips the rebuild when `:latest` already carries it. Single-image (no digest-tag accumulation). Cross-host/registry caching is a follow-up. | M | Medium |
+| ✅ **Flaky classification from history** — `HistoryStore.Flakiness` flags a workload+target with mixed pass/fail history; surfaced as a `flaky-history` risk in the planner's target evaluation. (Deterministic `plan` doesn't use history, so it's the planner path for now.) | M | Medium |
+| ✅ **Env-var expansion in `dispatcher.yaml`** (`${VAR}` / `${VAR:-default}`), applied in `LoadConfig` before the strict decode. Only the braced form expands; a bare `$VAR` is left for remote expansion. | S | Low |
+
+Not borrowed, deliberately: split-requeue **hedging** (speculative duplicate
+execution is unsafe for a single side-effecting workload — only relevant if
+fan-out lands), and offload's committed/merge-driver history (dispatcher's
+history is local state-dir, not shared).
+
+## Theme 8 — Low-latency burst execution
+
+`offload`'s superpower is fanning out across ~200 sub-second sandboxes;
+dispatcher's cloud VMs boot in *minutes*, so it's the wrong shape for short or
+bursty work. Two coupled pieces — plus design decisions to settle first, because
+this stretches dispatcher's identity from "place one workload well" toward "burst
+many."
+
+| Item | Effort | Impact |
+|---|---|---|
+| **Fast ephemeral-sandbox backend** — a new `TargetAdapter` for seconds-not-minutes sandboxes (Modal / Firecracker / cloud-native microVM). Add a startup-latency dimension to feasibility so the planner prefers it for short jobs and VMs for long-running ones. | L | High |
+| **Intra-workload fan-out** — run N shards → schedule → aggregate. Reuses the duration history dispatcher already records (`internal/cost/history.go`) for LPT-style scheduling. The largest single item and the identity stretch. | L | High |
+
+**Open decisions (settle before building):**
+- **Backend first?** Modal (fastest to integrate; external dep + account) vs a self-hosted Firecracker/microVM path (more control, more work).
+- **Is fan-out in dispatcher's lane,** or should dispatcher stay a placer and a fan-out layer sit on top of it?
+- **Sharding contract** — shard generic workloads, or only ones that declare a shard/discovery command (as offload requires test discovery)?
+
+Depends on Theme 7's phase-trace (you can't optimize burst latency you can't
+measure) and reuses the existing duration history for scheduling.
 
 ## Solid — no action
 
@@ -78,6 +121,9 @@ docs-vs-code alignment overall. No TODO/FIXME/panic debt.
 
 ## Suggested order
 
-1. **Region/zone selection (Theme 1).** Needed for reliable GPU and region-pinned runs.
-2. **Cost-critical coverage (Theme 3).** Executor transient-retry, `startLongRunning`, `sshCmdArgs`, the Docker adapter.
-3. **Complete CI (Theme 5).** Wire the e2e suites and a coverage floor so the above can't silently regress.
+1. ✅ **Run timeline + `dispatcher trace` (Theme 7).** Shipped — the measurement foundation for the latency work.
+2. **Finish confidential attestation (Theme 6).** Run the format-bind experiment, then the live evidence fetch + secret wrapping — the remaining gate to a real guarantee.
+3. **Region/zone selection (Theme 1).** Needed for reliable GPU and region-pinned runs.
+4. **Cost-critical coverage (Theme 3).** Executor transient-retry, `startLongRunning`, `sshCmdArgs`, the Docker adapter.
+5. **Complete CI (Theme 5).** Wire the e2e suites and a coverage floor so the above can't silently regress.
+6. **Low-latency burst execution (Theme 8).** Settle the backend/fan-out decisions first, then the sandbox adapter, then fan-out. The build cache and env expansion (Theme 7) slot in as cheap wins alongside.
