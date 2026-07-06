@@ -12,6 +12,13 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
+// PhaseMark records when a run entered a given state, forming a timeline the
+// `trace` command renders (provision vs. run vs. teardown durations).
+type PhaseMark struct {
+	State     types.RunState `json:"state"`
+	EnteredAt time.Time      `json:"enteredAt"`
+}
+
 // LifecycleMode determines teardown behavior.
 type LifecycleMode string
 
@@ -52,6 +59,9 @@ type Run struct {
 	// RetryCount is the number of times this workload has been
 	// re-executed via the transient-failure retry path. Capped at 1 today.
 	RetryCount int
+	// Timeline records the entry time of each state the run passed through,
+	// for `dispatcher trace`. Seeded with Created at NewRun.
+	Timeline []PhaseMark
 
 	// Durable execution fields
 	HandleID      string          // persisted handle identifier
@@ -82,6 +92,7 @@ func NewRun(plan *types.Plan) *Run {
 		State:       types.RunStateCreated,
 		Plan:        plan,
 		WatchdogTTL: plan.Constraints.WatchdogTTL,
+		Timeline:    []PhaseMark{{State: types.RunStateCreated, EnteredAt: time.Now().UTC()}},
 	}
 }
 
@@ -111,12 +122,14 @@ func (r *Run) Transition(to types.RunState) error {
 	from := r.State
 	r.State = to
 
+	now := time.Now().UTC()
 	if to == types.RunStateRunning && r.StartedAt.IsZero() {
-		r.StartedAt = time.Now().UTC()
+		r.StartedAt = now
 	}
 	if to.IsTerminal() {
-		r.FinishedAt = time.Now().UTC()
+		r.FinishedAt = now
 	}
+	r.Timeline = append(r.Timeline, PhaseMark{State: to, EnteredAt: now})
 
 	dlog.L().Info("run.transition", "run", r.ID, "from", string(from), "to", string(to))
 	return nil
@@ -135,6 +148,7 @@ func (r *Run) SetError(state types.RunState, err error) {
 	r.State = state
 	r.Error = err.Error()
 	r.FinishedAt = time.Now().UTC()
+	r.Timeline = append(r.Timeline, PhaseMark{State: state, EnteredAt: r.FinishedAt})
 }
 
 // MarkTerminal records a discovered terminal state (e.g. from a live status
@@ -151,6 +165,7 @@ func (r *Run) MarkTerminal(state types.RunState) {
 	if r.FinishedAt.IsZero() {
 		r.FinishedAt = time.Now().UTC()
 	}
+	r.Timeline = append(r.Timeline, PhaseMark{State: state, EnteredAt: r.FinishedAt})
 }
 
 // GetState returns the current run state (thread-safe).

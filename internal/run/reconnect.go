@@ -98,6 +98,7 @@ func RunFromRecord(rec *RunRecord) *Run {
 		Cost:          rec.Cost,
 		Failure:       rec.Failure,
 		RetryCount:    rec.RetryCount,
+		Timeline:      rec.Timeline,
 		HandleID:      rec.HandleID,
 		HandleState:   json.RawMessage(rec.HandleState),
 		Lifecycle:     rec.Lifecycle,

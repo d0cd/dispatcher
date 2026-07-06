@@ -33,6 +33,9 @@ type RunRecord struct {
 	Failure    adapter.FailureDetails `json:"failure,omitempty"`
 	RetryCount int                    `json:"retryCount,omitempty"`
 
+	// Timeline records the entry time of each phase, for `dispatcher trace`.
+	Timeline []PhaseMark `json:"timeline,omitempty"`
+
 	// Durable execution fields
 	HandleID      string          `json:"handleId,omitempty"`
 	HandleState   json.RawMessage `json:"handleState,omitempty"`
@@ -60,6 +63,7 @@ func (r *Run) ToRecord() RunRecord {
 		Cost:          r.Cost,
 		Failure:       r.Failure,
 		RetryCount:    r.RetryCount,
+		Timeline:      r.Timeline,
 		HandleID:      r.HandleID,
 		HandleState:   r.HandleState,
 		Lifecycle:     r.Lifecycle,
