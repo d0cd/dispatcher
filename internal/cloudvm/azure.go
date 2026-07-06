@@ -30,6 +30,13 @@ func NewAzureProvider(resourceGroup, location string) *AzureProvider {
 
 func (a *AzureProvider) Name() ProviderID { return ProviderAzure }
 
+// SetRegion re-points the provider's location (Azure's region name).
+func (a *AzureProvider) SetRegion(region string) {
+	if region != "" {
+		a.location = region
+	}
+}
+
 func (a *AzureProvider) CheckCLI(ctx context.Context) error {
 	if _, err := exec.LookPath("az"); err != nil {
 		return fmt.Errorf("az CLI not found: %w", err)

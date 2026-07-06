@@ -28,6 +28,7 @@ var runFlags struct {
 	maxCost        float64
 	timeout        string
 	gpu            string
+	region         string
 	yes            bool
 	retryTransient bool
 	watchdogTTL    string
@@ -47,6 +48,7 @@ func init() {
 	runCmd.Flags().StringVar(&runFlags.optimize, "optimize", "cost", "optimize for: cost, speed")
 	runCmd.Flags().Float64Var(&runFlags.maxCost, "max-cost", 0, "maximum estimated cost in USD")
 	runCmd.Flags().StringVar(&runFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, h100:1)")
+	runCmd.Flags().StringVar(&runFlags.region, "region", "", "cloud region/zone to provision in and tear down from (e.g. eu-west-1, us-central1-a); overrides dispatcher.yaml region")
 	runCmd.Flags().StringVar(&runFlags.timeout, "timeout", "", "maximum run duration (e.g. 30m, 2h)")
 	runCmd.Flags().BoolVarP(&runFlags.yes, "yes", "y", false, "auto-approve all policy gates")
 	runCmd.Flags().BoolVar(&runFlags.retryTransient, "retry-transient", false,
@@ -125,6 +127,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		MaxDuration:            maxDuration,
 		RequireGPU:             runFlags.gpu,
 		TargetName:             runFlags.target,
+		Region:                 runFlags.region,
 		WatchdogTTL:            watchdogTTL,
 		RetryTransientFailures: runFlags.retryTransient,
 		AllowSSHFrom:           runFlags.allowSSHFrom,

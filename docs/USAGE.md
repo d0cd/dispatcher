@@ -176,12 +176,15 @@ confidential:                 # Run on a TEE-backed (memory-encrypted) VM
 maxCost: 50                   # Hard budget in USD
 maxTime: 2h                   # Wall-clock cap
 target: hetzner-vm            # Force a specific target
+region: eu-central-1          # Cloud region/zone to provision in (AWS region, GCP zone, Azure location); --region wins
 outputs:                      # Workload-relative paths to retrieve before cleanup
   - results/
   - model.bin
 watchdogTtl: 30m              # Cloud-VM self-destruct timer (default 30m; renewed while supervised). k8s Jobs use maxTime → activeDeadlineSeconds instead.
 retryTransientFailures: true  # Retry once on transient failure (OOM/SIGKILL); CLI --retry-transient wins
 ```
+
+**Region/zone:** `--region` (or `region:` in config; the flag wins) pins where a cloud VM provisions — an AWS region, a GCP zone, or an Azure location. It's honored on teardown too, so a VM created in a non-default region is torn down there rather than leaked. On AWS the region-correct Ubuntu AMI is resolved automatically via SSM (no hand-maintained region→AMI map). Empty = the provider's default region.
 
 **GPU workloads:** dispatcher provisions the catalog instance that matches the GPU requirement. If no catalog instance matches (an unknown `gpu.model`, or a provider with no GPU inventory), `plan` flags a `gpu-unschedulable` risk and `run` refuses rather than silently launching a CPU-only box.
 

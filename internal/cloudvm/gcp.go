@@ -28,6 +28,13 @@ func NewGCPProvider(project, zone string) *GCPProvider {
 
 func (g *GCPProvider) Name() ProviderID { return ProviderGCP }
 
+// SetRegion re-points the default zone (GCP uses the region field as a zone).
+func (g *GCPProvider) SetRegion(region string) {
+	if region != "" {
+		g.zone = region
+	}
+}
+
 func (g *GCPProvider) CheckCLI(ctx context.Context) error {
 	if _, err := exec.LookPath("gcloud"); err != nil {
 		return fmt.Errorf("gcloud CLI not found: %w", err)

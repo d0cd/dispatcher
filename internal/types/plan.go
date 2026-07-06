@@ -49,6 +49,10 @@ type PlanConstraints struct {
 	MaxDuration         time.Duration `yaml:"maxDuration,omitempty" json:"maxDuration,omitempty"`
 	RequireGPU          string        `yaml:"requireGpu,omitempty" json:"requireGpu,omitempty"`
 	TargetName          string        `yaml:"targetName,omitempty" json:"targetName,omitempty"`
+	// Region pins the cloud region/zone the workload provisions into (and is
+	// torn down from). Empty = the provider's default. AWS resolves its AMI for
+	// this region; GCP treats it as the zone; Azure as the location.
+	Region string `yaml:"region,omitempty" json:"region,omitempty"`
 	// WatchdogTTL bounds how long a cloud VM lives after dispatcher stops
 	// heartbeating it. Zero = use adapter default (30 minutes).
 	WatchdogTTL time.Duration `yaml:"watchdogTtl,omitempty" json:"watchdogTtl,omitempty"`

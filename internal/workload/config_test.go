@@ -17,6 +17,14 @@ func TestApplyConfig_Confidential(t *testing.T) {
 	assert.Equal(t, "required", spec.Requirements.Confidential.Attestation, "attestation defaults to required")
 }
 
+func TestLoadConfig_ParsesRegion(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: app\nregion: eu-west-1\n")
+	cfg, err := LoadConfig(dir)
+	require.NoError(t, err)
+	assert.Equal(t, "eu-west-1", cfg.Region)
+}
+
 func TestLoadConfig_ExpandsEnvVars(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("DISPATCHER_TEST_TARGET", "gcp-vm")

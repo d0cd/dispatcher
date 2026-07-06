@@ -15,7 +15,6 @@ import (
 // AWSProvider implements Provider using the aws CLI.
 type AWSProvider struct {
 	defaultRegion string
-	defaultAMI    string
 }
 
 // NewAWSProvider creates an AWS provider.
@@ -23,13 +22,52 @@ func NewAWSProvider(region string) *AWSProvider {
 	if region == "" {
 		region = "us-east-1"
 	}
-	return &AWSProvider{
-		defaultRegion: region,
-		defaultAMI:    "ami-0c7217cdde317cfec", // Ubuntu 22.04 us-east-1
-	}
+	return &AWSProvider{defaultRegion: region}
 }
 
 func (a *AWSProvider) Name() ProviderID { return ProviderAWS }
+
+// SetRegion re-points the provider so create AND teardown act on the same
+// region — DestroyVM/GetVM key off defaultRegion, so a run in a non-default
+// region would otherwise leak (terminate would query the wrong region).
+func (a *AWSProvider) SetRegion(region string) {
+	if region != "" {
+		a.defaultRegion = region
+	}
+}
+
+// ubuntuAMISSMParam is Canonical's public SSM parameter for the current Ubuntu
+// 22.04 amd64 image. It resolves to the correct AMI id per region, so we never
+// hardcode a region-pinned AMI.
+const ubuntuAMISSMParam = "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"
+
+// resolveUbuntuAMI looks up the region-correct Ubuntu AMI via SSM. AMI ids are
+// region-scoped, so a fixed id only works in one region; this makes any region
+// launchable without a hand-maintained region→AMI map.
+func resolveUbuntuAMI(ctx context.Context, region string) (string, error) {
+	var out []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		o, e := runCLI(ctx, "aws", "ssm", "get-parameter",
+			"--region", region,
+			"--name", ubuntuAMISSMParam,
+			"--query", "Parameter.Value",
+			"--output", "text",
+		)
+		if e != nil {
+			return wrapExecError("aws ssm get-parameter", e)
+		}
+		out = o
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("resolve ubuntu AMI for region %s via SSM: %w", region, err)
+	}
+	ami := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(ami, "ami-") {
+		return "", fmt.Errorf("SSM returned an unexpected AMI value %q for region %s", ami, region)
+	}
+	return ami, nil
+}
 
 func (a *AWSProvider) CheckCLI(ctx context.Context) error {
 	if _, err := exec.LookPath("aws"); err != nil {
@@ -60,9 +98,28 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if region == "" {
 		region = a.defaultRegion
 	}
+	if opts.AllowSSHFrom != "" {
+		return nil, errFirewallUnsupported("aws")
+	}
+	// Validate tags before any CLI call (incl. the AMI lookup) so a crafted
+	// value is rejected pre-exec. AWS joins tag KV pairs with commas inside the
+	// --tag-specifications value, so a comma or `}` in a value would corrupt it.
+	if err := validateLabels(opts.Tags); err != nil {
+		return nil, fmt.Errorf("aws tags: %w", err)
+	}
+	// Reject an unsupported confidential type pre-exec, before the AMI lookup.
+	confArgs, err := awsConfidentialArgs(opts)
+	if err != nil {
+		return nil, err
+	}
+
 	image := opts.Image
 	if image == "" {
-		image = a.defaultAMI
+		resolved, err := resolveUbuntuAMI(ctx, region)
+		if err != nil {
+			return nil, fmt.Errorf("aws: %w", err)
+		}
+		image = resolved
 	}
 	instanceType := opts.InstanceType
 	if instanceType == "" {
@@ -71,16 +128,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if err := validateVMArgs(region, instanceType, image); err != nil {
 		return nil, fmt.Errorf("aws: %w", err)
 	}
-	if opts.AllowSSHFrom != "" {
-		return nil, errFirewallUnsupported("aws")
-	}
 
-	// Build tag specifications. AWS uses commas to separate tag KV pairs
-	// inside the --tag-specifications value, so a label value with a comma
-	// or `}` would corrupt the spec. Validation at the boundary catches it.
-	if err := validateLabels(opts.Tags); err != nil {
-		return nil, fmt.Errorf("aws tags: %w", err)
-	}
 	var tagSpecs []string
 	for k, v := range opts.Tags {
 		tagSpecs = append(tagSpecs, fmt.Sprintf("{Key=%s,Value=%s}", k, v))
@@ -97,10 +145,6 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--output", "json",
 	}
 
-	confArgs, err := awsConfidentialArgs(opts)
-	if err != nil {
-		return nil, err
-	}
 	args = append(args, confArgs...)
 
 	if opts.UserData != "" {

@@ -44,6 +44,25 @@ func NewCloudVMAdapter(provider Provider, cfg Config) *CloudVMAdapter {
 
 func (a *CloudVMAdapter) ID() string { return a.targetID }
 
+// regionalProvider is optionally implemented by providers whose region/zone can
+// be re-pointed after construction — from a --region flag on create, or from
+// persisted state on reconnect — so create and teardown act on one region.
+type regionalProvider interface {
+	SetRegion(region string)
+}
+
+// applyRegion pins the adapter (and its provider, if regional) to region. A
+// no-op for empty region or single-region providers (Hetzner/Lima).
+func (a *CloudVMAdapter) applyRegion(region string) {
+	if region == "" {
+		return
+	}
+	a.config.Region = region
+	if rp, ok := a.provider.(regionalProvider); ok {
+		rp.SetRegion(region)
+	}
+}
+
 func (a *CloudVMAdapter) Validate(ctx context.Context, w types.WorkloadSpec) (types.ValidationResult, error) {
 	v := types.ValidationResult{
 		Schema:             types.ValidationPass,
@@ -171,6 +190,14 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	}
 	userData := WatchdogCloudInit(ttl)
 	vmName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
+
+	// Pin the region: the plan's choice wins over the adapter default, and the
+	// provider is re-pointed so teardown later hits the same region.
+	region := p.Constraints.Region
+	if region == "" {
+		region = a.config.Region
+	}
+	a.applyRegion(region)
 
 	opts := buildVMOptions(p, a.config.Region, vmName, keyPath+".pub", userData)
 	if err := validateGPUInstance(w, opts.InstanceType); err != nil {
@@ -554,6 +581,10 @@ func (a *CloudVMAdapter) Reconnect(_ context.Context, handleID string, raw json.
 	if err != nil {
 		return nil, fmt.Errorf("cannot deserialize handle state: %w", err)
 	}
+
+	// Re-point the freshly-constructed provider at the VM's region so status
+	// checks and teardown after a CLI restart hit where the VM actually lives.
+	a.applyRegion(state.Region)
 
 	return &adapter.RunHandle{
 		ID:       handleID,

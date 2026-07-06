@@ -48,6 +48,9 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		if constraints.TargetName == "" && cfg.Target != "" {
 			constraints.TargetName = cfg.Target
 		}
+		if constraints.Region == "" && cfg.Region != "" {
+			constraints.Region = cfg.Region
+		}
 		if constraints.WatchdogTTL == 0 && cfg.WatchdogTTL != "" {
 			if d, err := time.ParseDuration(cfg.WatchdogTTL); err == nil {
 				constraints.WatchdogTTL = d

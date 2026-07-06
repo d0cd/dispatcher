@@ -57,6 +57,8 @@ type DispatcherConfig struct {
 	MaxCost      float64                     `yaml:"maxCost,omitempty"`
 	MaxTime      string                      `yaml:"maxTime,omitempty"`
 	Target       string                      `yaml:"target,omitempty"`
+	// Region pins the cloud region/zone (overridden by the --region flag).
+	Region string `yaml:"region,omitempty"`
 	// Outputs lists workload-relative paths that should be retrieved before
 	// the VM is destroyed (e.g. ["results/", "model.bin"]). When empty,
 	// dispatcher attempts to retrieve a default "outputs/" directory if it
@@ -116,7 +118,7 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		dec.KnownFields(true)
 		var cfg DispatcherConfig
 		if err := dec.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, gpu, service, sandbox, confidential, maxCost, maxTime, target, outputs, watchdogTtl, retryTransientFailures)", path, err)
+			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, gpu, service, sandbox, confidential, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
 		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate %s: %w", path, err)
