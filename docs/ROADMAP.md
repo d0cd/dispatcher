@@ -111,7 +111,8 @@ and a `discover` command).
 | **Cloud-native fast backend** — prebaked images / warm pools on the existing cloud providers to cut boot from minutes toward seconds. | M | Medium |
 | **Modal backend** — sub-second sandboxes via the modal CLI; weigh the external-dep cost against the 3-direct-dep minimum. | M | High |
 | **Startup-latency feasibility** — a latency dimension so the planner prefers fast backends for short jobs, VMs for long-running ones. | S | Medium |
-| **`shard:` config-declared fan-out** — `count` or `discover`; per-shard `SHARD_INDEX`/`SHARD_COUNT`, LPT scheduling over the fast backend (reusing `cost/history.go` durations), output aggregation + partial-failure policy. | L | High |
+| ✅ **Sharding core** — `shard:`/`aggregate:` config → `ShardSpec`; `shard.Plan` (count + discover split), `shard.Discover`, `Assignment.Env`, and `shard.Engine` (bounded-parallel, fail/retry/continue, race-clean). All deterministic + tested. | L | High |
+| **Shard production wiring** — decided: a shard is a **full dispatcher run**. Remaining: (1) `SHARD_ITEMS` must move from a newline-joined env var to a **`SHARD_ITEMS_FILE`** (newlines corrupt `--env-file`/heredoc on docker/cloud) — count mode (2 int env vars) can wire first; (2) thread a runtime `WorkloadSpec.Env` map through the 4 secret-handling env helpers (`injectDotEnv`, `WriteDotEnvFile`, `DotEnvExportScript`, `DotEnvFileLines`) with per-adapter tests — runtime env, kept out of the build digest; (3) per-shard-run `RunFunc` + `runRun` branch + LPT scheduling (`cost/history.go`) + per-shard output dirs + aggregation. | L | High |
 
 Depends on Theme 7's phase-trace (you can't optimize burst latency you can't
 measure) and reuses the existing duration history for scheduling.
