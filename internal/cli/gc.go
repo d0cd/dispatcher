@@ -21,9 +21,26 @@ var gcFlags struct {
 	force  bool
 }
 
+// gcOrphanJSON / gcReport are the --json shape for gc.
+type gcOrphanJSON struct {
+	ResourceID string `json:"resourceId"`
+	Provider   string `json:"provider"`
+	RunID      string `json:"runId,omitempty"`
+	Destroyed  bool   `json:"destroyed"`
+	Error      string `json:"error,omitempty"`
+}
+
+type gcReport struct {
+	Found     int            `json:"found"`
+	Destroyed int            `json:"destroyed"`
+	DryRun    bool           `json:"dryRun"`
+	Orphans   []gcOrphanJSON `json:"orphans"`
+}
+
 var gcCmd = &cobra.Command{
-	Use:   "gc",
-	Short: "Find and destroy orphaned cloud resources",
+	Use:         "gc",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "Find and destroy orphaned cloud resources",
 	Long: `Scans all configured cloud providers for VMs tagged by Dispatcher that no
 longer have an active run, and destroys them.
 
@@ -31,6 +48,7 @@ Use --dry-run to preview what would be destroyed without acting — recommended
 before running for real, especially with long-lived state directories.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
+		asJSON := jsonOutput()
 
 		// Load all active (non-terminal) run IDs. A record that exists but fails
 		// to parse is tracked separately: we must NOT treat its VM as an orphan,
@@ -52,6 +70,9 @@ before running for real, especially with long-lived state directories.`,
 		// Get all durable adapters
 		adapters := durableAdaptersFn()
 		if len(adapters) == 0 {
+			if asJSON {
+				return emitJSON(gcReport{DryRun: gcFlags.dryRun, Orphans: []gcOrphanJSON{}})
+			}
 			fmt.Fprintln(os.Stderr, "No cloud VM adapters configured.")
 			return nil
 		}
@@ -69,7 +90,9 @@ before running for real, especially with long-lived state directories.`,
 		for _, a := range adapters {
 			resources, err := a.ListResources(ctx)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: cannot list resources for %s: %v\n", a.ID(), err)
+				if !asJSON {
+					fmt.Fprintf(os.Stderr, "warning: cannot list resources for %s: %v\n", a.ID(), err)
+				}
 				continue
 			}
 
@@ -78,21 +101,50 @@ before running for real, especially with long-lived state directories.`,
 					continue // active run, not an orphan
 				}
 				if res.RunID != "" && unreadableRuns[res.RunID] {
-					red.Fprintf(os.Stderr, "  Skipping %s: run %s record is unreadable; refusing to destroy (could be live). Remove the run record to allow GC.\n", res.ResourceID, res.RunID)
+					if !asJSON {
+						red.Fprintf(os.Stderr, "  Skipping %s: run %s record is unreadable; refusing to destroy (could be live). Remove the run record to allow GC.\n", res.ResourceID, res.RunID)
+					}
 					continue
 				}
 
 				orphans = append(orphans, orphan{adapter: a, res: res})
-				bold.Fprintf(os.Stderr, "  Orphan: ")
-				fmt.Fprintf(os.Stderr, "%s (%s", res.ResourceID, res.Provider)
-				if !res.CreatedAt.IsZero() {
-					fmt.Fprintf(os.Stderr, ", created %s", res.CreatedAt.Format("2006-01-02 15:04"))
+				if !asJSON {
+					bold.Fprintf(os.Stderr, "  Orphan: ")
+					fmt.Fprintf(os.Stderr, "%s (%s", res.ResourceID, res.Provider)
+					if !res.CreatedAt.IsZero() {
+						fmt.Fprintf(os.Stderr, ", created %s", res.CreatedAt.Format("2006-01-02 15:04"))
+					}
+					if res.RunID != "" {
+						fmt.Fprintf(os.Stderr, ", run %s", res.RunID)
+					}
+					fmt.Fprintln(os.Stderr, ")")
 				}
-				if res.RunID != "" {
-					fmt.Fprintf(os.Stderr, ", run %s", res.RunID)
-				}
-				fmt.Fprintln(os.Stderr, ")")
 			}
+		}
+
+		if asJSON {
+			// A prompt can't run with JSON output, so require an explicit intent.
+			if !gcFlags.dryRun && !gcFlags.force {
+				return fmt.Errorf("gc --json requires --dry-run or --yes (interactive confirmation can't run with JSON output)")
+			}
+			report := gcReport{DryRun: gcFlags.dryRun, Orphans: []gcOrphanJSON{}}
+			for _, o := range orphans {
+				e := gcOrphanJSON{ResourceID: o.res.ResourceID, Provider: o.res.Provider, RunID: o.res.RunID}
+				if !gcFlags.dryRun {
+					if err := o.adapter.DestroyResource(ctx, o.res.ResourceID); err != nil {
+						e.Error = err.Error()
+					} else {
+						e.Destroyed = true
+						report.Destroyed++
+						if o.res.RunID != "" {
+							cloudvm.RemoveRunKeyFiles(o.res.RunID)
+						}
+					}
+				}
+				report.Orphans = append(report.Orphans, e)
+			}
+			report.Found = len(orphans)
+			return emitJSON(report)
 		}
 
 		if len(orphans) == 0 {
