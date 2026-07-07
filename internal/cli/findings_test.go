@@ -440,7 +440,8 @@ func TestJSONUnsupportedCommandErrors(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	defer func() { rootFlags.output = "text"; rootFlags.json = false }()
 
-	_, _, err := executeCommand("history", "--json")
+	// `logs` streams output and will never emit JSON — a good "unsupported" case.
+	_, _, err := executeCommand("logs", "run_whatever", "--json")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported")
 }
