@@ -49,8 +49,7 @@ binary build+smoke, and a non-blocking `govulncheck`. Remaining:
 
 | Item | Effort | Impact |
 |---|---|---|
-| **Run the `k8se2e` tests in CI** against an ephemeral cluster (`kind` or `k3d`). Stand up the cluster, `go test -tags k8se2e ./internal/cloudvm/`, tear down — the only automated exercise of the k8s execution path. | M | High |
-| **Run `sshe2e` / `tfe2e`** (SSH artifact retrieval; real `terraform output`) against localhost ssh and a terraform binary in CI. | S | Medium |
+| ✅ **e2e lanes wired** — an `e2e` CI job stands up a `kind` cluster (`helm/kind-action`), `setup-terraform`, and passwordless localhost ssh, then runs `k8se2e` / `tfe2e` / `sshe2e`. Each test skips if its prereq is absent. Runs on main-push + `workflow_dispatch` (not every PR) until proven stable, so it can't block PRs on an unverified lane. | M | High |
 | **A live-provider integration lane** (opt-in, credentialed, manual/scheduled) exercising at least one real cloud provider's create/wait/destroy against the actual CLI. Gate behind secrets so it never runs on forks/PRs. | L | Medium |
 | ✅ **Coverage reporting** — CI prints the total; a per-package *floor* on cost/security-critical packages (cloudvm, adapter, run, target) is still open (kept off to avoid flaky reds until baselines are pinned). | S | Medium |
 | ✅ **govulncheck** job (non-blocking so a fresh stdlib advisory doesn't red the build pre-patch). **staticcheck** is deferred: 4 pre-existing findings (2 `ST1005` in `lima.go` — proper-noun false positives, 1 `ST1005` in `run.go`, 1 `U1000` unused var in `runtime.go`) would need cleanup first. | S | Medium |
