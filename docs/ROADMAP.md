@@ -40,7 +40,7 @@ Most of this landed as it went — the roadmap below is kept for the residual.
 | Item | Effort | Impact |
 |---|---|---|
 | Shell completion ships but is inert — no `ValidArgsFunction` for run-ids, target-ids, or enum flags. | M | Medium |
-| `--json` missing on `history` / `gc` / `recover` — the commands operators script. | M | Low |
+| ✅ `--json` on `history` / `gc` / `recover` — all three now emit structured output (`gc --json` requires `--dry-run`/`--yes` since a prompt can't run with JSON). | M | Low |
 
 ## Theme 5 — Complete CI
 
