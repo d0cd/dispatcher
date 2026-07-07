@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"syscall"
 
+	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -126,7 +128,7 @@ func (l *LocalAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, 
 		return nil, fmt.Errorf("failed to start process: %w", err)
 	}
 
-	ls := &localState{cmd: cmd, started: true, outR: outR, outW: outW}
+	ls := &localState{cmd: cmd, started: true, outR: outR, outW: outW, sourcePath: w.Source.Path, outputs: w.Outputs}
 	ls.logDone = make(chan struct{})
 
 	return &RunHandle{
@@ -194,8 +196,99 @@ func (l *LocalAdapter) Logs(_ context.Context, h *RunHandle, w io.Writer) error 
 	return nil
 }
 
-func (l *LocalAdapter) Artifacts(_ context.Context, _ *RunHandle) ([]ArtifactRef, error) {
-	return nil, nil
+// Artifacts copies the workload's declared outputs from the source dir into
+// runs/<run-id>/artifacts/, so a local run's outputs are preserved as a snapshot
+// (and are aggregatable when sharded). Output paths are validated against
+// absolute/traversal escapes; a missing output (never produced) is skipped, not
+// an error.
+func (l *LocalAdapter) Artifacts(_ context.Context, h *RunHandle) ([]ArtifactRef, error) {
+	ls, ok := h.State.(*localState)
+	if !ok || len(ls.outputs) == 0 {
+		return nil, nil
+	}
+	indexKey := h.RunID
+	if indexKey == "" {
+		indexKey = h.ID
+	}
+	destRoot, err := statedir.Subdir(filepath.Join("runs", indexKey, "artifacts"))
+	if err != nil {
+		return nil, fmt.Errorf("create artifacts dir: %w", err)
+	}
+	rootAbs, err := filepath.Abs(destRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	var refs []ArtifactRef
+	for _, out := range ls.outputs {
+		if filepath.IsAbs(out) || strings.Contains(out, "..") {
+			continue // defense in depth; config load is the primary gate
+		}
+		dst := filepath.Join(destRoot, filepath.Clean(out))
+		dstAbs, err := filepath.Abs(dst)
+		if err != nil || !strings.HasPrefix(dstAbs+string(filepath.Separator), rootAbs+string(filepath.Separator)) {
+			continue // escapes the artifacts root
+		}
+		src := filepath.Join(ls.sourcePath, out)
+		info, err := os.Stat(src)
+		if err != nil {
+			continue // output not produced by this run
+		}
+		if err := copyPath(src, dst); err != nil {
+			return refs, fmt.Errorf("copy output %q: %w", out, err)
+		}
+		refs = append(refs, ArtifactRef{Name: filepath.Base(out), Path: dst, Size: info.Size()})
+	}
+	return refs, nil
+}
+
+// copyPath copies a file or directory tree from src to dst.
+func copyPath(src, dst string) error {
+	info, err := os.Stat(src)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return copyFile(src, dst, info.Mode())
+	}
+	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, p)
+		if err != nil {
+			return err
+		}
+		target := filepath.Join(dst, rel)
+		if d.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return copyFile(p, target, fi.Mode())
+	})
+}
+
+func copyFile(src, dst string, mode fs.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode.Perm())
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // FailureDetails returns the process exit code and (on Unix) signal name.
@@ -254,6 +347,8 @@ type localState struct {
 	outW       *os.File      // write end of output pipe
 	logDone    chan struct{} // closed when log copy goroutine finishes
 	logStarted bool          // true after Logs() spawns the goroutine
+	sourcePath string        // workload dir, where outputs are produced
+	outputs    []string      // workload-relative paths to collect
 }
 
 func buildCommand(w types.WorkloadSpec) ([]string, error) {
