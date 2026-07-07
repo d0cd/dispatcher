@@ -113,7 +113,8 @@ and a `discover` command).
 | **Startup-latency feasibility** — a latency dimension so the planner prefers fast backends for short jobs, VMs for long-running ones. | S | Medium |
 | ✅ **Sharding core** — `shard:`/`aggregate:` config → `ShardSpec`; `shard.Plan` (count + discover split), `shard.Discover`, `Assignment.Env`, and `shard.Engine` (bounded-parallel, fail/retry/continue, race-clean). All deterministic + tested. | L | High |
 | ✅ **Shard fan-out wired (count + discover)** — `runRun` branches to `runSharded`; each shard is a full dispatcher run with `SHARD_INDEX`/`SHARD_COUNT` injected via `WorkloadSpec.Env` (threaded through the 4 secret-handling env helpers), and discover-mode work items delivered via `SHARD_ITEMS_FILE`. Approval isn't bypassed. **Both modes verified end-to-end over local-process.** | L | High |
-| **Shard refinements** — (1) discover-mode on docker/cloud (item file needs per-shard staging; local works today); (2) output aggregation (merge each shard-run's artifacts into one dir per `aggregate.outputs`); (3) LPT scheduling — reorder assignments by `cost/history.go` durations once per-shard history accrues (engine runs index-order today). | M | Medium |
+| ✅ **Shard output aggregation** — each shard-run's artifacts dir is symlinked under `runs/<plan>-shards/shard-<index>` (one place, no copy). No-op for local (outputs in-place); real for cloud/ssh. | M | Medium |
+| **Shard refinements** — (1) discover-mode on docker/cloud (item file needs per-shard staging; local works today); (2) LPT scheduling — reorder assignments by `cost/history.go` durations once per-shard history accrues (engine runs index-order today). | M | Low |
 
 Depends on Theme 7's phase-trace (you can't optimize burst latency you can't
 measure) and reuses the existing duration history for scheduling.
