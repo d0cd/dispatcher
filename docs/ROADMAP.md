@@ -19,7 +19,7 @@ severity.
 
 | Item | Effort | Impact |
 |---|---|---|
-| Artifact retrieval on docker/k8s/local (`outputs:`). SSH and cloud-VM are done; implement `docker cp` / `kubectl cp` / local copy, or at minimum warn when `outputs:` is set but unretrievable. | M | Medium |
+| ✅ **Local** `outputs:` retrieval — `LocalAdapter.Artifacts` copies declared outputs into `runs/<id>/artifacts/` (was a no-op), path-validated, dir-tree aware. **docker/k8s remain**: `docker cp` needs the `--rm` lifecycle changed + mount-vs-image path resolution; `kubectl cp` needs the pod alive at collection — both more involved than they look, or at minimum warn when `outputs:` is set but unretrievable. | M | Medium |
 | Per-run firewall (`--allow-ssh-from`) is Hetzner-only; AWS security groups and Azure NSGs are natural fits. Opt-in and fail-closed today, so no silent insecurity. | L | Medium |
 | No spot/preemptible support, despite lowest-cost-success being the headline and the planner advising spot. Surface as "variable/evictable, not estimable" rather than a wrong precise price. | L | Medium |
 
