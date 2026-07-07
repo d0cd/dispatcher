@@ -3,6 +3,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -64,6 +66,34 @@ func TestRunSharded_DiscoverRejectsNonLocalTarget(t *testing.T) {
 	err := runSharded(context.Background(), p, func(context.Context, shard.Assignment) error { return nil })
 	require.Error(t, err, "discover-mode item files are host-local; non-local targets can't read them yet")
 	assert.Contains(t, err.Error(), "local-process")
+}
+
+func TestAggregateShardArtifacts_SymlinksEachShard(t *testing.T) {
+	// Two fake shard artifact dirs, each with an output file.
+	shard0 := filepath.Join(t.TempDir(), "run0", "artifacts")
+	shard1 := filepath.Join(t.TempDir(), "run1", "artifacts")
+	for i, d := range []string{shard0, shard1} {
+		require.NoError(t, os.MkdirAll(d, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(d, "result.txt"), []byte{byte('0' + i)}, 0o600))
+	}
+
+	dest := filepath.Join(t.TempDir(), "agg")
+	n, err := aggregateShardArtifacts(dest, map[int]string{0: shard0, 1: shard1})
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	// Each shard is reachable via dest/shard-<i>/result.txt through the symlink.
+	for i := range []int{0, 1} {
+		body, err := os.ReadFile(filepath.Join(dest, fmt.Sprintf("shard-%d", i), "result.txt"))
+		require.NoError(t, err, "shard-%d output is reachable through the aggregate", i)
+		assert.Equal(t, []byte{byte('0' + i)}, body)
+	}
+}
+
+func TestAggregateShardArtifacts_NoArtifactsIsNoOp(t *testing.T) {
+	n, err := aggregateShardArtifacts(filepath.Join(t.TempDir(), "agg"), nil)
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "local runs keep outputs in-place; nothing to aggregate")
 }
 
 func TestClonePlanForShard_SetsEnvWithoutMutatingBase(t *testing.T) {

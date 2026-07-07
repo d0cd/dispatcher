@@ -4,11 +4,72 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sync"
 
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/shard"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// shardOutcomes collects each shard's run so their outputs can be aggregated
+// after the fan-out. Safe for concurrent record from shard goroutines.
+type shardOutcomes struct {
+	mu   sync.Mutex
+	runs map[int]*run.Run
+}
+
+func newShardOutcomes() *shardOutcomes { return &shardOutcomes{runs: map[int]*run.Run{}} }
+
+func (s *shardOutcomes) record(idx int, r *run.Run) {
+	if r == nil {
+		return
+	}
+	s.mu.Lock()
+	s.runs[idx] = r
+	s.mu.Unlock()
+}
+
+// artifactDirs maps shard index → its artifacts directory, only for shards that
+// actually retrieved artifacts (local runs keep outputs in-place, so nil).
+func (s *shardOutcomes) artifactDirs() map[int]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dirs := map[int]string{}
+	base, err := run.StoreDir()
+	if err != nil {
+		return dirs
+	}
+	for idx, r := range s.runs {
+		if len(r.Artifacts) == 0 {
+			continue
+		}
+		dirs[idx] = filepath.Join(base, r.ID, "artifacts")
+	}
+	return dirs
+}
+
+// aggregateShardArtifacts symlinks each shard's artifacts directory under
+// destRoot as shard-<index>, giving one place to find every shard's outputs
+// without copying. Idempotent. Returns how many shards were linked.
+func aggregateShardArtifacts(destRoot string, artifactDirs map[int]string) (int, error) {
+	if len(artifactDirs) == 0 {
+		return 0, nil
+	}
+	if err := os.MkdirAll(destRoot, 0o700); err != nil {
+		return 0, err
+	}
+	n := 0
+	for idx, dir := range artifactDirs {
+		link := filepath.Join(destRoot, fmt.Sprintf("shard-%d", idx))
+		_ = os.Remove(link)
+		if err := os.Symlink(dir, link); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
 
 // clonePlanForShard returns a copy of base with the shard's identity env merged
 // into the workload. A fresh Env map is allocated so concurrent shards never
@@ -66,15 +127,16 @@ func runSharded(ctx context.Context, p *types.Plan, runShard shard.RunFunc) erro
 }
 
 // runOneShard executes a single shard as a full dispatcher run, on the plan's
-// target, with the shard's identity injected as runtime env.
-func runOneShard(ctx context.Context, base *types.Plan, a shard.Assignment) error {
+// target, with the shard's identity injected as runtime env. It returns the run
+// (even on failure) so its outputs can be aggregated.
+func runOneShard(ctx context.Context, base *types.Plan, a shard.Assignment) (*run.Run, error) {
 	p := clonePlanForShard(base, a)
 
 	// Discover-mode work items travel by file, not env.
 	if len(a.Items) > 0 {
 		itemsFile, cleanup, err := shard.WriteItemsFile(a.Items)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		defer cleanup()
 		p.Workload.Env["SHARD_ITEMS_FILE"] = itemsFile
@@ -82,7 +144,7 @@ func runOneShard(ctx context.Context, base *types.Plan, a shard.Assignment) erro
 
 	adapter, err := adapterForTarget(p.Recommendation.Target)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	r := run.NewRun(p)
 	executor := run.NewExecutor(adapter)
@@ -98,5 +160,5 @@ func runOneShard(ctx context.Context, base *types.Plan, a shard.Assignment) erro
 	err = executor.Execute(ctx, r, logWriter)
 	_, _ = r.Save()
 	recordRunHistory(r, p)
-	return err
+	return r, err
 }

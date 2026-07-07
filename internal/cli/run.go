@@ -187,9 +187,24 @@ func runRun(cmd *cobra.Command, args []string) error {
 			shardCtx, cancel = context.WithTimeout(shardCtx, maxDuration)
 			defer cancel()
 		}
-		return runSharded(shardCtx, p, func(ctx context.Context, a shard.Assignment) error {
-			return runOneShard(ctx, p, a)
+		outcomes := newShardOutcomes()
+		runErr := runSharded(shardCtx, p, func(ctx context.Context, a shard.Assignment) error {
+			r, err := runOneShard(ctx, p, a)
+			outcomes.record(a.Index, r)
+			return err
 		})
+		// Aggregate outputs regardless of the run outcome — a partial fan-out
+		// still collected whatever its shards produced.
+		if dirs := outcomes.artifactDirs(); len(dirs) > 0 {
+			runsDir, _ := run.StoreDir()
+			destRoot := filepath.Join(runsDir, p.Metadata.ID+"-shards")
+			if n, aggErr := aggregateShardArtifacts(destRoot, dirs); aggErr != nil {
+				dim.Fprintf(os.Stderr, "warning: shard output aggregation incomplete: %v\n", aggErr)
+			} else if n > 0 {
+				fmt.Fprintf(os.Stderr, "Aggregated outputs from %d shards under %s\n", n, destRoot)
+			}
+		}
+		return runErr
 	}
 
 	// Select adapter
