@@ -107,7 +107,8 @@ func TestRegistryListOrder(t *testing.T) {
 	assert.Equal(t, "local-docker", targets[1].ID)
 	assert.Equal(t, "lima-vm", targets[2].ID)
 	assert.Equal(t, "ssh", targets[3].ID)
-	assert.Len(t, targets, 9)
+	assert.Equal(t, "firecracker-vm", targets[9].ID)
+	assert.Len(t, targets, 10)
 }
 
 func TestRuntimeForTarget(t *testing.T) {

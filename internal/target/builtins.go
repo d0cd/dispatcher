@@ -112,6 +112,42 @@ func BuiltinTargets() []types.TargetConfig {
 			},
 		},
 		{
+			// Local Firecracker microVMs: a KVM-backed local backend for fast,
+			// isolated short jobs. Requires a Linux host with /dev/kvm.
+			ID:      "firecracker-vm",
+			Kind:    types.TargetKindLocalVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU:    types.GPUCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   false,
+					PrivateVPCAccess: false,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: false,
+					RateCard:      "local",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
+		{
 			ID:      "ssh",
 			Kind:    types.TargetKindSSH,
 			Enabled: true,

@@ -396,6 +396,11 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 			cloudvm.NewAzureProvider("dispatcher-rg", ""),
 			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "dispatcher"},
 		), nil
+	case "firecracker-vm":
+		return cloudvm.NewCloudVMAdapter(
+			cloudvm.NewFirecrackerProvider(),
+			cloudvm.Config{ProviderID: cloudvm.ProviderFirecracker, SSHUser: "root"},
+		), nil
 	}
 
 	// For unknown IDs, check the target registry for SSH targets

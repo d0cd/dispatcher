@@ -86,7 +86,24 @@ func TestFirecrackerProvider_CheckCLI_FailsClosedOffKVM(t *testing.T) {
 func TestFirecrackerProvider_CheckCLI_OKWhenKVMAndBinaryPresent(t *testing.T) {
 	withKVMAvailable(t, true)
 	withFakeBinaryInPath(t, "firecracker")
+	// The kernel + base rootfs must also be configured and present.
+	kernel := filepath.Join(t.TempDir(), "vmlinux")
+	rootfs := filepath.Join(t.TempDir(), "rootfs.ext4")
+	require.NoError(t, os.WriteFile(kernel, []byte("k"), 0o644))
+	require.NoError(t, os.WriteFile(rootfs, []byte("r"), 0o644))
+	t.Setenv("DISPATCHER_FC_KERNEL", kernel)
+	t.Setenv("DISPATCHER_FC_ROOTFS", rootfs)
 	assert.NoError(t, NewFirecrackerProvider().CheckCLI(context.Background()))
+}
+
+func TestFirecrackerProvider_CheckCLI_FailsWithoutKernelRootfs(t *testing.T) {
+	withKVMAvailable(t, true)
+	withFakeBinaryInPath(t, "firecracker")
+	t.Setenv("DISPATCHER_FC_KERNEL", "")
+	t.Setenv("DISPATCHER_FC_ROOTFS", "")
+	err := NewFirecrackerProvider().CheckCLI(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DISPATCHER_FC_KERNEL")
 }
 
 func TestFirecrackerProvider_CheckCLI_FailsWithoutBinary(t *testing.T) {

@@ -73,17 +73,33 @@ outputs, and tears the VM down.
   over dispatcher-tagged config files, `DestroyVM` (stop process, free tap, rm
   files) → testable against a fake process/fs.
 
-**The seam (needs a KVM host):** the actual `firecracker` launch, tap setup, and
-first SSH. Like confidential's evidence fetch, the provider **fails closed** in a
-preflight when `/dev/kvm` or the `firecracker` binary is absent — so on a laptop
+The provider **fails closed** in a preflight when `/dev/kvm`, the `firecracker`
+binary, or the configured kernel/rootfs are absent — so on a laptop
 `firecracker-vm` is simply infeasible rather than mysteriously broken.
 
-**Open decision — rootfs/kernel/tap management.** Raw `firecracker` (full control,
-we manage images + tap) vs. a wrapper that gives Lima-like UX (e.g. Ignite's
-`ignite run <oci-image>`, at the cost of a less-maintained dependency). Lean:
-raw firecracker with a small documented image-build step, keeping the dependency
-surface at zero new Go deps and matching the shell-out pattern. Settle before the
-live increment.
+**Live lifecycle (implemented).** `FirecrackerProvider` runs microVMs as a local
+backend: dispatcher runs *on* the KVM host and SSHes to the guest over a per-run
+tap. Chosen model (raw firecracker, zero new Go deps):
+- **Networking** — tap-per-run on a `/30` derived from the run id (host `.1` =
+  gateway, guest `.2`), host `MASQUERADE` for egress. The guest self-configures
+  `eth0` from the kernel `ip=` boot-arg — no in-guest network manager.
+- **SSH** — a per-run copy of the base rootfs with dispatcher's public key
+  injected into `root/.ssh/authorized_keys` (mounted via loopback).
+- **Lifecycle** — `CreateVM` = rootfs copy + key inject + tap + NAT + launch;
+  `DestroyVM` = kill the VM (by config-path marker) + del tap + remove NAT + rm
+  run dir. Privileged steps go through `sudo` (a dedicated KVM host).
+
+**Operator requirements (validated on a nested-virt GCP host):**
+- `DISPATCHER_FC_KERNEL` and `DISPATCHER_FC_ROOTFS` point at the guest `vmlinux`
+  and base ext4 rootfs; the preflight checks both exist.
+- **The base rootfs must ship `sshd` and `rsync`** (dispatcher rsyncs the source
+  in). The Firecracker CI `ubuntu-*.ext4` images boot but are stripped (no
+  `rsync`, no working `dpkg`) — a dispatcher base image must add both. Building
+  that base image is the remaining step before an end-to-end live run.
+
+**Status:** offline core (config schema + launch argv) validated by booting a
+real microVM on Firecracker v1.16.1; live lifecycle implemented and unit-tested;
+end-to-end `dispatcher run` pending a suitable base rootfs (above).
 
 ---
 
