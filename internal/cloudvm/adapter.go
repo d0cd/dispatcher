@@ -643,6 +643,11 @@ func providerBaseRate(p ProviderID) float64 {
 // to reclaim key material when reaping an orphaned VM, since the normal Cleanup
 // path never ran. Best-effort: missing files are ignored.
 func RemoveRunKeyFiles(runID string) {
+	// runID can come from a cloud VM tag; a separator or traversal in it would
+	// let os.Remove escape the keys dir, so refuse anything path-unsafe.
+	if strings.ContainsAny(runID, "/\\") || strings.Contains(runID, "..") {
+		return
+	}
 	keyDir, err := statedir.Subdir("keys")
 	if err != nil {
 		return

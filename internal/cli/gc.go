@@ -54,7 +54,13 @@ before running for real, especially with long-lived state directories.`,
 		// to parse is tracked separately: we must NOT treat its VM as an orphan,
 		// since a corrupt record could belong to a live run — destroying it would
 		// be irreversible data loss. Fail safe by protecting it instead.
-		runIDs, _ := run.ListRecords()
+		//
+		// If the records can't even be enumerated, abort: an empty listing would
+		// misclassify every live VM as an orphan and destroy the whole fleet.
+		runIDs, err := run.ListRecords()
+		if err != nil {
+			return fmt.Errorf("cannot enumerate run records; refusing to GC (could destroy live runs): %w", err)
+		}
 		activeRuns := map[string]bool{}
 		unreadableRuns := map[string]bool{}
 		for _, id := range runIDs {
@@ -123,8 +129,11 @@ before running for real, especially with long-lived state directories.`,
 		}
 
 		if asJSON {
-			// A prompt can't run with JSON output, so require an explicit intent.
-			if !gcFlags.dryRun && !gcFlags.force {
+			// A prompt can't run with JSON output, so require an explicit intent —
+			// but only when there's actually something to destroy. With zero
+			// orphans, emit an empty report so polling callers don't have to
+			// special-case the guard message.
+			if len(orphans) > 0 && !gcFlags.dryRun && !gcFlags.force {
 				return fmt.Errorf("gc --json requires --dry-run or --yes (interactive confirmation can't run with JSON output)")
 			}
 			report := gcReport{DryRun: gcFlags.dryRun, Orphans: []gcOrphanJSON{}}

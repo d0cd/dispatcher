@@ -153,6 +153,7 @@ func (d *DockerAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle,
 			args = append(args, runtimeCommand(w.Runtime, w.Entrypoints[0])...)
 		}
 	} else {
+		envCleanup() // no dockerState will be created to own the env temp file
 		return nil, fmt.Errorf("no image or base image available")
 	}
 

@@ -6,6 +6,8 @@ package cost
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -13,14 +15,31 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// maxEntries is the cap on retained run history. Old entries are trimmed
-// when the on-disk file grows past 2x this number.
+// maxEntries is the cap on retained run history. The on-disk file is compacted
+// on load once its size exceeds ~4*maxEntries*400 bytes (see load()).
 const maxEntries = 500
+
+// maxWorkloadNameBytes bounds the stored workload name so a history line stays
+// well under PIPE_BUF; longer names are rune-truncated and hash-suffixed.
+const maxWorkloadNameBytes = 256
+
+// truncateToRuneBoundary returns the longest prefix of s that is at most
+// maxBytes long and does not end in the middle of a UTF-8 rune.
+func truncateToRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
 
 // RunHistory records the actual outcome of a completed run.
 type RunHistory struct {
@@ -71,9 +90,14 @@ func NewHistoryStore() (*HistoryStore, error) {
 func (h *HistoryStore) Record(entry RunHistory) error {
 	// Defensive bound: workload names can theoretically be large; cap the
 	// serialized line at 1 KiB so it stays well under PIPE_BUF (4 KiB)
-	// and Linux/macOS guarantee O_APPEND atomicity.
-	if len(entry.WorkloadName) > 256 {
-		entry.WorkloadName = entry.WorkloadName[:256] + "…"
+	// and Linux/macOS guarantee O_APPEND atomicity. Truncate on a rune
+	// boundary (never leave a partial rune that json.Marshal would corrupt to
+	// U+FFFD) and append a short hash of the full name so two distinct long
+	// names sharing a prefix don't collapse into one Flakiness signal.
+	if len(entry.WorkloadName) > maxWorkloadNameBytes {
+		sum := sha256.Sum256([]byte(entry.WorkloadName))
+		prefix := truncateToRuneBoundary(entry.WorkloadName, maxWorkloadNameBytes)
+		entry.WorkloadName = prefix + "…" + hex.EncodeToString(sum[:4])
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {

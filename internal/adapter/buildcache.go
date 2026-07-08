@@ -2,9 +2,10 @@ package adapter
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"io"
+	"hash"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -26,8 +27,8 @@ func buildDigest(dockerfilePath, sourceDir string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read dockerfile: %w", err)
 	}
-	io.WriteString(h, "dockerfile\x00")
-	h.Write(df)
+	hashChunk(h, []byte("dockerfile"))
+	hashChunk(h, df)
 
 	err = filepath.WalkDir(sourceDir, func(path string, d fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -51,8 +52,8 @@ func buildDigest(dockerfilePath, sourceDir string) (string, error) {
 		if err != nil {
 			return err
 		}
-		io.WriteString(h, "\x00file\x00"+rel+"\x00")
-		h.Write(content)
+		hashChunk(h, []byte(rel))
+		hashChunk(h, content)
 		return nil
 	})
 	if err != nil {
@@ -60,4 +61,15 @@ func buildDigest(dockerfilePath, sourceDir string) (string, error) {
 	}
 
 	return hex.EncodeToString(h.Sum(nil))[:12], nil
+}
+
+// hashChunk feeds a length-prefixed field into h so that no field's bytes can be
+// confused with a subsequent field — without the length prefix, file content
+// containing the old inline delimiter could impersonate another file entry and
+// collide two distinct source trees to the same digest.
+func hashChunk(h hash.Hash, b []byte) {
+	var lenBuf [8]byte
+	binary.LittleEndian.PutUint64(lenBuf[:], uint64(len(b)))
+	h.Write(lenBuf[:])
+	h.Write(b)
 }

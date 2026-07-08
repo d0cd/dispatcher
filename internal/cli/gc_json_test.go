@@ -54,6 +54,24 @@ func TestGC_JSON_Force(t *testing.T) {
 	assert.Equal(t, []string{"srv-1"}, f.destroyed)
 }
 
+// With zero orphans there is no destructive intent to disambiguate, so the
+// --dry-run/--yes guard must not fire — a polling caller should get {found:0}.
+func TestGC_JSON_NoOrphansEmitsEmptyReport(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	f := &fakeGCAdapter{id: "hetzner-vm"} // no resources → no orphans
+	withGCAdapter(t, f)
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	var runErr error
+	out := captureStdout(t, func() { _, _, runErr = executeCommand("--output", "json", "gc") })
+	require.NoError(t, runErr, "no orphans is not ambiguous intent; emit an empty report")
+
+	var r gcReport
+	require.NoError(t, json.Unmarshal([]byte(out), &r))
+	assert.Equal(t, 0, r.Found)
+	assert.Empty(t, f.destroyed)
+}
+
 func TestGC_JSON_RequiresDryRunOrForce(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	f := gcOrphanAdapter()

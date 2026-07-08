@@ -42,6 +42,28 @@ func TestBuildDigest_DeterministicAndContentSensitive(t *testing.T) {
 	assert.NotEqual(t, d3, d4, "a Dockerfile change busts the cache key")
 }
 
+// Two genuinely different source trees must never hash to the same key. Without
+// length-prefixed framing, file content containing the entry delimiter can
+// impersonate a second file: tree {a:"", b:"X"} and tree {a:"\x00file\x00b\x00X"}
+// produce the same unframed byte stream.
+func TestBuildDigest_NoFramingCollision(t *testing.T) {
+	df := filepath.Join(t.TempDir(), "Dockerfile")
+	writeBuildFile(t, df, "FROM scratch\n")
+
+	t1 := t.TempDir()
+	writeBuildFile(t, filepath.Join(t1, "a"), "")
+	writeBuildFile(t, filepath.Join(t1, "b"), "X")
+
+	t2 := t.TempDir()
+	writeBuildFile(t, filepath.Join(t2, "a"), "\x00file\x00b\x00X")
+
+	d1, err := buildDigest(df, t1)
+	require.NoError(t, err)
+	d2, err := buildDigest(df, t2)
+	require.NoError(t, err)
+	assert.NotEqual(t, d1, d2, "distinct source trees must not share a cache key")
+}
+
 func TestBuildDigest_IgnoresGitChurn(t *testing.T) {
 	dir := t.TempDir()
 	df := filepath.Join(dir, "Dockerfile")

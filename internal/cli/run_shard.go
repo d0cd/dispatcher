@@ -30,8 +30,10 @@ func (s *shardOutcomes) record(idx int, r *run.Run) {
 	s.mu.Unlock()
 }
 
-// artifactDirs maps shard index → its artifacts directory, only for shards that
-// actually retrieved artifacts (local runs keep outputs in-place, so nil).
+// artifactDirs maps shard index → its runs/<id>/artifacts directory, for every
+// shard whose run retrieved outputs. Local, SSH, and cloud adapters all copy
+// declared outputs there, so any shard with outputs appears here; a shard that
+// produced none is omitted.
 func (s *shardOutcomes) artifactDirs() map[int]string {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -50,6 +50,11 @@ func LoadDotEnv(dir string) (map[string]string, error) {
 	return out, nil
 }
 
+// IsValidEnvKey reports whether k is a POSIX environment variable name. Exported
+// so callers injecting env keys that don't come from .env can apply the same
+// boundary check LoadDotEnv applies.
+func IsValidEnvKey(k string) bool { return isValidEnvKey(k) }
+
 // isValidEnvKey reports whether k is a POSIX environment variable name
 // (^[A-Za-z_][A-Za-z0-9_]*$). Keys are written verbatim into `export <key>=...`
 // scripts piped to a remote shell, so a key with shell metacharacters (e.g.

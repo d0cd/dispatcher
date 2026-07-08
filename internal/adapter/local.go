@@ -199,8 +199,10 @@ func (l *LocalAdapter) Logs(_ context.Context, h *RunHandle, w io.Writer) error 
 // Artifacts copies the workload's declared outputs from the source dir into
 // runs/<run-id>/artifacts/, so a local run's outputs are preserved as a snapshot
 // (and are aggregatable when sharded). Output paths are validated against
-// absolute/traversal escapes; a missing output (never produced) is skipped, not
-// an error.
+// absolute/traversal escapes, and symlinks are never followed — the workload is
+// arbitrary code and must not be able to snapshot files outside its source tree
+// by planting a symlink. A missing output (never produced) is skipped, not an
+// error.
 func (l *LocalAdapter) Artifacts(_ context.Context, h *RunHandle) ([]ArtifactRef, error) {
 	ls, ok := h.State.(*localState)
 	if !ok || len(ls.outputs) == 0 {
@@ -230,9 +232,12 @@ func (l *LocalAdapter) Artifacts(_ context.Context, h *RunHandle) ([]ArtifactRef
 			continue // escapes the artifacts root
 		}
 		src := filepath.Join(ls.sourcePath, out)
-		info, err := os.Stat(src)
+		info, err := os.Lstat(src)
 		if err != nil {
 			continue // output not produced by this run
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			continue // a symlinked output could point outside the source tree
 		}
 		if err := copyPath(src, dst); err != nil {
 			return refs, fmt.Errorf("copy output %q: %w", out, err)
@@ -242,11 +247,16 @@ func (l *LocalAdapter) Artifacts(_ context.Context, h *RunHandle) ([]ArtifactRef
 	return refs, nil
 }
 
-// copyPath copies a file or directory tree from src to dst.
+// copyPath copies a file or directory tree from src to dst. Symlinks are never
+// followed: a symlinked root is refused and symlinked entries in a walked tree
+// are skipped, so a copy can't escape src by dereferencing a link.
 func copyPath(src, dst string) error {
-	info, err := os.Stat(src)
+	info, err := os.Lstat(src)
 	if err != nil {
 		return err
+	}
+	if info.Mode()&fs.ModeSymlink != 0 {
+		return nil
 	}
 	if !info.IsDir() {
 		return copyFile(src, dst, info.Mode())
@@ -262,6 +272,9 @@ func copyPath(src, dst string) error {
 		target := filepath.Join(dst, rel)
 		if d.IsDir() {
 			return os.MkdirAll(target, 0o755)
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil // don't copy a symlink's target out of the tree
 		}
 		fi, err := d.Info()
 		if err != nil {

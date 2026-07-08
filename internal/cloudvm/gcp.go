@@ -165,7 +165,12 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 	if g.project != "" {
 		args = append(args, "--project", g.project)
 	}
-	out, err := runCLI(ctx, "gcloud", args...)
+	var out []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		var runErr error
+		out, runErr = runCLI(ctx, "gcloud", args...)
+		return runErr
+	})
 	if err != nil {
 		return g.zone
 	}

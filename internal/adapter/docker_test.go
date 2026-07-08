@@ -1,11 +1,42 @@
 package adapter
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// A workload with a .env but no resolvable image must not orphan its plaintext
+// env temp file: Execute returns an error before a dockerState is created, so
+// nothing else will ever clean it up.
+func TestDockerAdapter_EnvFileCleanedUpOnNoImageError(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp) // WriteSecureTempFile writes under os.TempDir()
+
+	src := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(src, ".env"), []byte("SECRET=x\n"), 0o600))
+
+	p := &types.Plan{
+		Metadata: types.PlanMetadata{ID: "p1"},
+		Workload: types.WorkloadSpec{
+			Name:   "app",
+			Source: types.WorkloadSource{Path: src},
+			// No Dockerfile and no BaseImage → the "no image" error path.
+		},
+	}
+	_, err := (&DockerAdapter{}).Execute(context.Background(), p)
+	require.Error(t, err)
+
+	matches, _ := filepath.Glob(filepath.Join(tmp, "dispatcher-env-*.env"))
+	assert.Empty(t, matches, "the plaintext env temp file must be cleaned up on the no-image error path")
+}
 
 func TestParseDockerInspect(t *testing.T) {
 	t.Run("OOM kill maps to SIGKILL", func(t *testing.T) {

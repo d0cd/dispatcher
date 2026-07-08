@@ -2,6 +2,7 @@ package cloudvm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// resolveZone must retry a transient list error rather than immediately
+// collapsing to the default zone — otherwise a single throttle makes DestroyVM
+// target the wrong zone and leak the VM.
+func TestResolveZone_RetriesTransient(t *testing.T) {
+	prev := DefaultRetry
+	DefaultRetry = RetryPolicy{MaxAttempts: 3, Initial: time.Millisecond, Max: 2 * time.Millisecond}
+	t.Cleanup(func() { DefaultRetry = prev })
+
+	prevCLI := runCLI
+	var calls int
+	runCLI = func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		if calls < 2 {
+			return nil, errors.New("503 Service Unavailable")
+		}
+		return []byte("us-west1-b\n"), nil
+	}
+	t.Cleanup(func() { runCLI = prevCLI })
+
+	g := NewGCPProvider("proj", "us-central1-a")
+	zone := g.resolveZone(context.Background(), "vm-1")
+	assert.Equal(t, "us-west1-b", zone, "a transient list error is retried, not collapsed to the default zone")
+	assert.Equal(t, 2, calls)
+}
 
 // TestCreateVMRetriesTransient covers C4: AWS/GCP/Azure CreateVM must route
 // their CLI invocation through Retry, so a transient error (503) is retried

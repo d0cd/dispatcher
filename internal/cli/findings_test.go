@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -375,6 +376,31 @@ func TestGC_DoesNotDestroyVMBehindCorruptRecord(t *testing.T) {
 	_, _, err = executeCommand("gc", "--yes")
 	require.NoError(t, err)
 	assert.Empty(t, f.destroyed, "must not destroy a VM whose run record is unreadable")
+}
+
+// If gc cannot even enumerate the run records, it must abort — treating an empty
+// listing as "no active runs" would misclassify every live VM as an orphan and
+// destroy the whole fleet on a single transient FS error.
+func TestGC_AbortsWhenRunRecordsCannotBeEnumerated(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	gcFlags.dryRun = false
+	gcFlags.force = false
+
+	// Plant a regular file where the runs directory must be, so ListRecords fails.
+	stateDir := filepath.Join(home, ".dispatcher")
+	require.NoError(t, os.MkdirAll(stateDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "runs"), []byte("x"), 0o600))
+
+	f := &fakeGCAdapter{
+		id:        "hetzner-vm",
+		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_live"}},
+	}
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--yes")
+	require.Error(t, err, "gc must refuse to run when run records can't be enumerated")
+	assert.Empty(t, f.destroyed, "nothing destroyed when active runs are unknowable")
 }
 
 // ---- P2: --json output ----

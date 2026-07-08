@@ -1,13 +1,36 @@
 package cost
 
 import (
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRecord_LongWorkloadNameStaysValidAndDistinct(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	s, err := NewHistoryStore()
+	require.NoError(t, err)
+
+	// A multibyte rune straddling the byte cut must not be left partial.
+	name := strings.Repeat("a", 255) + "€" + strings.Repeat("b", 50)
+	require.NoError(t, s.Record(RunHistory{RunID: "r1", WorkloadName: name}))
+	got := s.entries[len(s.entries)-1].WorkloadName
+	assert.True(t, utf8.ValidString(got), "a truncated name must remain valid UTF-8")
+
+	// Two distinct names sharing a >cap-byte prefix must not collapse into one
+	// (else Flakiness would merge two workloads' stability signals).
+	prefix := strings.Repeat("x", 300)
+	require.NoError(t, s.Record(RunHistory{RunID: "r2", WorkloadName: prefix + "AAA"}))
+	require.NoError(t, s.Record(RunHistory{RunID: "r3", WorkloadName: prefix + "BBB"}))
+	n2 := s.entries[len(s.entries)-2].WorkloadName
+	n3 := s.entries[len(s.entries)-1].WorkloadName
+	assert.NotEqual(t, n2, n3, "distinct long names must stay distinct after truncation")
+}
 
 func TestHistoryStore_RecordAndEstimate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())

@@ -82,18 +82,24 @@ func ShellQuoteArgs(args []string) string {
 
 // applyExtraEnv merges the extra maps into kv (extra wins over .env), lazily
 // allocating kv. Used to inject runtime env (e.g. a shard's identity) alongside
-// the workload's .env. Extra values are trusted callers' own (not user .env),
-// but they still pass through the same downstream newline/heredoc validation.
-func applyExtraEnv(kv map[string]string, extra []map[string]string) map[string]string {
+// the workload's .env. Keys are validated the same way LoadDotEnv validates
+// .env keys, since extra keys don't pass through that path and a key with shell
+// metacharacters would be command injection on the `export <key>=...` path.
+// Extra values are validated only where the caller renders them (the heredoc/
+// newline check in DotEnvFileLines); WriteDotEnvFile performs no such check.
+func applyExtraEnv(kv map[string]string, extra []map[string]string) (map[string]string, error) {
 	for _, m := range extra {
 		for k, v := range m {
+			if !workload.IsValidEnvKey(k) {
+				return nil, fmt.Errorf("invalid env key %q: must match [A-Za-z_][A-Za-z0-9_]*", k)
+			}
 			if kv == nil {
 				kv = map[string]string{}
 			}
 			kv[k] = v
 		}
 	}
-	return kv
+	return kv, nil
 }
 
 // injectDotEnv reads .env (and .env.local) from dir and returns base extended
@@ -105,7 +111,10 @@ func injectDotEnv(base []string, dir string, extra ...map[string]string) ([]stri
 	if err != nil {
 		return nil, fmt.Errorf("load .env from %s: %w", dir, err)
 	}
-	kv = applyExtraEnv(kv, extra)
+	kv, err = applyExtraEnv(kv, extra)
+	if err != nil {
+		return nil, err
+	}
 	if len(kv) == 0 {
 		return base, nil
 	}
@@ -137,7 +146,10 @@ func WriteDotEnvFile(dir string, extra ...map[string]string) (path string, clean
 	if err != nil {
 		return "", noop, err
 	}
-	kv = applyExtraEnv(kv, extra)
+	kv, err = applyExtraEnv(kv, extra)
+	if err != nil {
+		return "", noop, err
+	}
 	if len(kv) == 0 {
 		return "", noop, nil
 	}
@@ -229,7 +241,10 @@ func DotEnvExportScript(dir string, extra ...map[string]string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	kv = applyExtraEnv(kv, extra)
+	kv, err = applyExtraEnv(kv, extra)
+	if err != nil {
+		return "", err
+	}
 	if len(kv) == 0 {
 		return "", nil
 	}
@@ -260,7 +275,10 @@ func DotEnvFileLines(dir string, extra ...map[string]string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	kv = applyExtraEnv(kv, extra)
+	kv, err = applyExtraEnv(kv, extra)
+	if err != nil {
+		return "", err
+	}
 	if len(kv) == 0 {
 		return "", nil
 	}
