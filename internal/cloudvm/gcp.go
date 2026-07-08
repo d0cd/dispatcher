@@ -54,10 +54,20 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	instanceType := opts.InstanceType
 	if instanceType == "" {
 		instanceType = "e2-medium"
+		if opts.ConfidentialType != "" {
+			// e2 rejects --confidential-compute-type/--min-cpu-platform. n2d
+			// covers SEV/SEV-SNP; TDX needs an Intel c3.
+			instanceType = "n2d-standard-2"
+			if gcpConfidentialComputeType(opts.ConfidentialType) == "TDX" {
+				instanceType = "c3-standard-4"
+			}
+		}
 	}
 	image := opts.Image
 	if image == "" {
-		image = "ubuntu-2404-lts"
+		// Ubuntu 24.04 publishes arch-suffixed families; the bare
+		// "ubuntu-2404-lts" is not a resolvable family in ubuntu-os-cloud.
+		image = "ubuntu-2404-lts-amd64"
 	}
 	if err := validateVMArgs(zone, instanceType, image); err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
@@ -78,16 +88,34 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if g.project != "" {
 		args = append(args, "--project", g.project)
 	}
+	// --metadata k=<blob> would let any byte in a value (newline, =, --) corrupt
+	// or inject gcloud args. --metadata-from-file keeps blobs entirely off argv
+	// and out of process listings. Multiple entries are comma-joined into one
+	// flag (a repeated --metadata-from-file would otherwise clobber the prior).
+	var metadataFiles []string
 	if opts.UserData != "" {
-		// --metadata startup-script=<blob> would let any byte in UserData
-		// (newline, =, --) corrupt or inject gcloud args. --metadata-from-file
-		// keeps the blob entirely off argv and out of process listings.
 		path, err := adapter.WriteSecureTempFile("dispatcher-gcp-userdata-*.sh", []byte(opts.UserData))
 		if err != nil {
 			return nil, fmt.Errorf("write user-data: %w", err)
 		}
 		defer os.Remove(path)
-		args = append(args, "--metadata-from-file", "startup-script="+path)
+		metadataFiles = append(metadataFiles, "startup-script="+path)
+	}
+	if opts.SSHKeyPath != "" && opts.SSHUser != "" {
+		pub, err := os.ReadFile(opts.SSHKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read ssh pubkey: %w", err)
+		}
+		keysPath, err := adapter.WriteSecureTempFile("dispatcher-gcp-sshkeys-*.txt",
+			[]byte(gcpSSHKeysValue(opts.SSHUser, string(pub))))
+		if err != nil {
+			return nil, fmt.Errorf("write ssh-keys metadata: %w", err)
+		}
+		defer os.Remove(keysPath)
+		metadataFiles = append(metadataFiles, "ssh-keys="+keysPath)
+	}
+	if len(metadataFiles) > 0 {
+		args = append(args, "--metadata-from-file", strings.Join(metadataFiles, ","))
 	}
 
 	// GCP labels: validated at the boundary so a key/value with a comma or
@@ -186,6 +214,14 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 		return g.zone
 	}
 	return zone
+}
+
+// gcpSSHKeysValue formats a public key for GCP's ssh-keys metadata, which binds
+// the key to a login user as "<user>:<pubkey>". The guest agent then creates the
+// user (if needed) and installs the key. The trailing newline from a .pub file
+// is stripped so the metadata value is a single clean line.
+func gcpSSHKeysValue(user, pubKey string) string {
+	return user + ":" + strings.TrimSpace(pubKey)
 }
 
 // gcpConfidentialArgs returns the GCP create flags for a confidential VM (or

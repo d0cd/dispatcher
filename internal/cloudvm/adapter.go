@@ -200,6 +200,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	a.applyRegion(region)
 
 	opts := buildVMOptions(p, a.config.Region, vmName, keyPath+".pub", userData)
+	opts.SSHUser = sshUser // the provider must authorize the key for this login
 	if err := validateGPUInstance(w, opts.InstanceType); err != nil {
 		return nil, err
 	}

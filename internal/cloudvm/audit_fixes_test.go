@@ -85,7 +85,7 @@ func TestValidateVMArgs(t *testing.T) {
 	ok := []struct{ region, itype, image string }{
 		{"us-east-1", "t3.micro", "ami-0c7217cdde317cfec"},
 		{"fsn1", "cax11", "ubuntu-24.04"},
-		{"us-central1-a", "e2-medium", "ubuntu-2404-lts"},
+		{"us-central1-a", "e2-medium", "ubuntu-2404-lts-amd64"},
 		{"eastus", "Standard_B2s", "Canonical:ubuntu-24_04-lts:server:latest"},
 		{"us-east-1", "t3.micro", "ghcr.io/org/img@sha256:abc"},
 	}

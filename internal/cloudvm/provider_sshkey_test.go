@@ -1,0 +1,118 @@
+package cloudvm
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestGCPSSHKeysValue(t *testing.T) {
+	// GCP metadata binds the key to a login user as "<user>:<pubkey>"; trailing
+	// newline from the .pub file must be stripped.
+	assert.Equal(t, "dispatcher:ssh-ed25519 AAAATEST comment",
+		gcpSSHKeysValue("dispatcher", "ssh-ed25519 AAAATEST comment\n"))
+}
+
+// A GCP create must publish dispatcher's per-run public key via ssh-keys
+// metadata; without it the VM comes up with no way for dispatcher to log in.
+func TestGCPCreateVM_InjectsSSHKeyMetadata(t *testing.T) {
+	binDir := t.TempDir()
+	argvFile := filepath.Join(binDir, "argv")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+		"cat <<'JSON'\n[{\"name\":\"n\",\"networkInterfaces\":[{\"accessConfigs\":[{\"natIP\":\"1.2.3.4\"}]}]}]\nJSON\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "gcloud"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pub := filepath.Join(t.TempDir(), "k.pub")
+	require.NoError(t, os.WriteFile(pub, []byte("ssh-ed25519 AAAATEST comment\n"), 0o600))
+
+	_, err := NewGCPProvider("proj", "us-central1-a").CreateVM(context.Background(),
+		VMOptions{Name: "n", SSHKeyPath: pub, SSHUser: "dispatcher",
+			Tags: map[string]string{"dispatcher": "true"}})
+	require.NoError(t, err)
+
+	data, _ := os.ReadFile(argvFile)
+	assert.Contains(t, string(data), "--metadata-from-file", "create must pass metadata files")
+	assert.Contains(t, string(data), "ssh-keys=", "create must publish the ssh-keys metadata")
+}
+
+// The default GCP image family must actually exist in ubuntu-os-cloud. Ubuntu
+// 24.04 publishes arch-suffixed families (ubuntu-2404-lts-amd64), so the bare
+// "ubuntu-2404-lts" is not a resolvable family and create fails.
+func TestGCPCreateVM_DefaultImageFamilyResolvable(t *testing.T) {
+	binDir := t.TempDir()
+	argvFile := filepath.Join(binDir, "argv")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+		"cat <<'JSON'\n[{\"name\":\"n\",\"networkInterfaces\":[{\"accessConfigs\":[{\"natIP\":\"1.2.3.4\"}]}]}]\nJSON\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "gcloud"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := NewGCPProvider("proj", "us-central1-a").CreateVM(context.Background(),
+		VMOptions{Name: "n", Tags: map[string]string{"dispatcher": "true"}})
+	require.NoError(t, err)
+
+	data, _ := os.ReadFile(argvFile)
+	assert.Contains(t, string(data), "ubuntu-2404-lts-amd64",
+		"default image family must be the real arch-suffixed 24.04 family")
+}
+
+// A confidential VM with no explicit instance type must default to a
+// TEE-capable machine family — e2-medium rejects --confidential-compute-type
+// and --min-cpu-platform, so the generic default can't be used for confidential.
+func TestGCPCreateVM_ConfidentialDefaultsToCapableMachine(t *testing.T) {
+	binDir := t.TempDir()
+	argvFile := filepath.Join(binDir, "argv")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+		"cat <<'JSON'\n[{\"name\":\"n\",\"networkInterfaces\":[{\"accessConfigs\":[{\"natIP\":\"1.2.3.4\"}]}]}]\nJSON\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "gcloud"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := NewGCPProvider("proj", "us-central1-a").CreateVM(context.Background(),
+		VMOptions{Name: "n", ConfidentialType: "sev-snp", Tags: map[string]string{"dispatcher": "true"}})
+	require.NoError(t, err)
+
+	data, _ := os.ReadFile(argvFile)
+	assert.Contains(t, string(data), "--machine-type n2d-standard-2", "SEV-SNP needs an AMD n2d")
+	assert.NotContains(t, string(data), "e2-medium", "must not fall back to the non-confidential default")
+}
+
+func TestAWSUserDataWithSSHKey(t *testing.T) {
+	out := awsUserDataWithSSHKey("#!/bin/sh\necho hi\n", "ubuntu", "ssh-ed25519 AAAATEST comment\n")
+	assert.Contains(t, out, "#!/bin/sh", "original boot script is preserved")
+	assert.Contains(t, out, "/home/ubuntu/.ssh/authorized_keys", "key is installed for the login user")
+	assert.Contains(t, out, "ssh-ed25519 AAAATEST comment", "the public key is present")
+}
+
+// An AWS create must fold dispatcher's public key into the boot user-data so the
+// instance authorizes the per-run key (AWS has no metadata channel like GCP).
+func TestAWSCreateVM_InjectsSSHKeyIntoUserData(t *testing.T) {
+	binDir := t.TempDir()
+	argvFile := filepath.Join(binDir, "argv")
+	// Record argv and, for run-instances, echo the user-data file's contents so
+	// the test can confirm the key was folded in. Return minimal JSON.
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+		"for a in \"$@\"; do case \"$a\" in file://*) cat \"${a#file://}\" >> \"" + argvFile + "\";; esac; done\n" +
+		"case \"$*\" in\n" +
+		"  *describe-instances*) echo '{\"Reservations\":[{\"Instances\":[{\"InstanceId\":\"i-1\",\"PublicIpAddress\":\"1.2.3.4\",\"State\":{\"Name\":\"running\"}}]}]}' ;;\n" +
+		"  *) echo '{\"Instances\":[{\"InstanceId\":\"i-1\"}]}' ;;\n" +
+		"esac\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "aws"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pub := filepath.Join(t.TempDir(), "k.pub")
+	require.NoError(t, os.WriteFile(pub, []byte("ssh-ed25519 AAAATEST comment\n"), 0o600))
+
+	// getVMInRegion/waitForIP will fail against the stub; we only care that
+	// run-instances captured the folded-in key, so ignore the overall error.
+	_, _ = NewAWSProvider("us-east-1").CreateVM(context.Background(),
+		VMOptions{Name: "n", Image: "ami-123", InstanceType: "t3.micro",
+			SSHKeyPath: pub, SSHUser: "ubuntu", UserData: "#!/bin/sh\necho hi\n",
+			Tags: map[string]string{"dispatcher": "true"}})
+
+	data, _ := os.ReadFile(argvFile)
+	assert.Contains(t, string(data), "ssh-ed25519 AAAATEST comment", "user-data must carry the per-run key")
+}

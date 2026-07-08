@@ -147,12 +147,21 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	args = append(args, confArgs...)
 
-	if opts.UserData != "" {
+	// AWS has no metadata SSH channel like GCP, so dispatcher's per-run key is
+	// folded into the boot user-data (installed into the login user's
+	// authorized_keys). Without it the instance authorizes no key and SSH fails.
+	userData := opts.UserData
+	if opts.SSHKeyPath != "" && opts.SSHUser != "" {
+		pub, err := os.ReadFile(opts.SSHKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read ssh pubkey: %w", err)
+		}
+		userData = awsUserDataWithSSHKey(userData, opts.SSHUser, string(pub))
+	}
+	if userData != "" {
 		// Pass user-data via `file://` so it never appears in argv (visible
-		// to other users on the host via `ps`). Today user-data is just the
-		// watchdog cloud-init script; if we ever inject creds, this stops
-		// being a "low" issue and prevents leakage upfront.
-		f, err := adapter.WriteSecureTempFile("dispatcher-aws-userdata-*.yaml", []byte(opts.UserData))
+		// to other users on the host via `ps`).
+		f, err := adapter.WriteSecureTempFile("dispatcher-aws-userdata-*.yaml", []byte(userData))
 		if err != nil {
 			return nil, fmt.Errorf("write user-data: %w", err)
 		}
@@ -194,6 +203,26 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		CreatedAt: time.Now().UTC(),
 		Tags:      opts.Tags,
 	}, nil
+}
+
+// awsUserDataWithSSHKey appends a boot-script snippet that installs pubKey into
+// sshUser's authorized_keys. AWS has no ssh-keys metadata channel like GCP, and
+// this needs no teardown — the key dies with the instance. A base user-data
+// (the watchdog) supplies the shebang; if absent we add one.
+func awsUserDataWithSSHKey(userData, sshUser, pubKey string) string {
+	if userData == "" {
+		userData = "#!/bin/sh\n"
+	}
+	home := "/home/" + sshUser
+	key := adapter.ShellQuote(strings.TrimSpace(pubKey))
+	snippet := fmt.Sprintf(`
+mkdir -p %[1]s/.ssh
+echo %[2]s >> %[1]s/.ssh/authorized_keys
+chown -R %[3]s:%[3]s %[1]s/.ssh
+chmod 700 %[1]s/.ssh
+chmod 600 %[1]s/.ssh/authorized_keys
+`, home, key, sshUser)
+	return userData + snippet
 }
 
 func (a *AWSProvider) waitForIP(ctx context.Context, instanceID, region string) (string, error) {
