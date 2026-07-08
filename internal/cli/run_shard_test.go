@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -54,6 +55,12 @@ func TestRunSharded_FailureFailsTheRun(t *testing.T) {
 		})
 	require.Error(t, err, "a failed shard fails the overall sharded run")
 	assert.Contains(t, err.Error(), "shard")
+
+	// A shard's workload failure is a workload-level failure — exit 3, matching
+	// the single-run path (not the generic exit 1).
+	var ee *ExitError
+	require.True(t, errors.As(err, &ee), "sharded failure carries an exit code")
+	assert.Equal(t, 3, ee.Code)
 }
 
 func TestRunSharded_NoShardsIsAnError(t *testing.T) {

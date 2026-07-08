@@ -121,7 +121,14 @@ func runSharded(ctx context.Context, p *types.Plan, runShard shard.RunFunc) erro
 	fmt.Fprintf(os.Stderr, "\nShards: %d succeeded, %d failed, %d skipped (of %d)\n",
 		summary.Succeeded(), summary.Failed(), summary.Skipped(), len(assignments))
 	if !summary.OK() {
-		return fmt.Errorf("sharded run incomplete: %d of %d shards succeeded", summary.Succeeded(), len(assignments))
+		// A shard's workload not completing is a workload-level failure (exit 3),
+		// mirroring the single-run path's exit codes; the summary above is the
+		// user-facing message, so don't reprint.
+		return &ExitError{
+			Code:           3,
+			Err:            fmt.Errorf("sharded run incomplete: %d of %d shards succeeded", summary.Succeeded(), len(assignments)),
+			AlreadyPrinted: true,
+		}
 	}
 	return nil
 }
@@ -158,7 +165,9 @@ func runOneShard(ctx context.Context, base *types.Plan, a shard.Assignment) (*ru
 	}
 
 	err = executor.Execute(ctx, r, logWriter)
-	_, _ = r.Save()
+	if _, saveErr := r.Save(); saveErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not save shard run %s: %v\n", r.ID, saveErr)
+	}
 	recordRunHistory(r, p)
 	return r, err
 }
