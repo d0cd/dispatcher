@@ -85,6 +85,13 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	args = append(args, gcpConfidentialArgs(opts)...)
 
+	// GPU VMs can't live-migrate, so GCP requires TERMINATE on host maintenance
+	// or rejects the create. Confidential already sets it (above); apply it here
+	// for GPU machine families when it hasn't been set.
+	if opts.ConfidentialType == "" && gcpIsGPUMachine(instanceType) {
+		args = append(args, "--maintenance-policy=TERMINATE")
+	}
+
 	if g.project != "" {
 		args = append(args, "--project", g.project)
 	}
@@ -214,6 +221,18 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 		return g.zone
 	}
 	return zone
+}
+
+// gcpIsGPUMachine reports whether instanceType is a GCP machine family that
+// carries attached GPUs (a2/a3 = A100/H100, g2 = L4), which mandates a
+// TERMINATE maintenance policy.
+func gcpIsGPUMachine(instanceType string) bool {
+	for _, prefix := range []string{"a2-", "a3-", "g2-"} {
+		if strings.HasPrefix(instanceType, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // gcpSSHKeysValue formats a public key for GCP's ssh-keys metadata, which binds

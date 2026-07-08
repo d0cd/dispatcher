@@ -80,6 +80,38 @@ func TestGCPCreateVM_ConfidentialDefaultsToCapableMachine(t *testing.T) {
 	assert.NotContains(t, string(data), "e2-medium", "must not fall back to the non-confidential default")
 }
 
+// GPUs can't live-migrate, so GCP rejects a GPU machine type unless
+// --maintenance-policy=TERMINATE is set. A plain CPU VM must NOT get it.
+func TestGCPCreateVM_GPUMachineGetsTerminatePolicy(t *testing.T) {
+	newStub := func(t *testing.T) string {
+		binDir := t.TempDir()
+		argvFile := filepath.Join(binDir, "argv")
+		stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+			"cat <<'JSON'\n[{\"name\":\"n\",\"networkInterfaces\":[{\"accessConfigs\":[{\"natIP\":\"1.2.3.4\"}]}]}]\nJSON\n"
+		require.NoError(t, os.WriteFile(filepath.Join(binDir, "gcloud"), []byte(stub), 0o755))
+		t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		return argvFile
+	}
+
+	t.Run("gpu machine gets TERMINATE", func(t *testing.T) {
+		argvFile := newStub(t)
+		_, err := NewGCPProvider("proj", "us-central1-a").CreateVM(context.Background(),
+			VMOptions{Name: "n", InstanceType: "g2-standard-4", Tags: map[string]string{"dispatcher": "true"}})
+		require.NoError(t, err)
+		data, _ := os.ReadFile(argvFile)
+		assert.Contains(t, string(data), "--maintenance-policy=TERMINATE")
+	})
+
+	t.Run("cpu machine does not", func(t *testing.T) {
+		argvFile := newStub(t)
+		_, err := NewGCPProvider("proj", "us-central1-a").CreateVM(context.Background(),
+			VMOptions{Name: "n", InstanceType: "e2-medium", Tags: map[string]string{"dispatcher": "true"}})
+		require.NoError(t, err)
+		data, _ := os.ReadFile(argvFile)
+		assert.NotContains(t, string(data), "--maintenance-policy=TERMINATE")
+	})
+}
+
 func TestAWSUserDataWithSSHKey(t *testing.T) {
 	out := awsUserDataWithSSHKey("#!/bin/sh\necho hi\n", "ubuntu", "ssh-ed25519 AAAATEST comment\n")
 	assert.Contains(t, out, "#!/bin/sh", "original boot script is preserved")
