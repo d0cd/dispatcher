@@ -12,6 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/shard"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -66,6 +68,19 @@ func TestRunSharded_DiscoverRejectsNonLocalTarget(t *testing.T) {
 	err := runSharded(context.Background(), p, func(context.Context, shard.Assignment) error { return nil })
 	require.Error(t, err, "discover-mode item files are host-local; non-local targets can't read them yet")
 	assert.Contains(t, err.Error(), "local-process")
+}
+
+func TestShardOutcomes_ArtifactDirs(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	o := newShardOutcomes()
+	o.record(0, &run.Run{ID: "run_a", Artifacts: []adapter.ArtifactRef{{Name: "x", Path: "/p"}}})
+	o.record(1, &run.Run{ID: "run_b"}) // ran, produced no artifacts
+	o.record(2, nil)                   // never ran (skipped)
+
+	dirs := o.artifactDirs()
+	require.Len(t, dirs, 1, "only a shard that produced artifacts contributes a dir")
+	assert.Contains(t, dirs[0], "run_a")
+	assert.Contains(t, dirs[0], "artifacts")
 }
 
 func TestAggregateShardArtifacts_SymlinksEachShard(t *testing.T) {

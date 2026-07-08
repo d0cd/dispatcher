@@ -44,7 +44,7 @@ dispatcher stop <run-id>       # Stop and clean up
 | `plan <path>` | Generate execution plan with cost / risk analysis. Flags: `--ai` (LLM-driven planner), `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--gpu <spec>`. |
 | `validate [path]` | Validate `dispatcher.yaml` (schema + semantic checks) without planning or running. |
 | `audit <path>` | Pre-run risk audit: cost surprises, missing secrets, missing Dockerfile, no-feasible-target. |
-| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; Hetzner only — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
+| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--region <region>` (cloud region/zone; overrides `region:`), `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; Hetzner only — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
 | `explain <plan-id>` | Verbose recommendation for a saved plan. |
 
 ### Observability
@@ -53,6 +53,7 @@ dispatcher stop <run-id>       # Stop and clean up
 |---|---|
 | `status <run-id>` | Run state (reconnects to live VMs; persists discovered terminal states). Reconnecting to a still-running cloud run also extends its watchdog (see `renew`). |
 | `logs <run-id>` | Stream logs (reconnects to live VMs). |
+| `trace <run-id>` | Emit a Chrome/Perfetto timeline of the run's phases (provision, run, collect, teardown) as JSON — pipe to a file and open in `chrome://tracing` or `ui.perfetto.dev` to see where wall-clock time went. |
 | `cost <run-id>` | Realized cost, broken down. |
 | `list [--refresh]` | All runs with status / cost / duration. `--refresh` reconnects to non-terminal runs and updates state. Idle non-terminal runs (>6h) are flagged `STALE` so you can spot orphans. |
 | `history` | Per-target historical statistics. |
@@ -182,9 +183,18 @@ outputs:                      # Workload-relative paths to retrieve before clean
   - model.bin
 watchdogTtl: 30m              # Cloud-VM self-destruct timer (default 30m; renewed while supervised). k8s Jobs use maxTime → activeDeadlineSeconds instead.
 retryTransientFailures: true  # Retry once on transient failure (OOM/SIGKILL); CLI --retry-transient wins
+shard:                        # Fan the workload out across many runs (see below)
+  count: 20                   #   fixed shard count, OR
+  discover: "pytest --collect-only -q"  # command whose stdout lines are work items
+  maxParallel: 8              #   cap on concurrent shards (0 = engine default)
+aggregate:
+  outputs: [results/]         #   per-shard outputs, symlinked together after the fan-out
+  onShardFailure: fail        #   fail | retry | continue
 ```
 
 **Region/zone:** `--region` (or `region:` in config; the flag wins) pins where a cloud VM provisions — an AWS region, a GCP zone, or an Azure location. It's honored on teardown too, so a VM created in a non-default region is torn down there rather than leaked. On AWS the region-correct Ubuntu AMI is resolved automatically via SSM (no hand-maintained region→AMI map). Empty = the provider's default region.
+
+**Sharding (fan-out):** `shard:` runs the workload across many shards, each a full dispatcher run. Use `count: N` (each shard gets `SHARD_INDEX`/`SHARD_COUNT` and partitions its own work) or `discover: <cmd>` (dispatcher runs the command, distributes its stdout lines across shards, and hands each shard its slice via a `SHARD_ITEMS_FILE`). `maxParallel` caps concurrency; `aggregate.outputs` symlinks every shard's outputs under one directory; `aggregate.onShardFailure` is `fail` (fail-fast), `retry` (one retry then fail-fast), or `continue` (run all, report partial). A plan that needs approval must be approved once with `--yes`. Discover mode currently runs on `local-process`; count mode works on any target. Design: [docs/low-latency-execution.md](low-latency-execution.md).
 
 **GPU workloads:** dispatcher provisions the catalog instance that matches the GPU requirement. If no catalog instance matches (an unknown `gpu.model`, or a provider with no GPU inventory), `plan` flags a `gpu-unschedulable` risk and `run` refuses rather than silently launching a CPU-only box.
 
@@ -200,7 +210,7 @@ Available on every command:
 
 | Flag | Purpose |
 |---|---|
-| `--output text\|json` (`--json`) | Emit machine-readable JSON instead of prose. Supported on `plan`, `audit`, `status`, `list`, `cost`, `bill`. |
+| `--output text\|json` (`--json`) | Emit machine-readable JSON instead of prose. Supported on `plan`, `audit`, `status`, `list`, `cost`, `bill`, `history`, `recover`, and `gc` (`gc --json` requires `--dry-run` or `--yes` since it can't prompt). |
 | `--no-color` | Disable colored output (also honors `$NO_COLOR` and non-TTY). |
 | `--state-dir <path>` | Override the state directory (equivalent to `$DISPATCHER_HOME`); useful for `recover`/`gc` against a restored backup. |
 
