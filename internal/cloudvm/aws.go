@@ -419,9 +419,11 @@ func (a *AWSProvider) DestroyVM(ctx context.Context, vmID string) error {
 
 // deleteSGWhenReleased retries deleting a security group until the terminating
 // instance releases it (DependencyViolation clears once terminated). Bounded so
-// teardown can't hang.
+// teardown can't hang. GPU/confidential instances can take several minutes to
+// terminate, so the window is generous; a leftover SG is non-billing and gets
+// reaped by gc as a fallback.
 func (a *AWSProvider) deleteSGWhenReleased(ctx context.Context, sgID string) {
-	for i := 0; i < 18; i++ {
+	for i := 0; i < 42; i++ { // ~7 min at 10s cadence
 		if _, err := runCLI(ctx, "aws", "ec2", "delete-security-group",
 			"--region", a.defaultRegion, "--group-id", sgID); err == nil {
 			return

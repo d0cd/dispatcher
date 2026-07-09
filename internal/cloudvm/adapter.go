@@ -292,6 +292,13 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	dlog.L().Info("cloudvm.keypin.ok",
 		"run", p.Metadata.ID, "vm_id", vmInfo.ID, "known_hosts", state.KnownHostsPath)
 
+	// TCP-readiness can precede the boot-time (user-data) key install on AWS,
+	// so confirm the key is actually accepted before rsync — otherwise the
+	// first transfer fails with a publickey error.
+	if err := WaitForSSHAuth(ctx, state, 2*time.Minute); err != nil {
+		return nil, fmt.Errorf("wait for authenticated ssh: %w", err)
+	}
+
 	wrapper, err := writeSSHWrapper(state, p.Metadata.ID)
 	if err != nil {
 		return nil, fmt.Errorf("build ssh wrapper: %w", err)
