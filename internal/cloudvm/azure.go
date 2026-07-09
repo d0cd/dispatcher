@@ -97,8 +97,15 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		"--size", instanceType,
 		"--image", image,
 		"--admin-username", "dispatcher",
-		"--generate-ssh-keys",
 		"--output", "json",
+	}
+	// Inject dispatcher's per-run public key. --generate-ssh-keys would make
+	// Azure mint (or reuse ~/.ssh) a key dispatcher doesn't hold, so it could
+	// never SSH into the VM.
+	if opts.SSHKeyPath != "" {
+		args = append(args, "--ssh-key-values", opts.SSHKeyPath)
+	} else {
+		args = append(args, "--generate-ssh-keys")
 	}
 
 	confArgs, err := azureConfidentialArgs(opts)

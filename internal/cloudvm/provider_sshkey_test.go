@@ -133,6 +133,29 @@ func TestGCPCreateVM_GPUImageOverride(t *testing.T) {
 	assert.NotContains(t, string(data), "ubuntu-os-cloud", "a current-project image must not carry --image-project ubuntu-os-cloud")
 }
 
+// Azure must inject dispatcher's per-run public key, not --generate-ssh-keys
+// (which makes Azure mint its own key that dispatcher doesn't hold).
+func TestAzureCreateVM_InjectsSSHKey(t *testing.T) {
+	binDir := t.TempDir()
+	argvFile := filepath.Join(binDir, "argv")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+		"echo '{\"id\":\"/subscriptions/x/rg/vm/n\",\"publicIpAddress\":\"1.2.3.4\"}'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "az"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	pub := filepath.Join(t.TempDir(), "k.pub")
+	require.NoError(t, os.WriteFile(pub, []byte("ssh-ed25519 AAAATEST comment\n"), 0o600))
+
+	_, err := NewAzureProvider("rg", "eastus").CreateVM(context.Background(),
+		VMOptions{Name: "n", SSHKeyPath: pub, SSHUser: "dispatcher", Tags: map[string]string{"dispatcher": "true"}})
+	require.NoError(t, err)
+
+	data, _ := os.ReadFile(argvFile)
+	assert.Contains(t, string(data), "--ssh-key-values", "must pass dispatcher's key")
+	assert.Contains(t, string(data), pub)
+	assert.NotContains(t, string(data), "--generate-ssh-keys", "must not let Azure mint its own key")
+}
+
 func TestAWSInstanceType_ConfidentialDefaultsToCapable(t *testing.T) {
 	// t3 does not support SEV-SNP; a confidential VM with no explicit type must
 	// default to an SEV-SNP-capable family.
