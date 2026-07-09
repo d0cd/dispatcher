@@ -666,6 +666,21 @@ func TestNewLiveCatalog_SkipsMissingCreds(t *testing.T) {
 	assert.False(t, providerSet(cat.instances)[ProviderAWS], "skipped providers contribute no instances")
 }
 
+func TestNewLiveCatalog_EmptyFetchIsSkippedNotGPUSeeded(t *testing.T) {
+	// A fetch that returns zero instances (e.g. the AWS bulk price list is too
+	// large to parse within the timeout) must be treated as a skip. Otherwise
+	// seedStaticGPU back-fills only the provider's static GPU instances, leaving
+	// a GPU-only catalog that mis-recommends a GPU box for a plain workload.
+	cat, skipped, err := NewLiveCatalog(context.Background(),
+		&fakeFetcher{provider: ProviderAWS}, // 0 instances, no error
+	)
+	require.NoError(t, err)
+	require.Len(t, skipped, 1)
+	assert.Equal(t, ProviderAWS, skipped[0].Provider)
+	assert.Empty(t, cat.FindCheapestForProvider(ProviderAWS, InstanceRequirements{GPUCount: 1}),
+		"an empty fetch must not be back-filled with static GPU instances")
+}
+
 func TestNewLiveCatalog_SkipsOnTransientError(t *testing.T) {
 	// Bias is toward "skip and continue" — a partial catalog is more useful
 	// than no catalog, especially during pre-flight commands like `audit`.

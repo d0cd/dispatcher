@@ -51,6 +51,12 @@ func NewLiveCatalog(ctx context.Context, fetchers ...Fetcher) (*Catalog, []Skipp
 				r.skip = "no credentials configured"
 			case err != nil:
 				r.skip = fmt.Sprintf("transient: %s", truncateErr(err))
+			case len(instances) == 0:
+				// A fetch returning nothing (e.g. the AWS bulk list too large to
+				// parse in time) is a non-answer, not "this provider has no
+				// instances". Treating it as fetched would let seedStaticGPU
+				// back-fill a GPU-only catalog.
+				r.skip = "returned no instances"
 			default:
 				r.instances = instances
 			}
