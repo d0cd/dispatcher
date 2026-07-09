@@ -133,6 +133,15 @@ func TestGCPCreateVM_GPUImageOverride(t *testing.T) {
 	assert.NotContains(t, string(data), "ubuntu-os-cloud", "a current-project image must not carry --image-project ubuntu-os-cloud")
 }
 
+func TestAWSInstanceType_ConfidentialDefaultsToCapable(t *testing.T) {
+	// t3 does not support SEV-SNP; a confidential VM with no explicit type must
+	// default to an SEV-SNP-capable family.
+	assert.Equal(t, "t3.micro", awsInstanceType(VMOptions{}))
+	assert.Equal(t, "m6a.large", awsInstanceType(VMOptions{ConfidentialType: "sev-snp"}))
+	assert.Equal(t, "c5.large", awsInstanceType(VMOptions{InstanceType: "c5.large", ConfidentialType: "sev-snp"}),
+		"an explicit instance type is respected")
+}
+
 func TestAWSSGName(t *testing.T) {
 	assert.Equal(t, "dispatcher-run-abc",
 		awsSGName(VMOptions{Tags: map[string]string{"dispatcher-run-id": "run_abc"}}))

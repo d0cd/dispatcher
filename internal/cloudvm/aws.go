@@ -118,10 +118,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		}
 		image = resolved
 	}
-	instanceType := opts.InstanceType
-	if instanceType == "" {
-		instanceType = "t3.micro"
-	}
+	instanceType := awsInstanceType(opts)
 	if err := validateVMArgs(region, instanceType, image); err != nil {
 		return nil, fmt.Errorf("aws: %w", err)
 	}
@@ -236,6 +233,19 @@ chmod 700 %[1]s/.ssh
 chmod 600 %[1]s/.ssh/authorized_keys
 `, home, key, sshUser)
 	return userData + snippet
+}
+
+// awsInstanceType resolves the instance type: the explicit choice, else a
+// default. SEV-SNP requires an m6a/c6a/r6a family (t3 can't do it), so a
+// confidential VM with no explicit type gets an SEV-SNP-capable default.
+func awsInstanceType(opts VMOptions) string {
+	if opts.InstanceType != "" {
+		return opts.InstanceType
+	}
+	if opts.ConfidentialType != "" {
+		return "m6a.large"
+	}
+	return "t3.micro"
 }
 
 // awsSGName is the per-run security group name (unique per run id).
