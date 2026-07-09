@@ -89,17 +89,30 @@ tap. Chosen model (raw firecracker, zero new Go deps):
   `DestroyVM` = kill the VM (by config-path marker) + del tap + remove NAT + rm
   run dir. Privileged steps go through `sudo` (a dedicated KVM host).
 
-**Operator requirements (validated on a nested-virt GCP host):**
+**Operator requirements:**
 - `DISPATCHER_FC_KERNEL` and `DISPATCHER_FC_ROOTFS` point at the guest `vmlinux`
   and base ext4 rootfs; the preflight checks both exist.
 - **The base rootfs must ship `sshd` and `rsync`** (dispatcher rsyncs the source
-  in). The Firecracker CI `ubuntu-*.ext4` images boot but are stripped (no
-  `rsync`, no working `dpkg`) — a dispatcher base image must add both. Building
-  that base image is the remaining step before an end-to-end live run.
+  in) and a PID1 that starts `sshd`. The Firecracker CI `ubuntu-*.ext4` images
+  boot but are stripped (no `rsync`, no working `dpkg`), so build a base:
 
-**Status:** offline core (config schema + launch argv) validated by booting a
-real microVM on Firecracker v1.16.1; live lifecycle implemented and unit-tested;
-end-to-end `dispatcher run` pending a suitable base rootfs (above).
+  ```sh
+  # kernel: a firecracker CI vmlinux, e.g.
+  #   firecracker-ci/v1.10/x86_64/vmlinux-6.1.102
+  sudo debootstrap --variant=minbase \
+    --include=openssh-server,rsync,iproute2,ca-certificates \
+    jammy /tmp/rootfs http://archive.ubuntu.com/ubuntu/
+  # minbase has no init; a tiny /sbin/init mounts proc/sys/dev, brings up
+  # lo+eth0, ssh-keygen -A, then execs sshd and stays alive (PID1).
+  sudo sed -i 's/#*PermitRootLogin.*/PermitRootLogin yes/' /tmp/rootfs/etc/ssh/sshd_config
+  sudo truncate -s 1500M rootfs.ext4 && sudo mkfs.ext4 -F -d /tmp/rootfs rootfs.ext4
+  ```
+
+**Status:** validated **end-to-end** on a nested-virt GCP host — a real
+`dispatcher run --target firecracker-vm` provisions a microVM (per-run tap +
+NAT), SSHes in, rsyncs the workload, runs it in the guest, retrieves outputs,
+and tears down with no leftover tap/NAT/mount/state. Pure net helpers +
+config/argv are unit-tested.
 
 ---
 
