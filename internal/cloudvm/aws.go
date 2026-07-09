@@ -110,15 +110,21 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		return nil, err
 	}
 
+	instanceType := awsInstanceType(opts)
 	image := opts.Image
 	if image == "" {
-		resolved, err := resolveUbuntuAMI(ctx, region)
-		if err != nil {
-			return nil, fmt.Errorf("aws: %w", err)
+		if awsIsGPUMachine(instanceType) && awsGPUImage() != "" {
+			// GPU instances need the NVIDIA driver preinstalled; the operator
+			// supplies a driver-baked AMI.
+			image = awsGPUImage()
+		} else {
+			resolved, err := resolveUbuntuAMI(ctx, region)
+			if err != nil {
+				return nil, fmt.Errorf("aws: %w", err)
+			}
+			image = resolved
 		}
-		image = resolved
 	}
-	instanceType := awsInstanceType(opts)
 	if err := validateVMArgs(region, instanceType, image); err != nil {
 		return nil, fmt.Errorf("aws: %w", err)
 	}
@@ -233,6 +239,22 @@ chmod 700 %[1]s/.ssh
 chmod 600 %[1]s/.ssh/authorized_keys
 `, home, key, sshUser)
 	return userData + snippet
+}
+
+// awsGPUImage is the operator-provided driver-baked AMI for GPU instances.
+// Empty = fall back to stock Ubuntu (no driver).
+func awsGPUImage() string { return os.Getenv("DISPATCHER_AWS_GPU_IMAGE") }
+
+// awsIsGPUMachine reports whether instanceType is an AWS family that carries
+// attached GPUs (g4dn/g4ad/g5/g5g/g6 = various; p3/p4/p5 = training GPUs),
+// which need the NVIDIA driver preinstalled.
+func awsIsGPUMachine(instanceType string) bool {
+	for _, prefix := range []string{"g4dn.", "g4ad.", "g5.", "g5g.", "g6.", "g6e.", "p3.", "p4d.", "p4de.", "p5."} {
+		if strings.HasPrefix(instanceType, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // awsInstanceType resolves the instance type: the explicit choice, else a

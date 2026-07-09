@@ -165,6 +165,31 @@ func TestAWSInstanceType_ConfidentialDefaultsToCapable(t *testing.T) {
 		"an explicit instance type is respected")
 }
 
+// A GPU instance with DISPATCHER_AWS_GPU_IMAGE set must launch from that
+// driver-baked AMI, not the stock Ubuntu SSM lookup.
+func TestAWSCreateVM_GPUImageOverride(t *testing.T) {
+	binDir := t.TempDir()
+	argvFile := filepath.Join(binDir, "argv")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+		"case \"$*\" in\n" +
+		"  *describe-vpcs*) echo 'vpc-123' ;;\n" +
+		"  *create-security-group*) echo 'sg-123' ;;\n" +
+		"  *describe-instances*) echo '{\"Reservations\":[{\"Instances\":[{\"InstanceId\":\"i-1\",\"PublicIpAddress\":\"1.2.3.4\",\"State\":{\"Name\":\"running\"}}]}]}' ;;\n" +
+		"  *run-instances*) echo '{\"Instances\":[{\"InstanceId\":\"i-1\"}]}' ;;\n" +
+		"  *) echo '' ;;\n" +
+		"esac\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "aws"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DISPATCHER_AWS_GPU_IMAGE", "ami-gpubaked")
+
+	_, _ = NewAWSProvider("us-east-1").CreateVM(context.Background(),
+		VMOptions{Name: "n", InstanceType: "g4dn.xlarge", Tags: map[string]string{"dispatcher": "true"}})
+
+	data, _ := os.ReadFile(argvFile)
+	assert.Contains(t, string(data), "--image-id ami-gpubaked", "GPU instance uses the driver-baked AMI")
+	assert.NotContains(t, string(data), "ssm", "should skip the SSM Ubuntu lookup for a GPU AMI")
+}
+
 func TestAWSSGName(t *testing.T) {
 	assert.Equal(t, "dispatcher-run-abc",
 		awsSGName(VMOptions{Tags: map[string]string{"dispatcher-run-id": "run_abc"}}))
