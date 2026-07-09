@@ -112,6 +112,27 @@ func TestGCPCreateVM_GPUMachineGetsTerminatePolicy(t *testing.T) {
 	})
 }
 
+// A GPU machine needs the NVIDIA driver; when the operator supplies a
+// driver-baked image via DISPATCHER_GCP_GPU_IMAGE, GPU creates use it (from the
+// current project), not the stock ubuntu-os-cloud family.
+func TestGCPCreateVM_GPUImageOverride(t *testing.T) {
+	binDir := t.TempDir()
+	argvFile := filepath.Join(binDir, "argv")
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+		"cat <<'JSON'\n[{\"name\":\"n\",\"networkInterfaces\":[{\"accessConfigs\":[{\"natIP\":\"1.2.3.4\"}]}]}]\nJSON\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "gcloud"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("DISPATCHER_GCP_GPU_IMAGE", "dispatcher-gpu-l4")
+
+	_, err := NewGCPProvider("proj", "us-central1-a").CreateVM(context.Background(),
+		VMOptions{Name: "n", InstanceType: "g2-standard-4", Tags: map[string]string{"dispatcher": "true"}})
+	require.NoError(t, err)
+
+	data, _ := os.ReadFile(argvFile)
+	assert.Contains(t, string(data), "--image dispatcher-gpu-l4", "GPU create uses the driver-baked image")
+	assert.NotContains(t, string(data), "ubuntu-os-cloud", "a current-project image must not carry --image-project ubuntu-os-cloud")
+}
+
 func TestAWSUserDataWithSSHKey(t *testing.T) {
 	out := awsUserDataWithSSHKey("#!/bin/sh\necho hi\n", "ubuntu", "ssh-ed25519 AAAATEST comment\n")
 	assert.Contains(t, out, "#!/bin/sh", "original boot script is preserved")

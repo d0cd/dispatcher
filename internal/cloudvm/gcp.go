@@ -64,10 +64,17 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		}
 	}
 	image := opts.Image
+	customImage := false
 	if image == "" {
 		// Ubuntu 24.04 publishes arch-suffixed families; the bare
 		// "ubuntu-2404-lts" is not a resolvable family in ubuntu-os-cloud.
 		image = "ubuntu-2404-lts-amd64"
+		if gcpIsGPUMachine(instanceType) && gcpGPUImage() != "" {
+			// GPU VMs need the NVIDIA driver preinstalled; the operator supplies
+			// a driver-baked image (in the current project).
+			image = gcpGPUImage()
+			customImage = true
+		}
 	}
 	if err := validateVMArgs(zone, instanceType, image); err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
@@ -77,10 +84,13 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"compute", "instances", "create", opts.Name,
 		"--zone", zone,
 		"--machine-type", instanceType,
-		"--image-family", image,
-		"--image-project", "ubuntu-os-cloud",
 		"--format", "json",
 		"--quiet",
+	}
+	if customImage {
+		args = append(args, "--image", image) // resolves in the current project
+	} else {
+		args = append(args, "--image-family", image, "--image-project", "ubuntu-os-cloud")
 	}
 
 	args = append(args, gcpConfidentialArgs(opts)...)
@@ -222,6 +232,10 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 	}
 	return zone
 }
+
+// gcpGPUImage is the operator-provided driver-baked image for GPU VMs (in the
+// current project). Empty = fall back to stock Ubuntu (no driver).
+func gcpGPUImage() string { return os.Getenv("DISPATCHER_GCP_GPU_IMAGE") }
 
 // gcpIsGPUMachine reports whether instanceType is a GCP machine family that
 // carries attached GPUs (a2/a3 = A100/H100, g2 = L4), which mandates a
