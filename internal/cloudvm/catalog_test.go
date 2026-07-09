@@ -20,6 +20,18 @@ func TestCatalog_FindCheapest_Basic(t *testing.T) {
 	assert.Equal(t, ProviderHetzner, results[0].Provider)
 }
 
+func TestCatalog_FindCheapest_NonGPUExcludesGPUInstances(t *testing.T) {
+	// A workload that needs no GPU must never be placed on (and billed for) a
+	// GPU instance — even if one were cheaper — and GPU instances live in a
+	// separate, often-zero quota bucket, so recommending one is unlaunchable.
+	cat := NewCatalog()
+	results := cat.FindCheapest(InstanceRequirements{})
+	require.NotEmpty(t, results)
+	for _, r := range results {
+		assert.Zero(t, r.GPUCount, "non-GPU workload got a GPU instance: %s", r.Name)
+	}
+}
+
 func TestCatalog_FindCheapest_GPU(t *testing.T) {
 	cat := NewCatalog()
 	results := cat.FindCheapest(InstanceRequirements{MinVCPUs: 4, GPUCount: 1})

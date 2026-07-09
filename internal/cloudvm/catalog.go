@@ -54,6 +54,12 @@ func (c *Catalog) FindCheapest(req InstanceRequirements) []InstanceType {
 		if req.GPUCount > 0 && inst.GPUCount < req.GPUCount {
 			continue
 		}
+		// A non-GPU workload must never land on a GPU instance: it wastes money,
+		// and GPU instances sit in a separate (often zero) quota bucket, so the
+		// recommendation would be unlaunchable.
+		if req.GPUCount == 0 && inst.GPUCount > 0 {
+			continue
+		}
 		if req.GPUModel != "" && !strings.EqualFold(inst.GPUModel, req.GPUModel) {
 			continue
 		}
