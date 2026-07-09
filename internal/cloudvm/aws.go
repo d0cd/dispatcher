@@ -98,9 +98,6 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if region == "" {
 		region = a.defaultRegion
 	}
-	if opts.AllowSSHFrom != "" {
-		return nil, errFirewallUnsupported("aws")
-	}
 	// Validate tags before any CLI call (incl. the AMI lookup) so a crafted
 	// value is rejected pre-exec. AWS joins tag KV pairs with commas inside the
 	// --tag-specifications value, so a comma or `}` in a value would corrupt it.
@@ -129,6 +126,19 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		return nil, fmt.Errorf("aws: %w", err)
 	}
 
+	// The default VPC security group only permits intra-group traffic, so
+	// dispatcher would never reach the VM over SSH. Create a per-run group that
+	// admits SSH (from AllowSSHFrom, or anywhere — key-only auth, matching GCP's
+	// default posture) and delete it on teardown.
+	sshCIDR := opts.AllowSSHFrom
+	if sshCIDR == "" {
+		sshCIDR = "0.0.0.0/0"
+	}
+	sgID, err := awsCreateSSHSecurityGroup(ctx, region, awsSGName(opts), sshCIDR)
+	if err != nil {
+		return nil, err
+	}
+
 	var tagSpecs []string
 	for k, v := range opts.Tags {
 		tagSpecs = append(tagSpecs, fmt.Sprintf("{Key=%s,Value=%s}", k, v))
@@ -141,6 +151,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--image-id", image,
 		"--instance-type", instanceType,
 		"--count", "1",
+		"--security-group-ids", sgID,
 		"--tag-specifications", tagSpec,
 		"--output", "json",
 	}
@@ -171,6 +182,8 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	output, err := retryCLIOutput(ctx, "aws", "aws ec2 run-instances", args...)
 	if err != nil {
+		// No instance took ownership of the group; reclaim it now.
+		awsDeleteSecurityGroup(ctx, region, sgID)
 		return nil, err
 	}
 
@@ -223,6 +236,68 @@ chmod 700 %[1]s/.ssh
 chmod 600 %[1]s/.ssh/authorized_keys
 `, home, key, sshUser)
 	return userData + snippet
+}
+
+// awsSGName is the per-run security group name (unique per run id).
+func awsSGName(opts VMOptions) string {
+	id := opts.Tags["dispatcher-run-id"]
+	if id == "" {
+		id = opts.Name
+	}
+	return "dispatcher-" + adapter.SanitizeName(id)
+}
+
+// awsCreateSSHSecurityGroup creates a security group in the region's default VPC
+// admitting inbound SSH from cidr, and returns its group id. The group is
+// deleted on teardown (or if run-instances fails).
+func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string) (string, error) {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-vpcs", "--region", region,
+		"--filters", "Name=isDefault,Values=true", "--query", "Vpcs[0].VpcId", "--output", "text")
+	if err != nil {
+		return "", fmt.Errorf("aws describe default vpc: %w", err)
+	}
+	vpc := strings.TrimSpace(string(out))
+	if vpc == "" || vpc == "None" {
+		return "", fmt.Errorf("no default VPC in %s to place the SSH security group", region)
+	}
+	out, err = runCLI(ctx, "aws", "ec2", "create-security-group", "--region", region,
+		"--group-name", name, "--description", "dispatcher per-run SSH access",
+		"--vpc-id", vpc, "--query", "GroupId", "--output", "text")
+	if err != nil {
+		return "", fmt.Errorf("aws create security group: %w", err)
+	}
+	sg := strings.TrimSpace(string(out))
+	if _, err := runCLI(ctx, "aws", "ec2", "authorize-security-group-ingress", "--region", region,
+		"--group-id", sg, "--protocol", "tcp", "--port", "22", "--cidr", cidr); err != nil {
+		awsDeleteSecurityGroup(ctx, region, sg)
+		return "", fmt.Errorf("aws authorize ssh ingress: %w", err)
+	}
+	return sg, nil
+}
+
+// awsDeleteSecurityGroup removes a group (best-effort; a group in use can't be
+// deleted until its instance is gone, so callers that just terminated retry).
+func awsDeleteSecurityGroup(ctx context.Context, region, sgID string) {
+	_, _ = runCLI(ctx, "aws", "ec2", "delete-security-group", "--region", region, "--group-id", sgID)
+}
+
+// awsInstanceDispatcherSGs returns the dispatcher-created security group ids
+// attached to an instance (best-effort).
+func awsInstanceDispatcherSGs(ctx context.Context, region, vmID string) []string {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-instances", "--region", region,
+		"--instance-ids", vmID,
+		"--query", "Reservations[].Instances[].SecurityGroups[?starts_with(GroupName, `dispatcher-`)].GroupId",
+		"--output", "text")
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, f := range strings.Fields(string(out)) {
+		if f != "" && f != "None" {
+			ids = append(ids, f)
+		}
+	}
+	return ids
 }
 
 func (a *AWSProvider) waitForIP(ctx context.Context, instanceID, region string) (string, error) {
@@ -295,13 +370,36 @@ func (a *AWSProvider) getVMInRegion(ctx context.Context, vmID, region string) (*
 }
 
 func (a *AWSProvider) DestroyVM(ctx context.Context, vmID string) error {
+	// Capture the per-run security group before terminating; it can only be
+	// deleted once the instance releases it.
+	sgs := awsInstanceDispatcherSGs(ctx, a.defaultRegion, vmID)
 	if _, err := runCLI(ctx, "aws", "ec2", "terminate-instances",
 		"--region", a.defaultRegion,
 		"--instance-ids", vmID,
 	); err != nil {
 		return fmt.Errorf("aws ec2 terminate-instances failed: %w", err)
 	}
+	for _, sg := range sgs {
+		a.deleteSGWhenReleased(ctx, sg)
+	}
 	return nil
+}
+
+// deleteSGWhenReleased retries deleting a security group until the terminating
+// instance releases it (DependencyViolation clears once terminated). Bounded so
+// teardown can't hang.
+func (a *AWSProvider) deleteSGWhenReleased(ctx context.Context, sgID string) {
+	for i := 0; i < 18; i++ {
+		if _, err := runCLI(ctx, "aws", "ec2", "delete-security-group",
+			"--region", a.defaultRegion, "--group-id", sgID); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+	}
 }
 
 func (a *AWSProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {

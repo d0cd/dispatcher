@@ -133,6 +133,13 @@ func TestGCPCreateVM_GPUImageOverride(t *testing.T) {
 	assert.NotContains(t, string(data), "ubuntu-os-cloud", "a current-project image must not carry --image-project ubuntu-os-cloud")
 }
 
+func TestAWSSGName(t *testing.T) {
+	assert.Equal(t, "dispatcher-run-abc",
+		awsSGName(VMOptions{Tags: map[string]string{"dispatcher-run-id": "run_abc"}}))
+	// Falls back to the VM name when no run id tag is present.
+	assert.Equal(t, "dispatcher-myvm", awsSGName(VMOptions{Name: "myvm"}))
+}
+
 func TestAWSUserDataWithSSHKey(t *testing.T) {
 	out := awsUserDataWithSSHKey("#!/bin/sh\necho hi\n", "ubuntu", "ssh-ed25519 AAAATEST comment\n")
 	assert.Contains(t, out, "#!/bin/sh", "original boot script is preserved")
