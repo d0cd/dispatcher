@@ -11,20 +11,22 @@ gaps and new capabilities.
 
 Effort: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days. Impact is user-facing.
 
-## Garbage collection & cost audit  ← next
+## Garbage collection & cost audit  ✓ delivered
 
-`gc` today only enumerates orphaned **instances** (per-provider `ListResources`)
-and destroys them. It misses every other billable/leftover resource type —
-**disks, images, snapshots, static IPs, security groups** — which are the quiet
-ongoing fees (a driver-baked GPU image; a leaked per-run SG). And it only ever
-*destroys*; it never *warns* with a cost estimate. Build a **provider-pluggable
-orphan + cost audit**: each provider enumerates all dispatcher-tagged billable
-resources; the core flags orphans (no active run) + age + estimated `$/mo`
-(reuse `internal/cost` rate cards), then reaps or warns loudly when orphans exist
-or ongoing spend crosses a threshold — surfaced in `gc --dry-run`/`status`, not
-only on demand. Subsumes the per-run-SG-teardown leak (gc reaps leftover SGs
-independent of instance-discovery timing). Must plug cleanly across **all**
-current and future backends. | M | High |
+`gc` is now a provider-pluggable three-tier audit: **orphan** (dispatcher-owned,
+run gone → reaped), **standing** (owned, no run → kept & listed), **external**
+(not owned → listed only, never touched — the `dispatcher=true` tag is the hard
+reap boundary). Each provider's `resourceEnumerator` surfaces its idle-billable
+resources with an estimated `~$/mo` and a total-ongoing figure: GCP (instances,
+disks, images, snapshots, IPs), AWS (instances, EBS, snapshots, EIPs, per-run
+SGs), Azure (VMs, disks, IPs, snapshots), Hetzner (servers, volumes, IPs,
+snapshots, per-run firewalls). Per-run SGs/firewalls are now tagged at creation
+so leaked ones are reapable, and `az vm delete`'s satellite-resource leak (OS
+disk + public IP) is fixed at the source via a teardown cascade. Uncatalogued
+instances render `cost unknown` rather than $0.
+
+Remaining polish: warn when ongoing spend crosses a threshold (surface in
+`status`, not only on demand); wire GPU long-tail pricing to the live catalog.
 
 ## Provider parity
 
@@ -139,11 +141,9 @@ TODO/FIXME/panic debt.
 
 ## Suggested order
 
-1. **Garbage collection & cost audit** — provider-pluggable orphan/cost sweep;
-   high value, and the design generalizes to every current + future backend.
-2. **Confidential: live evidence fetch** — the real-guarantee gate; then MAA
+1. **Confidential: live evidence fetch** — the real-guarantee gate; then MAA
    capture (when Azure capacity frees) and the AWS VLEK path.
-3. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
+2. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
    (establishes the REST `Provider` pattern + cheap GPU).
-4. **Low-latency** — cloud-native fast backend + startup-latency feasibility.
-5. **CI live-provider lane** and **shell completion**.
+3. **Low-latency** — cloud-native fast backend + startup-latency feasibility.
+4. **CI live-provider lane** and **shell completion**.
