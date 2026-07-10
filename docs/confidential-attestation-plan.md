@@ -138,9 +138,29 @@ the TEE. This closes the host-relay gap the raw SSH channel leaves open.
 
 ## MVP scope + sequencing
 
-1. **GCP Confidential Space, end-to-end** — agent (container), CS attestation
-   JWT → `verifyJWS` + digest allowlist + nonce binding, wire fetch, `isReady`,
-   seal-to-`Kpub`. **Live-validate on real hardware.** First real guarantee.
+**Progress:** the verification path is built + tested + **golden-validated on a
+real token** (`TestGolden_CSToken`): a live CS VM (SEV, secure boot) ran a
+container that requested an OIDC token bound to a per-run nonce, and
+`verifyCSToken` verified it against Google's live JWKS — signature, issuer,
+`eat_nonce`, `GCP_AMD_SEV`/`CONFIDENTIAL_SPACE`/debug-off, and the image digest
+all check. HPKE sealing is built. **Remaining: the run integration** — a
+container-based execution path (CS is container-shaped, no SSH), wiring the
+`csFetch` to the teeserver socket during a run, flipping GCP's registration to
+`csAttester` + `isReady`, and sealing secrets to the channel key.
+
+> **CS capture recipe (validated):** enable `confidentialcomputing` +
+> `artifactregistry`; push a container that POSTs
+> `{"audience","token_type":"OIDC","nonces":[<hex nonce>]}` to
+> `/run/container_launcher/teeserver.sock`; the hardened image **requires**
+> `LABEL tee.launch_policy.allow_env_override` (per-run nonce) and
+> `tee.launch_policy.log_redirect=always` (to read the token); provision
+> `--confidential-compute-type=SEV --shielded-secure-boot` from
+> `confidential-space-images/confidential-space` with
+> `tee-image-reference`/`tee-container-log-redirect`/`tee-env-*` metadata; read
+> the token from the serial console / Cloud Logging.
+
+1. **GCP Confidential Space, end-to-end** — verifier + golden capture ✅ done;
+   remaining = the container run-integration + seal-to-`Kpub`. First real guarantee.
 2. **Secret sealing (R9)** generalized (used by #1, reused by the rest).
 3. **AWS raw SEV-SNP + VLEK** — agent (`/dev/sev-guest`), pinned image +
    measurement capture, VLEK path, cc-5/cc-6.
