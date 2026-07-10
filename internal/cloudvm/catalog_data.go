@@ -12,6 +12,7 @@ var defaultInstances = []InstanceType{
 	{Name: "cpx31", Provider: ProviderHetzner, VCPUs: 4, MemoryGB: 8, PricePerHour: 0.015, Arch: "x86_64"},
 	{Name: "cpx41", Provider: ProviderHetzner, VCPUs: 8, MemoryGB: 16, PricePerHour: 0.029, Arch: "x86_64"},
 	{Name: "cpx51", Provider: ProviderHetzner, VCPUs: 16, MemoryGB: 32, PricePerHour: 0.057, Arch: "x86_64"},
+	{Name: "cax11", Provider: ProviderHetzner, VCPUs: 2, MemoryGB: 4, PricePerHour: 0.006, Arch: "arm64"},
 	{Name: "cax21", Provider: ProviderHetzner, VCPUs: 4, MemoryGB: 8, PricePerHour: 0.008, Arch: "arm64"},
 	{Name: "cax31", Provider: ProviderHetzner, VCPUs: 8, MemoryGB: 16, PricePerHour: 0.015, Arch: "arm64"},
 	{Name: "cax41", Provider: ProviderHetzner, VCPUs: 16, MemoryGB: 32, PricePerHour: 0.029, Arch: "arm64"},

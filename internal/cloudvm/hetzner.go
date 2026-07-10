@@ -117,7 +117,7 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 			return nil, err
 		}
 		fwName = firewallName(opts)
-		if out, e := exec.CommandContext(ctx, "hcloud", hetznerFirewallCreateArgs(fwName)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already") {
+		if out, e := exec.CommandContext(ctx, "hcloud", hetznerFirewallCreateArgs(fwName, opts.Tags)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already") {
 			return nil, fmt.Errorf("hcloud firewall create: %s: %w", string(out), e)
 		}
 		if out, e := exec.CommandContext(ctx, "hcloud", hetznerFirewallRuleArgs(fwName, opts.AllowSSHFrom)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already") {

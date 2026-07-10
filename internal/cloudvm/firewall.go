@@ -59,9 +59,15 @@ func errFirewallUnsupported(provider string) error {
 	return fmt.Errorf("--allow-ssh-from is not yet supported for %s; restrict SSH at the account/VPC level (security group / NSG) instead", provider)
 }
 
-// hetznerFirewallCreateArgs builds `hcloud firewall create`.
-func hetznerFirewallCreateArgs(name string) []string {
-	return []string{"firewall", "create", "--name", name}
+// hetznerFirewallCreateArgs builds `hcloud firewall create`. The run's
+// dispatcher labels are attached so gc can recognize and reap a leaked
+// per-run firewall (labels are validated at the boundary before creation).
+func hetznerFirewallCreateArgs(name string, labels map[string]string) []string {
+	args := []string{"firewall", "create", "--name", name}
+	for k, v := range labels {
+		args = append(args, "--label", fmt.Sprintf("%s=%s", k, v))
+	}
+	return args
 }
 
 // hetznerFirewallRuleArgs builds `hcloud firewall add-rule` permitting inbound

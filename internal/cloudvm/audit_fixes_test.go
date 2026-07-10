@@ -158,7 +158,7 @@ func TestFirewallNameFromString(t *testing.T) {
 }
 
 func TestHetznerFirewallArgs(t *testing.T) {
-	assert.Equal(t, []string{"firewall", "create", "--name", "fw1"}, hetznerFirewallCreateArgs("fw1"))
+	assert.Equal(t, []string{"firewall", "create", "--name", "fw1"}, hetznerFirewallCreateArgs("fw1", nil))
 	rule := hetznerFirewallRuleArgs("fw1", "203.0.113.4/32")
 	assert.Contains(t, rule, "--source-ips")
 	assert.Contains(t, rule, "22")
