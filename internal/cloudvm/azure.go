@@ -202,6 +202,12 @@ func (a *AzureProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error)
 }
 
 func (a *AzureProvider) DestroyVM(ctx context.Context, vmID string) error {
+	// `az vm delete` removes only the VM resource, leaving its auto-created OS
+	// disk, NIC, public IP, and NSG behind — the disk and IP keep billing.
+	// Capture their ids before deleting the VM, then cascade-delete them in
+	// dependency order so teardown doesn't leak.
+	assoc := a.gatherVMResources(ctx, vmID)
+
 	if _, err := runCLI(ctx, "az", "vm", "delete",
 		"--resource-group", a.resourceGroup,
 		"--name", vmID,
@@ -210,6 +216,8 @@ func (a *AzureProvider) DestroyVM(ctx context.Context, vmID string) error {
 	); err != nil {
 		return fmt.Errorf("az vm delete failed: %w", err)
 	}
+
+	a.deleteAssociatedResources(ctx, assoc)
 	return nil
 }
 
