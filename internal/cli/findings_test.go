@@ -459,6 +459,21 @@ func TestGC_ExternalResourceListedNeverReaped(t *testing.T) {
 	assert.Equal(t, "team-nfs-snapshot", report.External[0].ResourceID)
 }
 
+// A running instance is never free, so an unknown (uncatalogued, e.g. an exotic
+// GPU size) instance cost must render as "cost unknown", not silently $0 —
+// otherwise the costliest thing to leak looks free. Free-ish resources (a tiny
+// disk) with no cost render nothing.
+func TestResourceCostLabel(t *testing.T) {
+	assert.Equal(t, " ~$24.80/mo",
+		resourceCostLabel(adapter.ResourceInfo{Kind: adapter.ResourceInstance, MonthlyUSD: 24.8}))
+	assert.Equal(t, " (cost unknown)",
+		resourceCostLabel(adapter.ResourceInfo{Kind: adapter.ResourceInstance, MonthlyUSD: 0}))
+	assert.Equal(t, " ~$0.40/mo",
+		resourceCostLabel(adapter.ResourceInfo{Kind: adapter.ResourceDisk, MonthlyUSD: 0.4}))
+	assert.Equal(t, "",
+		resourceCostLabel(adapter.ResourceInfo{Kind: adapter.ResourceFirewall, MonthlyUSD: 0}))
+}
+
 // ---- P2: --json output ----
 
 func TestJSONOutput_List(t *testing.T) {

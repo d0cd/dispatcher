@@ -156,10 +156,7 @@ before running for real, especially with long-lived state directories.`,
 						fmt.Fprintf(os.Stderr, ", run %s", res.RunID)
 					}
 					fmt.Fprint(os.Stderr, ")")
-					if res.MonthlyUSD > 0 {
-						fmt.Fprintf(os.Stderr, " ~$%.2f/mo", res.MonthlyUSD)
-					}
-					fmt.Fprintln(os.Stderr)
+					fmt.Fprintln(os.Stderr, resourceCostLabel(res))
 				}
 			}
 		}
@@ -250,6 +247,20 @@ before running for real, especially with long-lived state directories.`,
 	},
 }
 
+// resourceCostLabel formats a resource's monthly cost for display. A running
+// instance is never free, so an unknown (uncatalogued) instance cost renders as
+// "cost unknown" rather than an empty/implied-$0 — the costliest thing to leak
+// must never look free. Other kinds with no cost render nothing.
+func resourceCostLabel(r adapter.ResourceInfo) string {
+	if r.MonthlyUSD > 0 {
+		return fmt.Sprintf(" ~$%.2f/mo", r.MonthlyUSD)
+	}
+	if r.Kind == adapter.ResourceInstance {
+		return " (cost unknown)"
+	}
+	return ""
+}
+
 // renderResourceSection prints a titled list of resources with their monthly
 // cost and returns the section's cost subtotal. A nil/empty list prints
 // nothing and returns 0.
@@ -261,11 +272,7 @@ func renderResourceSection(title string, resources []adapter.ResourceInfo) float
 	fmt.Fprintf(os.Stderr, "\n%s\n", title)
 	for _, r := range resources {
 		subtotal += r.MonthlyUSD
-		fmt.Fprintf(os.Stderr, "  %s (%s %s)", r.ResourceID, r.Provider, r.Kind)
-		if r.MonthlyUSD > 0 {
-			fmt.Fprintf(os.Stderr, " ~$%.2f/mo", r.MonthlyUSD)
-		}
-		fmt.Fprintln(os.Stderr)
+		fmt.Fprintf(os.Stderr, "  %s (%s %s)%s\n", r.ResourceID, r.Provider, r.Kind, resourceCostLabel(r))
 	}
 	return subtotal
 }
