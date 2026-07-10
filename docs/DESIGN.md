@@ -39,6 +39,7 @@ dispatcher status <run-id>          # Show run status (reconnects to live VMs)
 dispatcher logs <run-id>            # Stream logs (reconnects to live VMs)
 dispatcher cost <run-id>            # Show cost tracking
 dispatcher diagnose <run-id>        # Explain why a run failed / stalled / overran
+dispatcher trace <run-id>           # Emit a Chrome/Perfetto phase-timeline trace
 dispatcher explain <plan-id>        # Detailed plan explanation
 dispatcher list                     # List all runs with status/cost/duration
 dispatcher history                  # Historical run statistics per target
@@ -55,7 +56,7 @@ dispatcher recover                  # Inventory cloud VMs whose local record is 
 dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to-date
 ```
 
-### Execution Targets (9 with adapters)
+### Execution Targets (10 with adapters)
 
 | Target | Kind | Adapter | Status |
 |--------|------|---------|--------|
@@ -63,11 +64,12 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 | local-docker | docker | DockerAdapter | Working (needs Docker) |
 | ssh | ssh | SSHAdapter | Working (needs SSH host) |
 | lima-vm | cloud-vm | CloudVMAdapter + LimaProvider | Working (needs limactl) |
+| firecracker-vm | local-vm | CloudVMAdapter + FirecrackerProvider | Working (needs a KVM host; live-validated) |
 | kubernetes | kubernetes | K8sAdapter | Working (needs kubectl) |
-| hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Built (needs hcloud CLI) |
-| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Built (needs aws CLI) |
-| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Built (needs gcloud CLI) |
-| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Built (needs az CLI) |
+| hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated (needs hcloud CLI) |
+| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated incl. GPU + confidential (needs aws CLI) |
+| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated incl. GPU + confidential (needs gcloud CLI) |
+| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Built (needs az CLI; live run gated on Azure capacity) |
 
 ### Key Features
 
@@ -77,9 +79,12 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 - **Risk analysis**: 10 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging)
 - **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [USAGE.md](USAGE.md#bring-your-own-hosts).
 - **Policy gates**: Per-run Unix-socket approval gate. In-process approver (terminal / `--yes`) races an external `dispatcher approve <id>`; filesystem perms (0700 dir, 0600 socket) are the auth boundary.
-- **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer
-- **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits
-- **Garbage collection**: `dispatcher gc` finds orphaned VMs across all cloud providers
+- **GPU workloads**: detection → feasibility → catalog/pricing → provisioning. GCP/AWS provision GPU instances from an operator driver-baked image (`DISPATCHER_{GCP,AWS}_GPU_IMAGE`); validated end-to-end (nvidia-smi in-VM on L4/T4). k8s uses `nvidia.com/gpu` limits.
+- **Confidential computing**: typed `confidential:` requirement → TEE-capable machine selection + provisioning (GCP SEV-SNP/AMD Milan, AWS `AmdSevSnp`, Azure ConfidentialVM) → SEV-SNP/MAA attestation verifiers with pinned AMD ARK roots. GCP SEV-SNP golden-validated on real hardware. See [confidential-computing.md](confidential-computing.md).
+- **Sharding / fan-out**: `shard:`/`aggregate:` config fans a workload across N shards (fixed `count` or a `discover` command), each a full dispatcher run; bounded-parallel engine with fail/retry/continue; artifact aggregation. See [low-latency-execution.md](low-latency-execution.md).
+- **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer.
+- **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits.
+- **Garbage collection**: `dispatcher gc` finds orphaned VMs across all cloud providers (extending to disks/images/SGs + cost warnings is next — see ROADMAP).
 - **AI planner**: Tool-use architecture with 5 tools (inspect_workload, evaluate_all_targets, find_cheapest_instances, get_run_history, inspect_run). Aitelier backend (Claude). Deterministic fallback when no LLM configured.
 
 ## Project Structure
@@ -95,10 +100,11 @@ internal/
   cost/               # Cost estimation (JSONL append-only history)
   policy/             # Policy engine and approval requirements
   risk/               # Risk analysis
-  run/                # Run state machine, executor, persistence, reconnection, cost tracking
+  run/                # Run state machine, executor, persistence, reconnection, cost tracking, trace
   approval/           # Per-run Unix-socket approval gate (audit Record embedded in run state)
   adapter/            # TargetAdapter interface, shared utilities, local/docker/ssh adapters
-  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima), watchdog, catalog
+  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima/Firecracker), watchdog, catalog, confidential attesters
+  shard/              # Shard planning (count/discover), bounded-parallel fan-out engine
   planner/            # AI planner, tool registry, aitelier backend, MCP server
   state/              # State-dir resolution + 0700 enforcement
   dlog/               # Structured JSON log file

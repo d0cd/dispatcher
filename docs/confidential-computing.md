@@ -1,6 +1,6 @@
 # Spec: Confidential computing (secure jobs)
 
-**Status:** Specification under review
+**Status:** Implemented — provisioning + both verifier cores + pinned ARK roots; GCP SEV-SNP golden-validated on real hardware. Live evidence fetch (the real-guarantee gate) pending.
 **Related:** ROADMAP Theme 6.
 
 Run a workload on a TEE-backed VM (hardware-encrypted memory) so the cloud
@@ -229,8 +229,12 @@ warned.
   against synthetic vectors.
 - **Provision hardening** — pinned vendor images (R7), confidential disk where
   offered + warn (R10/N1), explicit policy bits (R6).
-- **Format bind** — the SEV-SNP byte layout and MAA claim names are confirmed
-  against a real captured sample before the fetch is trusted.
+- **Format bind** — ✅ GCP SEV-SNP confirmed: a real captured **v4** report
+  verifies through the coded ABI offsets + VCEK→ASK→ARK-Milan (golden test
+  passes). Remaining: the **MAA claim names** (Azure capture, blocked on
+  capacity) and **AWS VLEK** — AWS masks the chip id and signs with **VLEK, not
+  VCEK**, so it needs a VLEK→ASK→ARK path (the report ABI + ARK/ASK-Milan roots
+  already match GCP).
 - **MAA TCB mapping** — MAA reports per-component SVNs, not one TCB; `minTCB` on
   the MAA path is a no-op until those are mapped.
 - **Revocation** (R4) — the ARK roots are pinned, but VCEK/cert revocation
@@ -254,7 +258,7 @@ Until the fetch lands, a confidential run is usable only with `attestation: off`
 | ✅ | Audit surfacing in `status`/`diagnose` (R13) | usability + audit |
 | 1 | Provision hardening: pinned vendor images, confidential disk + warn, policy bits | safe, known launch |
 | 2 | In-TEE agent evidence fetch: nonce + ephemeral in-TEE key, `REPORT_DATA=H(N‖key)` (vendor-image agent, measured); flips attesters to ready | bound, fresh evidence |
-| 3 | Format bind + revocation: confirm SEV-SNP layout / MAA claims against a captured sample, VCEK revocation, MAA per-component TCB | live trust |
+| ~ | Format bind + revocation: GCP SEV-SNP layout confirmed on a real capture ✅; remaining — MAA claims (Azure), AWS **VLEK** path, VCEK revocation, MAA per-component TCB | live trust |
 | 4 | Channel binding: trust the channel key only after R2 verifies; wrap secrets to it (R9) | no MITM/relay |
 
 Each verifier core is unit-tested against synthetic evidence; the binary/claim

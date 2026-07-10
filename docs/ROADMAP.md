@@ -1,141 +1,149 @@
 # Roadmap
 
-Remaining work on dispatcher, grouped by theme. The tool is mature — the
-provisioning/pricing pipeline, durable execution, the bring-your-own-hosts
-importer, and the audit backlog have all landed — so what's left is a coherent
-set of *completeness* gaps, plus new capabilities: confidential computing (in
-flight), efficiency/observability borrows, and low-latency burst execution.
+Remaining work, grouped by theme. dispatcher is mature — landed and
+live-validated: provisioning/pricing across Hetzner / AWS / GCP / Azure, plus
+Kubernetes, Lima, local process/docker, and **Firecracker microVMs**; durable
+execution; **GPU end-to-end** (GCP + AWS, via driver-baked images); confidential
+VM provisioning + SEV-SNP/MAA verifier cores (GCP SEV-SNP golden-validated on
+real hardware); **sharding/fan-out**; per-run SSH-key injection + per-run
+firewalls; and the bring-your-own-hosts importer. What's left is completeness
+gaps and new capabilities.
 
-Effort: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days. Impact is user-facing
-severity.
+Effort: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days. Impact is user-facing.
 
-## Theme 1 — Provisioning residuals
+## Garbage collection & cost audit  ← next
 
-| Item | Effort | Impact |
-|---|---|---|
-| ✅ Region/zone selection (`--region` / `region:`; flag wins). Region rides the plan (create) and `CloudVMState` (reconnect); providers gain `SetRegion` so **teardown hits the VM's region** (was leaking non-default-region AWS VMs). AWS resolves its region-correct AMI via SSM (no hand-maintained region→AMI map). Feasibility isn't region-filtered yet — GPU-SKU-per-region is a follow-up. | M | Medium |
+`gc` today only enumerates orphaned **instances** (per-provider `ListResources`)
+and destroys them. It misses every other billable/leftover resource type —
+**disks, images, snapshots, static IPs, security groups** — which are the quiet
+ongoing fees (a driver-baked GPU image; a leaked per-run SG). And it only ever
+*destroys*; it never *warns* with a cost estimate. Build a **provider-pluggable
+orphan + cost audit**: each provider enumerates all dispatcher-tagged billable
+resources; the core flags orphans (no active run) + age + estimated `$/mo`
+(reuse `internal/cost` rate cards), then reaps or warns loudly when orphans exist
+or ongoing spend crosses a threshold — surfaced in `gc --dry-run`/`status`, not
+only on demand. Subsumes the per-run-SG-teardown leak (gc reaps leftover SGs
+independent of instance-discovery timing). Must plug cleanly across **all**
+current and future backends. | M | High |
 
-## Theme 2 — Provider parity
-
-| Item | Effort | Impact |
-|---|---|---|
-| ✅ **Local** `outputs:` retrieval — `LocalAdapter.Artifacts` copies declared outputs into `runs/<id>/artifacts/` (was a no-op), path-validated, dir-tree aware. **docker/k8s remain**: `docker cp` needs the `--rm` lifecycle changed + mount-vs-image path resolution; `kubectl cp` needs the pod alive at collection — both more involved than they look, or at minimum warn when `outputs:` is set but unretrievable. | M | Medium |
-| Per-run firewall (`--allow-ssh-from`) is Hetzner-only; AWS security groups and Azure NSGs are natural fits. Opt-in and fail-closed today, so no silent insecurity. | L | Medium |
-| No spot/preemptible support, despite lowest-cost-success being the headline and the planner advising spot. Surface as "variable/evictable, not estimable" rather than a wrong precise price. | L | Medium |
-| **AWS SSH readiness should verify auth, not just TCP.** `WaitForSSH` polls port 22 then sleeps 10s, but the AWS key is installed by user-data at boot; on a slower-booting instance (observed on a confidential m6a) the key may not be in `authorized_keys` yet when rsync runs, failing with SSH exit 255. Wait for an actual key-authenticated SSH, or verify the key landed, before rsync. | S | Medium |
-| **AWS per-run SG teardown robustness.** The per-run security group is deleted by discovering it from the instance at teardown; a run that fails mid-flight (or an instance that terminates slowly) can leave the SG behind (non-billing, but clutter — and `gc` doesn't reap SGs). Persist the SG id in the run state and delete by id, independent of instance discovery. | S | Low |
-| **Runaway-cost detection + warning.** `gc` only enumerates orphaned *instances* (via provider `ListResources`) and *destroys* them — it misses orphaned **disks / images / snapshots / static IPs** (the quiet ongoing fees; a driver-baked GPU image is a real example) and never *warns* with a cost estimate. Build a cost/orphan audit: enumerate all dispatcher-tagged billable resource types per provider, flag orphans + age + estimated `$/mo` (reuse `internal/cost` rate cards), and warn loudly when orphans exist or ongoing spend crosses a threshold — surfaced in `gc --dry-run`/`status`, not only on demand. | M | High |
-
-## Theme 3 — Test coverage on cost-critical paths
-
-Most of this landed as it went — the roadmap below is kept for the residual.
+## Provider parity
 
 | Item | Effort | Impact |
 |---|---|---|
-| ✅ Executor transient-retry path — covered (`executor_retry_test.go`). | M | High |
-| ✅ `startLongRunning` (durable handoff + initial watchdog TTL) — 78.6% covered. | M | High |
-| ✅ Watchdog SSH argv builder (`sshCmdArgs`) — 100% (`watchdog_argv_test.go`); the `StrictHostKeyChecking` MITM defense is pinned. | S | High |
-| ✅ Runtime/parse logic — `parseDockerInspect` 100%, `RuntimeCommand`/`runtimeCommand` 100%; the docker adapter now has tests. | M | Medium |
-| Residual: `FailureDetails` (the `docker inspect` exec glue) and each provider's `WaitReady` are still 0% — both need a command seam or a live SSH host to exercise, low value to force. Provider create argv is now pinned for confidential/region flags. | M | Low |
+| **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. At minimum, warn when `outputs:` is set but unretrievable. | M | Medium |
+| **Azure per-run firewall** — AWS (per-run SG) and Hetzner inject SSH ingress; `az vm create` opens tcp/22 by default so it works, but `--allow-ssh-from` isn't honored on Azure (an NSG rule). | S | Low |
+| **Spot/preemptible support** — lowest-cost-success is the headline and the planner advises spot, but there's no spot provisioning. Surface as "variable/evictable, not estimable" rather than a wrong precise price. | L | Medium |
 
-## Theme 4 — UX & docs polish
+## Confidential computing (secure jobs)
+
+Design: [confidential-computing.md](confidential-computing.md). Provisioning
+(GCP SEV-SNP + AMD Milan pin, AWS `AmdSevSnp`, Azure ConfidentialVM), the typed
+`confidential:` model, verifier cores, and pinned AMD ARK roots have landed; the
+**GCP SEV-SNP golden capture is validated on real hardware** (a real v4 report
+verifies through VCEK→ASK→ARK). Remaining:
+
+| Item | Effort | Impact |
+|---|---|---|
+| **Live evidence fetch** — the measured guest-agent binding the per-run nonce + in-TEE key (`REPORT_DATA=H(N‖key)`) and returning the report/token, flipping the attesters to *ready*. The remaining gate to a real guarantee. | L | High |
+| **MAA golden capture (Azure)** + **AWS VLEK verifier path** — MAA capture is blocked on Azure compute capacity. AWS SEV-SNP masks the chip id and signs with **VLEK, not VCEK** (confirmed live on an m6a/EPYC-7R13); the report ABI + ARK/ASK-Milan roots match GCP, but verifying AWS needs a **VLEK→ASK→ARK** path (VLEK is CSP-provided, not KDS-fetchable). | M | Medium |
+| **Secret wrapping (R9)** — source/secrets only into the proven TEE; VCEK revocation; MAA per-component TCB. | M | High |
+| **AWS live pricing** — the EC2 bulk price list is ~479 MB and rarely parses in the plan timeout (now correctly skipped → static/rate-card fallback). Replace with the lightweight Price List Query API (`get-products`). | M | Low |
+| Nitro Enclaves / k8s Confidential Containers — different, larger models. Out of scope until demand. | — | — |
+
+## Low-latency burst execution
+
+Design: [low-latency-execution.md](low-latency-execution.md). The **Firecracker
+microVM backend** (tap/NAT networking, per-run rootfs + key injection) and
+**sharding/fan-out** (`shard:`/`aggregate:`, count + discover, bounded-parallel
+engine, output aggregation) have landed and are live-validated. Remaining:
+
+| Item | Effort | Impact |
+|---|---|---|
+| **Cloud-native fast backend** — prebaked images / warm pools on the existing clouds to cut boot from minutes toward seconds. | M | Medium |
+| **Startup-latency feasibility** — a latency dimension so the planner prefers fast backends for short jobs, VMs for long ones. | S | Medium |
+| **Shard refinements** — discover-mode on docker/cloud (per-shard item-file staging; local works today); LPT scheduling — reorder assignments by `cost/history.go` durations once per-shard history accrues. | M | Low |
+
+## Candidate backends
+
+Today: Hetzner / AWS / GCP / Azure (cloud VMs), Kubernetes, Lima, local
+process/docker, and Firecracker (local microVM). The bar for a *new* provider
+is that it adds something the current set lacks — **cheaper/more-available GPU**,
+a **free tier** for CI/testing, a distinct **accelerator/region**, or a lower
+price floor. "Another general VM cloud" is low value: Hetzner already anchors
+cheap general compute.
+
+**Effort is set by the access shape.** Every backend today shells out to a
+provider CLI (`hcloud`/`aws`/`gcloud`/`az`). Candidates split three ways, and
+the first REST provider is the real investment (it establishes an HTTP-based
+`Provider` pattern the rest reuse):
+
+| Provider | Access | Fits cloud-VM adapter? | Distinct value | Effort |
+|---|---|---|---|---|
+| **Oracle Cloud (OCI)** | `oci` CLI, SSH VMs | ✅ near-identical to AWS/GCP | Large always-free tier (Ampere ARM) for CI; AMD SEV confidential; cheap ARM | M |
+| **Vultr** | `vultr-cli` + API, SSH VMs | ✅ | Cheap general + many regions; some GPU | M (low) |
+| **Lambda Cloud** | REST API (no rich CLI), SSH VMs | ~ VM lifecycle fits, but HTTP not CLI | On-demand H100/A100 well below hyperscaler list, often more available | M (first REST adapter) |
+| **RunPod** | REST/GraphQL + CLI, SSH-able pods | ~ container/VM hybrid | Very cheap community-cloud GPUs, per-second billing; burst GPU | M–L |
+| **Thunder Compute** | `tnr` CLI, SSH VMs | ✅ | Cheap GPU (GPU-over-TCP); newer/less proven | M (immature) |
+| **Modal** | Python SDK, serverless sandboxes | ❌ submit-and-invoke (k8s-shaped, no SSH) | Sub-second sandboxes, autoscale; adds a Python dep | L |
+
+**Why this matters (validated in provider bring-up):** hyperscaler GPU is
+expensive ($0.5–3.7/h), **quota-gated** (starts at 0; hours-to-days to approve;
+Azure new subs are capacity-restricted), and **stockout-prone** (L4/n2d shopping
+across zones). The cheap-GPU specialists sidestep all three — the strongest
+argument to prioritize them over more general-compute clouds.
+
+**Suggested order:** (1) **Oracle** — highest value/effort: mirrors the existing
+CLI adapter, free tier gives a no-cost CI lane + a second AMD-SEV confidential
+target. (2) **Lambda Cloud** — highest-value GPU add; builds the reusable REST
+`Provider` pattern. (3) **RunPod** — cheapest burst GPU once REST exists.
+(4) **Vultr / Thunder** — opportunistic. (5) **Modal** — separate serverless
+track, not a VM provider.
+
+GPU backends reuse the driver-baked-image mechanism already built
+(`DISPATCHER_GCP_GPU_IMAGE` / `DISPATCHER_AWS_GPU_IMAGE`); most specialists ship
+GPU-driver images by default, so this is often simpler than the hyperscalers.
+
+## CI
+
+CI runs gofmt / vet / build / `test -race`, a coverage report, binary smoke, a
+non-blocking `govulncheck`, and e2e lanes (`kind` + terraform + localhost ssh,
+main-push/`workflow_dispatch`). Remaining:
+
+| Item | Effort | Impact |
+|---|---|---|
+| **Live-provider integration lane** — opt-in, credentialed, manual/scheduled; exercise one real cloud's create/wait/destroy. Gate behind secrets so it never runs on forks/PRs. | L | Medium |
+| **Coverage floor** on cost/security-critical packages (cloudvm, adapter, run, target) — off today to avoid flaky reds until baselines are pinned. | S | Medium |
+| **staticcheck** — 4 pre-existing findings to clean first (2 `ST1005` in `lima.go`, 1 `ST1005` in `run.go`, 1 `U1000` in `runtime.go`). | S | Medium |
+| **Release-binary smoke** (`--version`/`--help`) + GoReleaser dry-run if binaries are offered. | S | Low |
+
+## UX polish
 
 | Item | Effort | Impact |
 |---|---|---|
 | Shell completion ships but is inert — no `ValidArgsFunction` for run-ids, target-ids, or enum flags. | M | Medium |
-| ✅ `--json` on `history` / `gc` / `recover` — all three now emit structured output (`gc --json` requires `--dry-run`/`--yes` since a prompt can't run with JSON). | M | Low |
 
-## Theme 5 — Complete CI
+## Test-coverage residual
 
-CI runs gofmt / vet / build / `test -race`, plus (now) a coverage report, a
-binary build+smoke, and a non-blocking `govulncheck`. Remaining:
-
-| Item | Effort | Impact |
-|---|---|---|
-| ✅ **e2e lanes wired** — an `e2e` CI job stands up a `kind` cluster (`helm/kind-action`), `setup-terraform`, and passwordless localhost ssh, then runs `k8se2e` / `tfe2e` / `sshe2e`. Each test skips if its prereq is absent. Runs on main-push + `workflow_dispatch` (not every PR) until proven stable, so it can't block PRs on an unverified lane. | M | High |
-| **A live-provider integration lane** (opt-in, credentialed, manual/scheduled) exercising at least one real cloud provider's create/wait/destroy against the actual CLI. Gate behind secrets so it never runs on forks/PRs. | L | Medium |
-| ✅ **Coverage reporting** — CI prints the total; a per-package *floor* on cost/security-critical packages (cloudvm, adapter, run, target) is still open (kept off to avoid flaky reds until baselines are pinned). | S | Medium |
-| ✅ **govulncheck** job (non-blocking so a fresh stdlib advisory doesn't red the build pre-patch). **staticcheck** is deferred: 4 pre-existing findings (2 `ST1005` in `lima.go` — proper-noun false positives, 1 `ST1005` in `run.go`, 1 `U1000` unused var in `runtime.go`) would need cleanup first. | S | Medium |
-| **Build & smoke-test the release binary** (`--version` / `--help` smoke run); if downloadable binaries are offered, a GoReleaser dry-run. | S | Low |
-
-## Theme 6 — Confidential computing (secure jobs)
-
-Run a workload on a TEE-backed VM (hardware-encrypted memory) of a requested type
-**and prove it via attestation**. Design: [confidential-computing.md](confidential-computing.md).
-The deterministic-core gate (requirement/capability/feasibility) shipped as a
-boolean; the rest evolves it to the typed model below.
-
-| Item | Effort | Impact |
-|---|---|---|
-| ✅ Deterministic core: `confidential` requirement + capability + feasibility rejection (shipped as a bool). | M | Medium |
-| ✅ **Typed model** — top-level `confidential: {type, attestation, measurements, minTCB}`; typed feasibility (mirrors GPU-model matching). | S | Medium |
-| ✅ **Provisioning** — per-provider `CreateVM` flags (GCP `--confidential-compute-type` + `--min-cpu-platform="AMD Milan"` for SEV-SNP, AWS `AmdSevSnp=enabled`, Azure `ConfidentialVM`), argv-tested; confidential-capable builtins/catalog by type; Hetzner/Lima rejected. | M | Medium |
-| ✅ **Verifier cores + trust anchor** — SEV-SNP report/chain + MAA token verifiers (stdlib, synthetic-tested); pinned AMD ARK roots (Milan/Genoa/Turin, embedded from KDS); measurement allowlist + minTCB; readiness-gated registration (fails closed *before* provisioning); audit surfacing in `status`/`diagnose` (R13). | L | High |
-| **Live evidence fetch** — the measured guest-agent that binds the per-run nonce + in-TEE key (`REPORT_DATA=H(N‖key)`) and returns the report/token, flipping the attesters to *ready*. Needs a live confidential VM (see `experiments/confidential-attestation`). The remaining gate to a real guarantee. | L | High |
-| **Format-bind + secret wrapping** — run the capture experiment (GCP now emits v4 SEV-SNP reports) to pin the ABI/claim layout as golden vectors; then secret wrapping (R9 — source/secrets only into the proven TEE), VCEK revocation, MAA per-component TCB. | M | High |
-| **AWS SEV-SNP support (VLEK).** Live capture on an m6a (EPYC 7R13/Milan) confirmed the SEV-SNP report/report-data/measurement/TCB parse identically to GCP, **but AWS masks the chip id and signs with VLEK, not VCEK** — so the per-chip VCEK-from-KDS chain (which GCP uses, and dispatcher's verifier is coded to) does not apply. To verify AWS confidential VMs, the verifier needs a VLEK→ASK→ARK path (VLEK is CSP-provided, not KDS-fetchable). Report ABI + ARK/ASK-Milan roots are already shared. | M | Medium |
-| **AWS live pricing.** The EC2 bulk price list is ~479 MB and rarely parses within the plan timeout, so the fetcher returns nothing (now correctly treated as a skip → static/rate-card fallback). Replace the bulk download with the lightweight Price List Query API (`get-products`) for real AWS pricing. | M | Low |
-| Nitro Enclaves / k8s Confidential Containers — different, larger models. Out of scope until demand. | — | — |
-
-## Theme 7 — Efficiency & observability (borrowed from imbue-ai/offload)
-
-`offload` is a parallel *test* runner, but several of its mechanics transfer to
-dispatcher's placer/runner model. (Its historical-duration feedback loop we
-already have — `internal/cost/history.go` records `ActualDuration`/`ActualCost`
-and `EstimateCostWithHistory` uses the median + a confidence recalibration.)
-
-| Item | Effort | Impact |
-|---|---|---|
-| ✅ **Per-phase run timeline + `dispatcher trace`** — each phase's entry time is stamped on the run state (`Timeline []PhaseMark`, seeded at `Created`, appended on every transition incl. `SetError`/`MarkTerminal`); `dispatcher trace <run-id>` emits Chrome/Perfetto trace JSON. The measurement foundation for the latency work (Theme 8). | M | High |
-| ✅ **Content-addressed build cache** — the docker adapter records a content digest (Dockerfile + source tree) as an image label and skips the rebuild when `:latest` already carries it. Single-image (no digest-tag accumulation). Cross-host/registry caching is a follow-up. | M | Medium |
-| ✅ **Flaky classification from history** — `HistoryStore.Flakiness` flags a workload+target with mixed pass/fail history; surfaced as a `flaky-history` risk in the planner's target evaluation. (Deterministic `plan` doesn't use history, so it's the planner path for now.) | M | Medium |
-| ✅ **Env-var expansion in `dispatcher.yaml`** (`${VAR}` / `${VAR:-default}`), applied in `LoadConfig` before the strict decode. Only the braced form expands; a bare `$VAR` is left for remote expansion. | S | Low |
-
-Not borrowed, deliberately: split-requeue **hedging** (speculative duplicate
-execution is unsafe for a single side-effecting workload — only relevant if
-fan-out lands), and offload's committed/merge-driver history (dispatcher's
-history is local state-dir, not shared).
-
-## Theme 8 — Low-latency burst execution
-
-`offload`'s superpower is fanning out across ~200 sub-second sandboxes;
-dispatcher's cloud VMs boot in *minutes*, so it's the wrong shape for short or
-bursty work. Two coupled pieces — plus design decisions to settle first, because
-this stretches dispatcher's identity from "place one workload well" toward "burst
-many."
-
-Design: [low-latency-execution.md](low-latency-execution.md). Decisions settled:
-backends built in order **Firecracker → cloud-native fast → Modal**; **fan-out is
-in-lane**, declared via a `shard:` config block (supporting both a fixed `count`
-and a `discover` command).
-
-| Item | Effort | Impact |
-|---|---|---|
-| **Firecracker microVM backend** — a `FirecrackerProvider` behind `CloudVMAdapter` (reuses SSH/rsync/runner/cleanup). Offline core (config-JSON + launch argv) is testable; the live launch needs a KVM host. | L | High |
-| **Cloud-native fast backend** — prebaked images / warm pools on the existing cloud providers to cut boot from minutes toward seconds. | M | Medium |
-| **Modal backend** — sub-second sandboxes via the modal CLI; weigh the external-dep cost against the 3-direct-dep minimum. | M | High |
-| **Startup-latency feasibility** — a latency dimension so the planner prefers fast backends for short jobs, VMs for long-running ones. | S | Medium |
-| ✅ **Sharding core** — `shard:`/`aggregate:` config → `ShardSpec`; `shard.Plan` (count + discover split), `shard.Discover`, `Assignment.Env`, and `shard.Engine` (bounded-parallel, fail/retry/continue, race-clean). All deterministic + tested. | L | High |
-| ✅ **Shard fan-out wired (count + discover)** — `runRun` branches to `runSharded`; each shard is a full dispatcher run with `SHARD_INDEX`/`SHARD_COUNT` injected via `WorkloadSpec.Env` (threaded through the 4 secret-handling env helpers), and discover-mode work items delivered via `SHARD_ITEMS_FILE`. Approval isn't bypassed. **Both modes verified end-to-end over local-process.** | L | High |
-| ✅ **Shard output aggregation** — each shard-run's artifacts dir is symlinked under `runs/<plan>-shards/shard-<index>` (one place, no copy). No-op for local (outputs in-place); real for cloud/ssh. | M | Medium |
-| **Shard refinements** — (1) discover-mode on docker/cloud (item file needs per-shard staging; local works today); (2) LPT scheduling — reorder assignments by `cost/history.go` durations once per-shard history accrues (engine runs index-order today). | M | Low |
-
-Depends on Theme 7's phase-trace (you can't optimize burst latency you can't
-measure) and reuses the existing duration history for scheduling.
+`FailureDetails` (the `docker inspect` exec glue) and each provider's `WaitReady`
+are still ~0% — both need a command seam or a live host to exercise; low value to
+force now that a live-provider lane is planned.
 
 ## Solid — no action
 
-Policy / risk / approval-gate concurrency tests; run-state durability (atomic +
-flocked writes, 0700 hardening, panic-recovery cleanup); the CLI/`--json`
-framework; provisioning/pricing/GPU wiring; durable execution (watchdog renewal,
-signal teardown, k8s deadline); the bring-your-own-hosts importer; and
-docs-vs-code alignment overall. No TODO/FIXME/panic debt.
+Policy / risk / approval-gate concurrency; run-state durability (atomic + flocked
+writes, 0700 hardening, panic-recovery cleanup); the CLI/`--json` framework;
+provisioning/pricing/GPU wiring; per-run SSH-key injection (GCP metadata / AWS +
+Azure key-values / user-data); durable execution (watchdog renewal, signal
+teardown, k8s deadline); sharding core + fan-out; the BYO-hosts importer. No
+TODO/FIXME/panic debt.
 
 ## Suggested order
 
-1. ✅ **Run timeline + `dispatcher trace` (Theme 7).** Shipped — the measurement foundation for the latency work.
-2. ✅ **Region/zone selection (Theme 1).** Shipped with correct teardown + AWS SSM AMI resolution.
-3. ✅ **Cost-critical coverage (Theme 3).** Retry, `startLongRunning`, `sshCmdArgs`, docker parse/runtime all covered; residual (`FailureDetails`/`WaitReady`) needs seams, low value.
-4. **Finish confidential attestation (Theme 6).** *On hold* — gated on a live GCP capture (format-bind experiment), then the evidence fetch + secret wrapping.
-5. **Complete CI (Theme 5).** Wire the e2e suites and a coverage floor so the above can't silently regress.
-6. **Low-latency burst execution (Theme 8).** Settle the backend/fan-out decisions first, then the sandbox adapter, then fan-out.
+1. **Garbage collection & cost audit** — provider-pluggable orphan/cost sweep;
+   high value, and the design generalizes to every current + future backend.
+2. **Confidential: live evidence fetch** — the real-guarantee gate; then MAA
+   capture (when Azure capacity frees) and the AWS VLEK path.
+3. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
+   (establishes the REST `Provider` pattern + cheap GPU).
+4. **Low-latency** — cloud-native fast backend + startup-latency feasibility.
+5. **CI live-provider lane** and **shell completion**.
