@@ -34,6 +34,7 @@ type azureVMResources struct {
 	nicIDs    []string
 	publicIPs []string
 	nsgs      []string
+	vnets     []string
 }
 
 // gatherVMResources reads a VM's associated resource ids (OS disk, NICs, and via
@@ -78,6 +79,9 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) azur
 				PublicIPAddress struct {
 					ID string `json:"id"`
 				} `json:"publicIPAddress"`
+				Subnet struct {
+					ID string `json:"id"`
+				} `json:"subnet"`
 			} `json:"ipConfigurations"`
 			NetworkSecurityGroup struct {
 				ID string `json:"id"`
@@ -90,6 +94,13 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) azur
 			if ipc.PublicIPAddress.ID != "" {
 				out.publicIPs = append(out.publicIPs, ipc.PublicIPAddress.ID)
 			}
+			// The subnet id embeds the VNet id (.../virtualNetworks/<v>/subnets/<s>).
+			if i := strings.Index(ipc.Subnet.ID, "/subnets/"); i >= 0 {
+				vnet := ipc.Subnet.ID[:i]
+				if !contains(out.vnets, vnet) {
+					out.vnets = append(out.vnets, vnet)
+				}
+			}
 		}
 		if nic.NetworkSecurityGroup.ID != "" {
 			out.nsgs = append(out.nsgs, nic.NetworkSecurityGroup.ID)
@@ -98,9 +109,20 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) azur
 	return out
 }
 
+func contains(s []string, v string) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 // deleteAssociatedResources deletes a VM's satellites in dependency order: NICs
 // (freed once the VM is gone), then the public IPs and NSGs they referenced,
-// then the OS disk. Best-effort — a leftover is surfaced by the gc enumerator.
+// then the OS disk, then the VNet. The VNet delete is best-effort and last: it
+// succeeds only for a per-run VNet the departing VM emptied, and harmlessly
+// fails (dependency in use) for a VNet still shared by other resources.
 func (a *AzureProvider) deleteAssociatedResources(ctx context.Context, r azureVMResources) {
 	ordered := append([]string{}, r.nicIDs...)
 	ordered = append(ordered, r.publicIPs...)
@@ -108,6 +130,7 @@ func (a *AzureProvider) deleteAssociatedResources(ctx context.Context, r azureVM
 	if r.osDiskID != "" {
 		ordered = append(ordered, r.osDiskID)
 	}
+	ordered = append(ordered, r.vnets...)
 	for _, id := range ordered {
 		_, _ = runCLI(ctx, "az", "resource", "delete", "--ids", id)
 	}

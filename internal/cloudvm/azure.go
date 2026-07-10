@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
@@ -77,10 +78,19 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 	instanceType := opts.InstanceType
 	if instanceType == "" {
 		instanceType = "Standard_B2s"
+		if opts.ConfidentialType != "" {
+			// B-series can't do confidential; DCadsv5 is AMD SEV-SNP capable.
+			instanceType = "Standard_DC2ads_v5"
+		}
 	}
 	image := opts.Image
 	if image == "" {
 		image = "Canonical:ubuntu-24_04-lts:server:latest"
+		if opts.ConfidentialType != "" {
+			// Confidential VMs require the CVM-generation image (separate SKU),
+			// not the plain server image.
+			image = "Canonical:ubuntu-24_04-lts:cvm:latest"
+		}
 	}
 	if err := validateVMArgs(location, instanceType, image); err != nil {
 		return nil, fmt.Errorf("azure: %w", err)
@@ -143,6 +153,15 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 
 	output, err := retryCLIOutput(ctx, "az", "az vm create", args...)
 	if err != nil {
+		// az masks a NotAvailableForSubscription error as a "content already
+		// consumed" CLI crash. Only in that case, probe the SKU to surface the
+		// real, actionable reason instead of the opaque crash.
+		if strings.Contains(err.Error(), "already consumed") {
+			if ok, reason := azureSKUAvailable(ctx, location, instanceType); !ok {
+				return nil, fmt.Errorf("azure: VM size %s is %s in %s — choose a different --size or region: %w",
+					instanceType, reason, location, err)
+			}
+		}
 		return nil, err
 	}
 
@@ -162,6 +181,42 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		CreatedAt: time.Now().UTC(),
 		Tags:      opts.Tags,
 	}, nil
+}
+
+// azureSKUAvailable reports whether the VM size is orderable in the location for
+// this subscription. Returns (true, "") when available or when the check itself
+// can't run (best-effort — never block a create on an inconclusive probe).
+func azureSKUAvailable(ctx context.Context, location, size string) (bool, string) {
+	out, err := runCLI(ctx, "az", "vm", "list-skus",
+		"--location", location, "--size", size,
+		"--resource-type", "virtualMachines", "--all", "--output", "json")
+	if err != nil {
+		return true, ""
+	}
+	var skus []struct {
+		Name         string `json:"name"`
+		Restrictions []struct {
+			ReasonCode string `json:"reasonCode"`
+		} `json:"restrictions"`
+	}
+	if json.Unmarshal(out, &skus) != nil {
+		return true, ""
+	}
+	for _, s := range skus {
+		if s.Name != size {
+			continue
+		}
+		for _, r := range s.Restrictions {
+			if r.ReasonCode == "NotAvailableForSubscription" {
+				return false, "not available for this subscription"
+			}
+			if r.ReasonCode != "" {
+				return false, r.ReasonCode
+			}
+		}
+		return true, ""
+	}
+	return true, "" // size not in the filtered list; don't block
 }
 
 func (a *AzureProvider) WaitReady(ctx context.Context, _ string, ip string, _ string) error {

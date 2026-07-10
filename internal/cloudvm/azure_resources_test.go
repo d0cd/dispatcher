@@ -30,7 +30,8 @@ func TestAzureDestroyVM_CascadesAssociatedResources(t *testing.T) {
 				"networkProfile":{"networkInterfaces":[{"id":"nic-1"}]}}`), true
 		}
 		if len(args) >= 3 && args[0] == "network" && args[1] == "nic" && args[2] == "show" {
-			return []byte(`{"ipConfigurations":[{"publicIPAddress":{"id":"ip-1"}}],
+			return []byte(`{"ipConfigurations":[{"publicIPAddress":{"id":"ip-1"},
+				"subnet":{"id":"/subscriptions/x/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet-1/subnets/default"}}],
 				"networkSecurityGroup":{"id":"nsg-1"}}`), true
 		}
 		return nil, false
@@ -41,10 +42,30 @@ func TestAzureDestroyVM_CascadesAssociatedResources(t *testing.T) {
 
 	assert.True(t, containsCall(*calls, "az", "vm", "delete", "--resource-group", "rg", "--name", "vm1", "--yes", "--force-deletion", "true"),
 		"the VM itself is deleted")
-	for _, id := range []string{"nic-1", "ip-1", "nsg-1", "disk-1"} {
+	// NIC/IP/NSG/disk plus the auto-created VNet (derived from the subnet id).
+	for _, id := range []string{"nic-1", "ip-1", "nsg-1", "disk-1",
+		"/subscriptions/x/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet-1"} {
 		assert.True(t, containsCall(*calls, "az", "resource", "delete", "--ids", id),
 			"associated resource %s must be cascade-deleted", id)
 	}
+}
+
+// A SKU restricted for the subscription is reported unavailable (so CreateVM can
+// surface a clear error instead of the CLI's masked crash); an unrestricted one
+// is available; an inconclusive probe defaults to available (never blocks).
+func TestAzureSKUAvailable(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) {
+		return []byte(`[{"name":"Standard_B2s","restrictions":[{"reasonCode":"NotAvailableForSubscription"}]}]`), nil
+	})
+	ok, reason := azureSKUAvailable(context.Background(), "eastus", "Standard_B2s")
+	assert.False(t, ok)
+	assert.Contains(t, reason, "subscription")
+
+	captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) {
+		return []byte(`[{"name":"Standard_D2s_v7","restrictions":[]}]`), nil
+	})
+	ok, _ = azureSKUAvailable(context.Background(), "eastus", "Standard_D2s_v7")
+	assert.True(t, ok)
 }
 
 func TestAzureProvider_ListResources_Argv(t *testing.T) {

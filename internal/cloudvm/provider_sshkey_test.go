@@ -135,6 +135,29 @@ func TestGCPCreateVM_GPUImageOverride(t *testing.T) {
 
 // Azure must inject dispatcher's per-run public key, not --generate-ssh-keys
 // (which makes Azure mint its own key that dispatcher doesn't hold).
+// A confidential Azure VM must boot the CVM-generation image and default to a
+// SEV-SNP-capable SKU — the plain server image / B-series can't do confidential.
+func TestAzureCreateVM_ConfidentialUsesCVMImageAndSKU(t *testing.T) {
+	binDir := t.TempDir()
+	argvFile := filepath.Join(binDir, "argv")
+	// Stub records argv and returns the vm-create JSON for every call; the
+	// list-skus pre-check unmarshals that non-array body to nothing and proceeds.
+	stub := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"" + argvFile + "\"\n" +
+		"echo '{\"id\":\"/subscriptions/x/rg/vm/n\",\"publicIpAddress\":\"1.2.3.4\"}'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "az"), []byte(stub), 0o755))
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err := NewAzureProvider("rg", "eastus").CreateVM(context.Background(),
+		VMOptions{Name: "n", ConfidentialType: "sev-snp", Tags: map[string]string{"dispatcher": "true"}})
+	require.NoError(t, err)
+
+	data, _ := os.ReadFile(argvFile)
+	s := string(data)
+	assert.Contains(t, s, "Canonical:ubuntu-24_04-lts:cvm:latest", "confidential must use the CVM image")
+	assert.Contains(t, s, "Standard_DC2ads_v5", "confidential must default to a SEV-SNP-capable SKU")
+	assert.Contains(t, s, "--security-type ConfidentialVM")
+}
+
 func TestAzureCreateVM_InjectsSSHKey(t *testing.T) {
 	binDir := t.TempDir()
 	argvFile := filepath.Join(binDir, "argv")
