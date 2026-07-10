@@ -151,14 +151,17 @@ the TEE. This closes the host-relay gap the raw SSH channel leaves open.
 Until #1 ships, confidential mode is honestly **"encrypted memory, unverified"**
 (`attestation: off`) and every `required` run fails closed.
 
-## Open decisions (need a call before building)
+## Decisions (approved)
 
-- **Raw vs vendor per provider** — recommend vendor for GCP/Azure, raw for AWS.
-  Confirm we're OK trusting GCP/Microsoft attestation services for those two.
-- **Container vs VM agent** — Confidential Space is container-shaped; that shifts
-  the GCP confidential workload model from "SSH into a VM" to "run a container in
-  a measured runtime." Decide whether confidential runs use a distinct execution
-  path.
-- **Sealing scheme** — HPKE (RFC 9180) vs NaCl sealed-box for seal-to-`Kpub`.
-- **Measurement update process** (raw path) — who re-captures + PRs the allowlist
-  on image rebuilds, and how it's tested.
+- **Raw vs vendor per provider** — ✅ **vendor for GCP/Azure** (trust GCP
+  Confidential Space / Microsoft MAA), **raw for AWS** (no clean managed
+  equivalent; needs the VLEK path).
+- **Container vs VM agent** — ✅ GCP confidential runs go through **Confidential
+  Space (container-shaped)** — a distinct execution path from the SSH-into-a-VM
+  model.
+- **Sealing scheme** — ✅ **HPKE (RFC 9180)** for seal-to-`Kpub` (`Kpub` = X25519).
+- **Measurement update process** (raw AWS path) — re-capture + PR the allowlist on
+  every image rebuild; a CI check pins the expected measurement per image digest.
+
+Cheap hardening from the security review is **done** (commit `4f74487`): MAA
+`exp`/`nbf`/`iss` checks, per-component TCB comparison, fixed-32-byte nonce.
