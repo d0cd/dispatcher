@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
@@ -97,7 +98,7 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) azur
 			// The subnet id embeds the VNet id (.../virtualNetworks/<v>/subnets/<s>).
 			if i := strings.Index(ipc.Subnet.ID, "/subnets/"); i >= 0 {
 				vnet := ipc.Subnet.ID[:i]
-				if !contains(out.vnets, vnet) {
+				if !slices.Contains(out.vnets, vnet) {
 					out.vnets = append(out.vnets, vnet)
 				}
 			}
@@ -107,15 +108,6 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) azur
 		}
 	}
 	return out
-}
-
-func contains(s []string, v string) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 // deleteAssociatedResources deletes a VM's satellites in dependency order: NICs

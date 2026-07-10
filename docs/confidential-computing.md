@@ -236,8 +236,10 @@ warned.
   offered + warn (R10/N1), explicit policy bits (R6).
 - **Format bind** — ✅ GCP SEV-SNP confirmed: a real captured **v4** report
   verifies through the coded ABI offsets + VCEK→ASK→ARK-Milan (golden test
-  passes). Remaining: the **MAA claim names** (Azure capture, blocked on
-  capacity) and **AWS VLEK** — AWS masks the chip id and signs with **VLEK, not
+  passes). Remaining: the **MAA claim names** (Azure ConfidentialVM
+  provisioning is validated live; the golden capture needs the MAA JWKS
+  fetch/pinning + guest agent, not capacity) and **AWS VLEK** — AWS masks the
+  chip id and signs with **VLEK, not
   VCEK**, so it needs a VLEK→ASK→ARK path (the report ABI + ARK/ASK-Milan roots
   already match GCP).
 - **MAA TCB mapping** — MAA reports per-component SVNs, not one TCB; `minTCB` on

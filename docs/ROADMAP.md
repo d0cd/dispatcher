@@ -25,8 +25,15 @@ so leaked ones are reapable, and `az vm delete`'s satellite-resource leak (OS
 disk + public IP) is fixed at the source via a teardown cascade. Uncatalogued
 instances render `cost unknown` rather than $0.
 
-Remaining polish: warn when ongoing spend crosses a threshold (surface in
-`status`, not only on demand); wire GPU long-tail pricing to the live catalog.
+`dispatcher bill [--all] [--by-service] [--reconcile]` complements it with the
+authoritative per-cloud spend (Cost Explorer / Azure Cost Management / GCP
+BigQuery export), and `gc --warn-over <usd>` warns loudly when total ongoing
+cost crosses a threshold.
+
+Remaining polish: also surface the spend warning in `status` (not only on
+`gc`/`bill`); wire GPU long-tail pricing to the live catalog; and the
+lower-priority items surfaced by audit (Azure/GCP GC are scoped to the
+configured RG/project; Azure auto-created VNet handled best-effort).
 
 ## Provider parity
 
@@ -47,7 +54,7 @@ verifies through VCEK→ASK→ARK). Remaining:
 | Item | Effort | Impact |
 |---|---|---|
 | **Live evidence fetch** — the measured guest-agent binding the per-run nonce + in-TEE key (`REPORT_DATA=H(N‖key)`) and returning the report/token, flipping the attesters to *ready*. The remaining gate to a real guarantee. | L | High |
-| **MAA golden capture (Azure)** + **AWS VLEK verifier path** — MAA capture is blocked on Azure compute capacity. AWS SEV-SNP masks the chip id and signs with **VLEK, not VCEK** (confirmed live on an m6a/EPYC-7R13); the report ABI + ARK/ASK-Milan roots match GCP, but verifying AWS needs a **VLEK→ASK→ARK** path (VLEK is CSP-provided, not KDS-fetchable). | M | Medium |
+| **MAA golden capture (Azure)** + **AWS VLEK verifier path** — Azure ConfidentialVM (SEV-SNP, vTPM, secure boot) provisioning is now **validated live** (`Standard_DC2ads_v5` + the CVM image), so MAA capture is unblocked *at the provisioning layer*; what's missing is the MAA JWKS fetch/pinning + the guest agent, not capacity. AWS SEV-SNP masks the chip id and signs with **VLEK, not VCEK** (confirmed live on an m6a/EPYC-7R13); the report ABI + ARK/ASK-Milan roots match GCP, but verifying AWS needs a **VLEK→ASK→ARK** path (VLEK is CSP-provided, not KDS-fetchable). | M | Medium |
 | **Secret wrapping (R9)** — source/secrets only into the proven TEE; VCEK revocation; MAA per-component TCB. | M | High |
 | **AWS live pricing** — the EC2 bulk price list is ~479 MB and rarely parses in the plan timeout (now correctly skipped → static/rate-card fallback). Replace with the lightweight Price List Query API (`get-products`). | M | Low |
 | Nitro Enclaves / k8s Confidential Containers — different, larger models. Out of scope until demand. | — | — |
@@ -142,7 +149,8 @@ TODO/FIXME/panic debt.
 ## Suggested order
 
 1. **Confidential: live evidence fetch** — the real-guarantee gate; then MAA
-   capture (when Azure capacity frees) and the AWS VLEK path.
+   capture (Azure ConfidentialVM provisioning already validated live) and the
+   AWS VLEK path.
 2. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
    (establishes the REST `Provider` pattern + cheap GPU).
 3. **Low-latency** — cloud-native fast backend + startup-latency feasibility.
