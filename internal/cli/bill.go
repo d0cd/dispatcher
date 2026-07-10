@@ -28,6 +28,10 @@ var billExec = func(ctx context.Context, name string, args ...string) ([]byte, e
 	return exec.CommandContext(ctx, name, args...).Output()
 }
 
+// billLookPath is the seam for CLI-presence checks; tests override it so the
+// orchestration is exercised regardless of what's installed.
+var billLookPath = exec.LookPath
+
 var billCmd = &cobra.Command{
 	Use:         "bill",
 	Annotations: map[string]string{supportsJSON: "true"},
@@ -56,7 +60,7 @@ authoritative provider totals shown here.`,
 func init() {
 	billCmd.Flags().BoolVar(&billFlags.all, "all", false, "include all spend, not just dispatcher-tagged resources")
 	billCmd.Flags().BoolVar(&billFlags.byService, "by-service", false, "break spend down by cloud service")
-	billCmd.Flags().BoolVar(&billFlags.reconcile, "reconcile", false, "compare dispatcher's tracked estimate against the authoritative bill")
+	billCmd.Flags().BoolVar(&billFlags.reconcile, "reconcile", false, "compare dispatcher's tracked estimate against the authoritative bill (ignored with --all)")
 	rootCmd.AddCommand(billCmd)
 }
 
@@ -93,7 +97,11 @@ func runBill(cmd *cobra.Command, args []string) error {
 		gcpSpend(ctx, monthStart, monthEnd, billFlags.all, billFlags.byService),
 		hetznerSpend(monthStart),
 	}
-	if billFlags.reconcile {
+	// Reconcile compares the authoritative bill against dispatcher's tracked
+	// per-run estimate, so it is only meaningful against the dispatcher-tagged
+	// scope. With --all the bill includes non-dispatcher spend, which would
+	// guarantee a spurious positive delta — so skip it.
+	if billFlags.reconcile && !billFlags.all {
 		addEstimates(results, monthStart)
 	}
 
@@ -259,7 +267,7 @@ func parseAWSCost(raw []byte, byService bool) (float64, string, []serviceSpend, 
 // after Cost Explorer is first enabled.
 func awsSpend(ctx context.Context, start, end time.Time, all, byService bool) providerSpend {
 	out := providerSpend{provider: "aws", currency: "USD", estimate: -1}
-	if _, err := exec.LookPath("aws"); err != nil {
+	if _, err := billLookPath("aws"); err != nil {
 		return unavailable(out, "aws CLI not installed")
 	}
 	if _, err := billExec(ctx, "aws", "sts", "get-caller-identity"); err != nil {
@@ -320,7 +328,7 @@ func parseAzureCost(raw []byte, all, byService bool) (float64, string, []service
 
 func azureSpend(ctx context.Context, start, end time.Time, all, byService bool) providerSpend {
 	out := providerSpend{provider: "azure", currency: "USD", estimate: -1}
-	if _, err := exec.LookPath("az"); err != nil {
+	if _, err := billLookPath("az"); err != nil {
 		return unavailable(out, "az CLI not installed")
 	}
 	if _, err := billExec(ctx, "az", "account", "show"); err != nil {
@@ -416,7 +424,7 @@ func gcpSpend(ctx context.Context, start, end time.Time, all, byService bool) pr
 	if !validGCPBillingTable(table) {
 		return unavailable(out, "DISPATCHER_GCP_BILLING_TABLE must be a plain project.dataset.table identifier (letters, digits, _ and - only)")
 	}
-	if _, err := exec.LookPath("bq"); err != nil {
+	if _, err := billLookPath("bq"); err != nil {
 		return unavailable(out, "bq CLI not installed (ships with the gcloud SDK)")
 	}
 	raw, err := billExec(ctx, "bq", "query", "--use_legacy_sql=false", "--format=json",

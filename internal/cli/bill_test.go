@@ -1,12 +1,16 @@
 package cli
 
 import (
+	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/d0cd/dispatcher/internal/cost"
 )
 
 var billStart = time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
@@ -94,6 +98,78 @@ func TestParseAzureCost(t *testing.T) {
 	require.NoError(t, err)
 	assert.InDelta(t, 7.00, amtAll, 0.001, "--all counts every row")
 	require.Len(t, svcs, 2)
+}
+
+type billRow struct {
+	Provider  string  `json:"provider"`
+	Amount    float64 `json:"amount"`
+	Available bool    `json:"available"`
+	Estimate  float64 `json:"estimate"`
+}
+
+func runBillJSON(t *testing.T, args ...string) map[string]billRow {
+	t.Helper()
+	stdout := captureStdout(t, func() {
+		_, _, err := executeCommand(append([]string{"--output", "json", "bill"}, args...)...)
+		require.NoError(t, err)
+	})
+	var rows []billRow
+	require.NoError(t, json.Unmarshal([]byte(stdout), &rows))
+	byP := map[string]billRow{}
+	for _, r := range rows {
+		byP[r.Provider] = r
+	}
+	return byP
+}
+
+// A provider whose auth probe fails is reported unavailable; one that returns a
+// figure is available with that amount.
+func TestBill_JSON_AuthFailAndAmount(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prevExec, prevLook := billExec, billLookPath
+	billLookPath = func(string) (string, error) { return "/usr/bin/stub", nil } // all CLIs "present"
+	billExec = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case name == "aws" && strings.Contains(joined, "sts"):
+			return nil, assert.AnError // aws auth probe fails -> unavailable
+		case name == "az" && strings.Contains(joined, "consumption"):
+			return []byte(`[{"pretaxCost":"2.50","currency":"USD","consumedService":"Microsoft.Compute","tags":{"dispatcher":"true"}}]`), nil
+		}
+		return []byte("{}"), nil
+	}
+	t.Cleanup(func() { billExec, billLookPath = prevExec, prevLook })
+
+	byP := runBillJSON(t)
+	assert.False(t, byP["aws"].Available, "aws auth probe failed -> unavailable")
+	assert.True(t, byP["azure"].Available, "azure returned a figure")
+	assert.InDelta(t, 2.50, byP["azure"].Amount, 0.01)
+}
+
+// --reconcile populates the dispatcher-tracked estimate; --all suppresses it
+// (reconcile is only meaningful against the tagged scope).
+func TestBill_Reconcile_EstimateGatedByAll(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	hist, err := cost.NewHistoryStore()
+	require.NoError(t, err)
+	require.NoError(t, hist.Record(cost.RunHistory{
+		RunID: "r1", TargetID: "aws-vm", ActualCost: 0.06, CompletedAt: time.Now().UTC(), Success: true}))
+
+	prevExec, prevLook := billExec, billLookPath
+	billLookPath = func(string) (string, error) { return "/usr/bin/stub", nil }
+	billExec = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name == "aws" && strings.Contains(strings.Join(args, " "), "get-cost-and-usage") {
+			return []byte(`{"ResultsByTime":[{"Total":{"UnblendedCost":{"Amount":"0.00","Unit":"USD"}}}]}`), nil
+		}
+		return []byte("{}"), nil
+	}
+	t.Cleanup(func() { billExec, billLookPath = prevExec, prevLook })
+
+	withReconcile := runBillJSON(t, "--reconcile")
+	assert.InDelta(t, 0.06, withReconcile["aws"].Estimate, 0.001, "reconcile populates the estimate from run history")
+
+	withAll := runBillJSON(t, "--reconcile", "--all")
+	assert.Less(t, withAll["aws"].Estimate, 0.0, "--all suppresses reconcile (estimate not computed)")
 }
 
 func TestValidGCPBillingTable(t *testing.T) {
