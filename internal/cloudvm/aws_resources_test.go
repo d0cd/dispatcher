@@ -167,6 +167,26 @@ func TestAWSProvider_ListResources_SweepsAllRegions(t *testing.T) {
 		"a resource must carry the region it was found in, so DestroyResource targets it")
 }
 
+// A stopped EC2 instance incurs no compute charge (only its EBS volume bills,
+// enumerated separately), so it must be priced at $0 — still listed for reap.
+func TestAWSProvider_ListResources_StoppedInstanceNotComputePriced(t *testing.T) {
+	bodies := map[string]string{
+		"describe-instances": `{"Reservations":[{"Instances":[{"InstanceId":"i-stop","InstanceType":"t3.micro","State":{"Name":"stopped"},"Tags":[{"Key":"dispatcher","Value":"true"}]}]}]}`,
+	}
+	captureRunCLIWith(t, awsListResponses(bodies))
+	res, err := NewAWSProvider("us-east-1").ListResources(context.Background())
+	require.NoError(t, err)
+
+	var found bool
+	for _, r := range res {
+		if r.ResourceID == "i-stop" {
+			found = true
+			assert.Equal(t, 0.0, r.MonthlyUSD, "a stopped instance is not compute-billable")
+		}
+	}
+	assert.True(t, found, "a stopped instance is still enumerated for reap visibility")
+}
+
 func TestAWSProvider_DestroyResource_Argv(t *testing.T) {
 	p := NewAWSProvider("us-east-1")
 
@@ -194,6 +214,7 @@ func TestAWSProvider_DestroyResource_Argv(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := captureRunCLI(t)
+			tc.res.Tags = map[string]string{"dispatcher": "true"} // owned; the adapter guards ownership
 			_ = p.DestroyResource(context.Background(), tc.res)
 			got := lastCall(t, calls)
 			assert.Equal(t, "aws", got.name)

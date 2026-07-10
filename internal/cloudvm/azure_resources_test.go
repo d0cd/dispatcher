@@ -146,6 +146,7 @@ func TestAzureProvider_DestroyResource_Argv(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := captureRunCLI(t)
+			tc.res.Tags = map[string]string{"dispatcher": "true"} // owned; the adapter guards ownership
 			_ = p.DestroyResource(context.Background(), tc.res)
 			got := lastCall(t, calls)
 			assert.Equal(t, "az", got.name)
@@ -159,6 +160,6 @@ func TestAzureProvider_DestroyResource_InstanceUsesCascade(t *testing.T) {
 	calls := captureRunCLIWith(t, azResponses(func([]string) ([]byte, bool) { return nil, false }))
 	p := NewAzureProvider("rg", "eastus")
 
-	_ = p.DestroyResource(context.Background(), adapter.ResourceInfo{ResourceID: "vm1", Kind: adapter.ResourceInstance})
+	_ = p.DestroyResource(context.Background(), adapter.ResourceInfo{ResourceID: "vm1", Kind: adapter.ResourceInstance, Tags: map[string]string{"dispatcher": "true"}})
 	assert.True(t, containsCall(*calls, "az", "vm", "delete", "--resource-group", "rg", "--name", "vm1", "--yes", "--force-deletion", "true"))
 }

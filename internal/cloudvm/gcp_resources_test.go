@@ -95,6 +95,31 @@ func TestGCPProvider_ListResources_ParsesAndCosts(t *testing.T) {
 	assert.Greater(t, addr.MonthlyUSD, 0.0, "a RESERVED (unused) static IP bills")
 }
 
+// A regional disk (region self-link, empty zone) and a global address (empty
+// region) must parse to a usable location + scope tag so DestroyResource can
+// pick --region / --global instead of an empty --zone/--region.
+func TestGCPProvider_ListResources_RegionalDiskAndGlobalAddress(t *testing.T) {
+	bodies := map[string]string{
+		"disks": `[{"name":"rd","sizeGb":"50",
+			"type":"https://www.googleapis.com/compute/v1/projects/proj/regions/us-central1/diskTypes/pd-balanced",
+			"region":"https://www.googleapis.com/compute/v1/projects/proj/regions/us-central1","labels":{"dispatcher":"true"}}]`,
+		"addresses": `[{"name":"ga","status":"RESERVED","labels":{"dispatcher":"true"}}]`, // no region -> global
+	}
+	captureRunCLIWith(t, gcpListResponses(bodies))
+	res, err := NewGCPProvider("proj", "us-central1-a").ListResources(context.Background())
+	require.NoError(t, err)
+
+	byID := map[string]adapter.ResourceInfo{}
+	for _, r := range res {
+		byID[r.ResourceID] = r
+	}
+	rd := byID["rd"]
+	assert.Equal(t, "us-central1", rd.Region, "regional disk location comes from the region self-link")
+	assert.Equal(t, "regional", rd.Tags[gcpScopeTag])
+	ga := byID["ga"]
+	assert.Equal(t, "global", ga.Tags[gcpScopeTag], "an address with no region is global")
+}
+
 func TestGCPProvider_ListResources_SkipsTerminatedInstances(t *testing.T) {
 	bodies := map[string]string{
 		"instances": `[{"name":"dead","status":"TERMINATED","labels":{"dispatcher":"true"}}]`,
@@ -154,10 +179,22 @@ func TestGCPProvider_DestroyResource_Argv(t *testing.T) {
 		{"address",
 			adapter.ResourceInfo{ResourceID: "a1", Kind: adapter.ResourceAddress, Region: "us-central1"},
 			[]string{"compute", "addresses", "delete", "a1", "--region", "us-central1", "--quiet", "--project", "proj"}},
+		{"regional-disk",
+			adapter.ResourceInfo{ResourceID: "rd1", Kind: adapter.ResourceDisk, Region: "us-central1",
+				Tags: map[string]string{gcpScopeTag: "regional"}},
+			[]string{"compute", "disks", "delete", "rd1", "--region", "us-central1", "--quiet", "--project", "proj"}},
+		{"global-address",
+			adapter.ResourceInfo{ResourceID: "ga1", Kind: adapter.ResourceAddress,
+				Tags: map[string]string{gcpScopeTag: "global"}},
+			[]string{"compute", "addresses", "delete", "ga1", "--global", "--quiet", "--project", "proj"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := captureRunCLI(t)
+			if tc.res.Tags == nil {
+				tc.res.Tags = map[string]string{}
+			}
+			tc.res.Tags["dispatcher"] = "true" // owned; the adapter guards ownership
 			_ = p.DestroyResource(context.Background(), tc.res)
 			got := lastCall(t, calls)
 			assert.Equal(t, "gcloud", got.name)

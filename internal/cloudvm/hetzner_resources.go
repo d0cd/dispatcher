@@ -42,6 +42,9 @@ func (h *HetznerProvider) ListResources(ctx context.Context) ([]adapter.Resource
 // adapter) enforce the dispatcher-owned boundary first. Servers route through
 // DestroyVM so the per-run firewall and SSH key are cleaned up too.
 func (h *HetznerProvider) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
 	var args []string
 	switch res.Kind {
 	case adapter.ResourceInstance:

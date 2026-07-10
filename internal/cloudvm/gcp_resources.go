@@ -54,21 +54,38 @@ func (g *GCPProvider) ListResources(ctx context.Context) ([]adapter.ResourceInfo
 	return out, nil
 }
 
-// DestroyResource deletes a single GCP resource by kind. Callers (the adapter)
-// enforce the dispatcher-owned boundary before reaching here.
+// gcpScopeTag records, on an enumerated disk/address, whether it is zonal,
+// regional, or global so DestroyResource targets the right scope. It is an
+// internal marker, not a cloud label.
+const gcpScopeTag = "_gcp-scope"
+
+// DestroyResource deletes a single GCP resource by kind. The adapter enforces
+// the dispatcher-owned boundary; this method re-checks it so the destructive
+// call can never run on a resource dispatcher doesn't own.
 func (g *GCPProvider) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
 	var args []string
 	switch res.Kind {
 	case adapter.ResourceInstance:
 		args = []string{"compute", "instances", "delete", res.ResourceID, "--zone", res.Region, "--quiet"}
 	case adapter.ResourceDisk:
-		args = []string{"compute", "disks", "delete", res.ResourceID, "--zone", res.Region, "--quiet"}
+		if res.Tags[gcpScopeTag] == "regional" {
+			args = []string{"compute", "disks", "delete", res.ResourceID, "--region", res.Region, "--quiet"}
+		} else {
+			args = []string{"compute", "disks", "delete", res.ResourceID, "--zone", res.Region, "--quiet"}
+		}
 	case adapter.ResourceImage:
 		args = []string{"compute", "images", "delete", res.ResourceID, "--quiet"}
 	case adapter.ResourceSnapshot:
 		args = []string{"compute", "snapshots", "delete", res.ResourceID, "--quiet"}
 	case adapter.ResourceAddress:
-		args = []string{"compute", "addresses", "delete", res.ResourceID, "--region", res.Region, "--quiet"}
+		if res.Tags[gcpScopeTag] == "global" {
+			args = []string{"compute", "addresses", "delete", res.ResourceID, "--global", "--quiet"}
+		} else {
+			args = []string{"compute", "addresses", "delete", res.ResourceID, "--region", res.Region, "--quiet"}
+		}
 	default:
 		return fmt.Errorf("gcp: cannot destroy resource of kind %q", res.Kind)
 	}
@@ -136,6 +153,7 @@ func (g *GCPProvider) listDiskResources(ctx context.Context) ([]adapter.Resource
 		SizeGb string            `json:"sizeGb"`
 		Type   string            `json:"type"`
 		Zone   string            `json:"zone"`
+		Region string            `json:"region"`
 		Labels map[string]string `json:"labels"`
 	}
 	if err := json.Unmarshal(out, &disks); err != nil {
@@ -148,13 +166,19 @@ func (g *GCPProvider) listDiskResources(ctx context.Context) ([]adapter.Resource
 		if !ok {
 			rate = gcpDiskRateDefault
 		}
+		// A disk is zonal (has a zone self-link) or regional (has a region self-
+		// link with an empty zone); DestroyResource needs to know which.
+		loc, scope := gcpLastSegment(d.Zone), "zonal"
+		if loc == "" && d.Region != "" {
+			loc, scope = gcpLastSegment(d.Region), "regional"
+		}
 		res = append(res, adapter.ResourceInfo{
 			ResourceID: d.Name,
 			Provider:   string(ProviderGCP),
 			Kind:       adapter.ResourceDisk,
-			Region:     gcpLastSegment(d.Zone),
+			Region:     loc,
 			RunID:      d.Labels["dispatcher-run-id"],
-			Tags:       d.Labels,
+			Tags:       mergeTag(d.Labels, gcpScopeTag, scope),
 			MonthlyUSD: sizeGb * rate,
 		})
 	}
@@ -240,13 +264,19 @@ func (g *GCPProvider) listAddressResources(ctx context.Context) ([]adapter.Resou
 		if a.Status == "RESERVED" {
 			monthly = gcpAddressMonthlyReserved
 		}
+		// A regional address has a region self-link; a global address's region is
+		// empty and needs --global to delete.
+		loc, scope := gcpLastSegment(a.Region), "regional"
+		if loc == "" {
+			scope = "global"
+		}
 		res = append(res, adapter.ResourceInfo{
 			ResourceID: a.Name,
 			Provider:   string(ProviderGCP),
 			Kind:       adapter.ResourceAddress,
-			Region:     gcpLastSegment(a.Region),
+			Region:     loc,
 			RunID:      a.Labels["dispatcher-run-id"],
-			Tags:       a.Labels,
+			Tags:       mergeTag(a.Labels, gcpScopeTag, scope),
 			MonthlyUSD: monthly,
 		})
 	}

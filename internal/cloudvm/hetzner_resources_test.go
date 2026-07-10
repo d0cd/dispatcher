@@ -122,12 +122,46 @@ func TestHetznerProvider_DestroyResource_Argv(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := captureRunCLI(t)
+			tc.res.Tags = map[string]string{"dispatcher": "true"} // owned; the adapter guards ownership
 			_ = p.DestroyResource(context.Background(), tc.res)
 			got := lastCall(t, calls)
 			assert.Equal(t, "hcloud", got.name)
 			assert.Equal(t, tc.want, got.args)
 		})
 	}
+}
+
+// DestroyResource routes each kind to the right hcloud verb (floating-ip vs
+// primary-ip, instance -> server delete via the cascade), errors on an unknown
+// kind, and refuses a resource dispatcher does not own.
+func TestHetznerProvider_DestroyResource_RoutingAndGuard(t *testing.T) {
+	p := NewHetznerProvider("fsn1")
+	owned := map[string]string{"dispatcher": "true"}
+
+	calls := captureRunCLI(t)
+	_ = p.DestroyResource(context.Background(), adapter.ResourceInfo{
+		ResourceID: "5", Kind: adapter.ResourceAddress, Tags: mergeTag(owned, hetznerIPKindTag, "floating-ip")})
+	assert.True(t, containsCall(*calls, "hcloud", "floating-ip", "delete", "5"))
+
+	calls = captureRunCLI(t)
+	_ = p.DestroyResource(context.Background(), adapter.ResourceInfo{
+		ResourceID: "3", Kind: adapter.ResourceAddress, Tags: owned}) // no ip-kind -> primary-ip
+	assert.True(t, containsCall(*calls, "hcloud", "primary-ip", "delete", "3"))
+
+	calls = captureRunCLI(t)
+	_ = p.DestroyResource(context.Background(), adapter.ResourceInfo{
+		ResourceID: "42", Kind: adapter.ResourceInstance, Tags: owned}) // routes through DestroyVM
+	assert.True(t, containsCall(*calls, "hcloud", "server", "delete", "42"))
+
+	// Unknown kind and CLI failure both surface an error.
+	captureRunCLI(t)
+	err := p.DestroyResource(context.Background(), adapter.ResourceInfo{ResourceID: "x", Kind: "bogus", Tags: owned})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot destroy")
+
+	err = p.DestroyResource(context.Background(), adapter.ResourceInfo{ResourceID: "v", Kind: adapter.ResourceDisk})
+	require.Error(t, err, "an unowned resource must be refused")
+	assert.Contains(t, err.Error(), "not dispatcher-owned")
 }
 
 // A per-run firewall must be labeled dispatcher=true (and the run id) at

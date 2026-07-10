@@ -136,6 +136,9 @@ func (a *AzureProvider) ListResources(ctx context.Context) ([]adapter.ResourceIn
 // enforce the dispatcher-owned boundary first. Instances route through DestroyVM
 // so the associated-resource cascade runs.
 func (a *AzureProvider) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
 	var args []string
 	switch res.Kind {
 	case adapter.ResourceInstance:

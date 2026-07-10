@@ -114,9 +114,13 @@ func (a *AWSProvider) listRegionResources(ctx context.Context, region string) ([
 	return out, nil
 }
 
-// DestroyResource deletes a single AWS resource by kind. Callers (the adapter)
-// enforce the dispatcher-owned boundary before reaching here.
+// DestroyResource deletes a single AWS resource by kind. The adapter enforces
+// the dispatcher-owned boundary; this method re-checks it so the destructive
+// call can never run on a resource dispatcher doesn't own.
 func (a *AWSProvider) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
 	region := res.Region
 	if region == "" {
 		region = a.defaultRegion
@@ -168,6 +172,13 @@ func (a *AWSProvider) listInstanceResources(ctx context.Context, region string) 
 				continue
 			}
 			tags := awsTagsToMap(in.Tags)
+			// A stopped instance incurs no compute charge (only its EBS volumes
+			// bill, enumerated separately) — price it at 0 so it isn't double-
+			// counted with its volume. Still list it for reap visibility.
+			monthly := 0.0
+			if in.State.Name != "stopped" {
+				monthly = catalog.PriceByName(ProviderAWS, in.InstanceType) * gcpMonthlyHours
+			}
 			res = append(res, adapter.ResourceInfo{
 				ResourceID:   in.InstanceId,
 				Provider:     string(ProviderAWS),
@@ -176,7 +187,7 @@ func (a *AWSProvider) listInstanceResources(ctx context.Context, region string) 
 				InstanceType: in.InstanceType,
 				RunID:        tags["dispatcher-run-id"],
 				Tags:         tags,
-				MonthlyUSD:   catalog.PriceByName(ProviderAWS, in.InstanceType) * gcpMonthlyHours,
+				MonthlyUSD:   monthly,
 			})
 		}
 	}
