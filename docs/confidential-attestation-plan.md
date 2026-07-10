@@ -160,6 +160,9 @@ Until #1 ships, confidential mode is honestly **"encrypted memory, unverified"**
   Space (container-shaped)** — a distinct execution path from the SSH-into-a-VM
   model.
 - **Sealing scheme** — ✅ **HPKE (RFC 9180)** for seal-to-`Kpub` (`Kpub` = X25519).
+  **Built** (`seal.go`): `sealToChannelKey`/`openSealed`/`newChannelKeypair`,
+  DHKEM(X25519,HKDF-SHA256)/HKDF-SHA256/ChaCha20Poly1305 via `cloudflare/circl`
+  (required bumping the toolchain to go 1.24; CI updated).
 - **Measurement update process** (raw AWS path) — re-capture + PR the allowlist on
   every image rebuild; a CI check pins the expected measurement per image digest.
 

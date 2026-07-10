@@ -77,7 +77,8 @@ gofmt -l .                            # Find unformatted files
 
 ## Tech Stack
 
-- Go 1.23, Cobra (CLI), Viper (config), go-yaml
+- Go 1.24, Cobra (CLI), Viper (config), go-yaml
 - Standard library testing + testify
 - fatih/color for terminal output
+- cloudflare/circl for HPKE (RFC 9180) confidential-payload sealing
 - Cloud provider CLIs (hcloud, aws, gcloud, az) for VM management
