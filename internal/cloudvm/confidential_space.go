@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -62,6 +63,11 @@ type csToken struct {
 type CSPolicy struct {
 	Nonce        []byte   // per-run challenge; its hex must appear in eat_nonce
 	ImageDigests []string // exact allowlist of accepted container image digests
+	// ChannelKey, when non-nil, is the in-TEE sealing public key the token must
+	// commit to: hex(SHA-256(ChannelKey)) must also appear in eat_nonce. This
+	// binds the key dispatcher seals secrets to (R9) to the attested container,
+	// so a relay host can't substitute its own key. Nil on the verify-only path.
+	ChannelKey []byte
 }
 
 // verifyCSToken verifies a GCP Confidential Space attestation token against
@@ -97,6 +103,16 @@ func verifyCSToken(token string, keys map[string]crypto.PublicKey, p CSPolicy) (
 	}
 	if !containsFold(t.EatNonce, hex.EncodeToString(p.Nonce)) {
 		return "", fmt.Errorf("cs token eat_nonce does not contain this run's nonce (replay/relay)")
+	}
+
+	// Bind the sealing key to the attested container: eat_nonce must also commit
+	// to SHA-256(channel key). Without this a relay host could hand dispatcher its
+	// own key and read the sealed secrets. Skipped on the verify-only path.
+	if len(p.ChannelKey) > 0 {
+		sum := sha256.Sum256(p.ChannelKey)
+		if !containsFold(t.EatNonce, hex.EncodeToString(sum[:])) {
+			return "", fmt.Errorf("cs token eat_nonce does not commit to the channel key (unbound sealing key)")
+		}
 	}
 
 	if !strings.EqualFold(t.SwName, "CONFIDENTIAL_SPACE") {
@@ -165,7 +181,9 @@ func (a *csAttester) Verify(ctx context.Context, vm *VMInfo, sshKeyPath, sshUser
 	if err != nil {
 		return AttestationResult{}, fmt.Errorf("fetch cs evidence: %w", err)
 	}
-	digest, err := verifyCSToken(ev.token, a.keys, CSPolicy{Nonce: nonce, ImageDigests: req.Measurements})
+	// When the agent supplies a channel key (sealed path), the policy binds it;
+	// a nil key (verify-only) leaves the binding off.
+	digest, err := verifyCSToken(ev.token, a.keys, CSPolicy{Nonce: nonce, ImageDigests: req.Measurements, ChannelKey: ev.channelKey})
 	if err != nil {
 		// A token that fails verification is a verdict (abort the run), not a
 		// fetch fault — surface the reason.
@@ -177,5 +195,6 @@ func (a *csAttester) Verify(ctx context.Context, vm *VMInfo, sshKeyPath, sshUser
 		Measurement: digest, // the attested container image digest
 		Nonce:       hex.EncodeToString(nonce),
 		Verdict:     "verified",
+		ChannelKey:  ev.channelKey, // verified-bound; the adapter seals to it
 	}, nil
 }

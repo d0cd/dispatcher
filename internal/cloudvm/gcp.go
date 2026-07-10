@@ -47,6 +47,12 @@ func (g *GCPProvider) CheckCLI(ctx context.Context) error {
 }
 
 func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
+	// Confidential Space is a distinct provisioning mode: the workload is a
+	// measured container launched via tee-image-reference, not an SSH VM.
+	if opts.ConfidentialSpaceImage != "" {
+		return g.createConfidentialSpaceVM(ctx, opts)
+	}
+
 	zone := opts.Region
 	if zone == "" {
 		zone = g.zone

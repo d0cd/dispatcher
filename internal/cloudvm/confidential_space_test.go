@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"testing"
 	"time"
@@ -92,6 +93,71 @@ func TestVerifyCSToken_Rejects(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+func TestVerifyCSToken_ChannelKeyBinding(t *testing.T) {
+	channelKey := bytes.Repeat([]byte{0x11}, 32)
+	sum := sha256.Sum256(channelKey)
+	keyNonce := hex.EncodeToString(sum[:])
+
+	t.Run("accepts when eat_nonce commits to the channel key", func(t *testing.T) {
+		key, keys := maaSigningKey(t)
+		c := validCSClaims()
+		c["eat_nonce"] = []string{hex.EncodeToString(csNonce), keyNonce}
+		p := csPolicy()
+		p.ChannelKey = channelKey
+		_, err := verifyCSToken(mintJWT(t, "maa1", "RS256", key, c), keys, p)
+		require.NoError(t, err)
+	})
+
+	t.Run("rejects when the channel key is not committed (relay/substitution)", func(t *testing.T) {
+		key, keys := maaSigningKey(t)
+		c := validCSClaims() // only the run nonce, no channel-key commitment
+		p := csPolicy()
+		p.ChannelKey = channelKey
+		_, err := verifyCSToken(mintJWT(t, "maa1", "RS256", key, c), keys, p)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "channel key")
+	})
+
+	t.Run("nil channel key skips the binding (verify-only path)", func(t *testing.T) {
+		key, keys := maaSigningKey(t)
+		_, err := verifyCSToken(mintJWT(t, "maa1", "RS256", key, validCSClaims()), keys, csPolicy())
+		require.NoError(t, err, "the golden verify-only path must keep working")
+	})
+}
+
+func TestCSAttester_BindsChannelKey(t *testing.T) {
+	channelKey := bytes.Repeat([]byte{0x22}, 32)
+	sum := sha256.Sum256(channelKey)
+	key, keys := maaSigningKey(t)
+	att := &csAttester{keys: keys, isReady: true,
+		fetch: func(_ context.Context, _ *VMInfo, _, _ string, nonce []byte) (csEvidence, error) {
+			c := validCSClaims()
+			c["eat_nonce"] = []string{hex.EncodeToString(nonce), hex.EncodeToString(sum[:])}
+			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
+		}}
+	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}}
+
+	res, err := att.Verify(context.Background(), &VMInfo{}, "/k", "u", req)
+	require.NoError(t, err)
+	assert.True(t, res.Verified, "a token committing to the agent's channel key verifies")
+}
+
+func TestCSAttester_RejectsUncommittedChannelKey(t *testing.T) {
+	key, keys := maaSigningKey(t)
+	att := &csAttester{keys: keys, isReady: true,
+		fetch: func(_ context.Context, _ *VMInfo, _, _ string, nonce []byte) (csEvidence, error) {
+			c := validCSClaims()
+			c["eat_nonce"] = []string{hex.EncodeToString(nonce)} // nonce echoed, key NOT committed
+			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: bytes.Repeat([]byte{0x33}, 32)}, nil
+		}}
+	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}}
+
+	res, err := att.Verify(context.Background(), &VMInfo{}, "/k", "u", req)
+	require.NoError(t, err)
+	assert.False(t, res.Verified, "an unbound sealing key must be rejected — the host could have substituted it")
+	assert.Contains(t, res.Verdict, "channel key")
 }
 
 func TestCSAttester_VerifyAccepts(t *testing.T) {

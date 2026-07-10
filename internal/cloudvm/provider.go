@@ -46,6 +46,15 @@ type VMOptions struct {
 	// requests a TEE-backed (memory-encrypted) VM of that type. The provider
 	// maps it to its create flag and rejects it where unsupported.
 	ConfidentialType string
+	// ConfidentialSpaceImage, when non-empty, requests a GCP Confidential Space
+	// container VM that launches this image reference (the measured workload) via
+	// tee-image-reference — a distinct provisioning mode from a plain SSH VM.
+	ConfidentialSpaceImage string
+	// ConfidentialAllowFrom, when a non-empty CIDR, requests a firewall opening
+	// the in-TEE agent's port (8443) only to that range (dispatcher's egress IP).
+	// The untrusted-channel design makes the endpoint safe to expose, but scoping
+	// it is defense-in-depth against unsolicited traffic.
+	ConfidentialAllowFrom string
 }
 
 // VMInfo describes a provisioned VM.

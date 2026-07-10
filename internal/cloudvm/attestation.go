@@ -18,6 +18,10 @@ type AttestationResult struct {
 	TCB         uint64 `json:"tcb,omitempty"`         // reported TCB version
 	Nonce       string `json:"nonce,omitempty"`       // hex per-run challenge
 	Verdict     string `json:"verdict,omitempty"`     // human-readable reason
+	// ChannelKey is the verified, attestation-bound in-TEE sealing public key
+	// (CS path). It exists only in-memory during Execute so the adapter can seal
+	// secrets to it; it is never persisted (the run is over before it matters).
+	ChannelKey []byte `json:"-"`
 }
 
 // AttestationFromHandleState extracts the attestation verdict from a persisted

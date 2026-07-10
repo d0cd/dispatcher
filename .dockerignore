@@ -1,0 +1,8 @@
+.git
+experiments
+runs
+docs
+*.md
+dispatcher
+*.test
+.dispatcher

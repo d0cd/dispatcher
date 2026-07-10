@@ -33,3 +33,6 @@ runs/
 # Captured TEE attestation fixtures (per-capture, bulky; not committed)
 /experiments/confidential-attestation/fixtures/*
 !/experiments/confidential-attestation/fixtures/.gitkeep
+
+# Confidential Space agent build artifacts (compiled binary + Dockerfile)
+/experiments/confidential-attestation/agent/
