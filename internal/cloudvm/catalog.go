@@ -76,6 +76,17 @@ func (c *Catalog) FindCheapest(req InstanceRequirements) []InstanceType {
 	return matches
 }
 
+// PriceByName returns the hourly USD price for a named instance type of a
+// provider, or 0 if the catalog doesn't know it.
+func (c *Catalog) PriceByName(provider ProviderID, name string) float64 {
+	for _, inst := range c.instances {
+		if inst.Provider == provider && inst.Name == name {
+			return inst.PricePerHour
+		}
+	}
+	return 0
+}
+
 // FindCheapestForProvider filters to a single provider.
 func (c *Catalog) FindCheapestForProvider(provider ProviderID, req InstanceRequirements) []InstanceType {
 	all := c.FindCheapest(req)
