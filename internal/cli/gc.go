@@ -43,6 +43,7 @@ type gcReport struct {
 	DryRun    bool             `json:"dryRun"`
 	Orphans   []gcOrphanJSON   `json:"orphans"`
 	Standing  []gcStandingJSON `json:"standing,omitempty"` // dispatcher-owned, kept (never reaped)
+	External  []gcStandingJSON `json:"external,omitempty"` // not dispatcher-owned, listed only
 }
 
 var gcCmd = &cobra.Command{
@@ -101,6 +102,7 @@ before running for real, especially with long-lived state directories.`,
 		}
 		var orphans []orphan
 		var standing []adapter.ResourceInfo
+		var external []adapter.ResourceInfo
 
 		for _, a := range adapters {
 			resources, err := a.ListResources(ctx)
@@ -112,6 +114,13 @@ before running for real, especially with long-lived state directories.`,
 			}
 
 			for _, res := range resources {
+				// Hard boundary: anything dispatcher doesn't own is listed for
+				// cost visibility but never touched — never reaped, never an
+				// orphan, regardless of run-id.
+				if !res.DispatcherOwned() {
+					external = append(external, res)
+					continue
+				}
 				// Standing infra: dispatcher-owned but tied to no run (a
 				// driver-baked image, a shared disk). Report it, never reap it —
 				// only run-scoped resources whose run is gone are orphans.
@@ -139,7 +148,11 @@ before running for real, especially with long-lived state directories.`,
 					if res.RunID != "" {
 						fmt.Fprintf(os.Stderr, ", run %s", res.RunID)
 					}
-					fmt.Fprintln(os.Stderr, ")")
+					fmt.Fprint(os.Stderr, ")")
+					if res.MonthlyUSD > 0 {
+						fmt.Fprintf(os.Stderr, " ~$%.2f/mo", res.MonthlyUSD)
+					}
+					fmt.Fprintln(os.Stderr)
 				}
 			}
 		}
@@ -175,23 +188,23 @@ before running for real, especially with long-lived state directories.`,
 					Kind: string(s.Kind), MonthlyUSD: s.MonthlyUSD,
 				})
 			}
+			for _, e := range external {
+				report.External = append(report.External, gcStandingJSON{
+					ResourceID: e.ResourceID, Provider: e.Provider,
+					Kind: string(e.Kind), MonthlyUSD: e.MonthlyUSD,
+				})
+			}
 			return emitJSON(report)
 		}
 
-		if len(standing) > 0 {
-			var total float64
-			fmt.Fprintln(os.Stderr, "\nStanding dispatcher resources (kept, never reaped):")
-			for _, s := range standing {
-				total += s.MonthlyUSD
-				fmt.Fprintf(os.Stderr, "  %s (%s %s)", s.ResourceID, s.Provider, s.Kind)
-				if s.MonthlyUSD > 0 {
-					fmt.Fprintf(os.Stderr, " ~$%.2f/mo", s.MonthlyUSD)
-				}
-				fmt.Fprintln(os.Stderr)
-			}
-			if total > 0 {
-				fmt.Fprintf(os.Stderr, "  standing total ~$%.2f/mo\n", total)
-			}
+		ongoing := renderResourceSection("Standing dispatcher resources (kept, never reaped):", standing)
+		ongoing += renderResourceSection("External resources (not dispatcher, listed only):", external)
+		for _, o := range orphans {
+			ongoing += o.res.MonthlyUSD
+		}
+		if ongoing > 0 {
+			fmt.Fprintf(os.Stderr, "\nTotal ongoing ~$%.2f/mo across %d listed resource(s).\n",
+				ongoing, len(standing)+len(external)+len(orphans))
 		}
 
 		if len(orphans) == 0 {
@@ -228,6 +241,26 @@ before running for real, especially with long-lived state directories.`,
 		fmt.Fprintf(os.Stderr, "\n%d orphan(s) found, %d destroyed.\n", len(orphans), totalDestroyed)
 		return nil
 	},
+}
+
+// renderResourceSection prints a titled list of resources with their monthly
+// cost and returns the section's cost subtotal. A nil/empty list prints
+// nothing and returns 0.
+func renderResourceSection(title string, resources []adapter.ResourceInfo) float64 {
+	if len(resources) == 0 {
+		return 0
+	}
+	var subtotal float64
+	fmt.Fprintf(os.Stderr, "\n%s\n", title)
+	for _, r := range resources {
+		subtotal += r.MonthlyUSD
+		fmt.Fprintf(os.Stderr, "  %s (%s %s)", r.ResourceID, r.Provider, r.Kind)
+		if r.MonthlyUSD > 0 {
+			fmt.Fprintf(os.Stderr, " ~$%.2f/mo", r.MonthlyUSD)
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+	return subtotal
 }
 
 // confirmDestroy prompts once on stdin before gc destroys orphans. Returns

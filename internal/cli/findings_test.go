@@ -264,7 +264,7 @@ func orphanFixture() *fakeGCAdapter {
 	return &fakeGCAdapter{
 		id: "hetzner-vm",
 		resources: []adapter.ResourceInfo{
-			{ResourceID: "srv-123", Provider: "hetzner", RunID: "run_gone"},
+			{ResourceID: "srv-123", Provider: "hetzner", RunID: "run_gone", Tags: map[string]string{"dispatcher": "true"}},
 		},
 	}
 }
@@ -369,7 +369,7 @@ func TestGC_DoesNotDestroyVMBehindCorruptRecord(t *testing.T) {
 
 	f := &fakeGCAdapter{
 		id:        "hetzner-vm",
-		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_corrupt"}},
+		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_corrupt", Tags: map[string]string{"dispatcher": "true"}}},
 	}
 	withGCAdapter(t, f)
 
@@ -394,7 +394,7 @@ func TestGC_AbortsWhenRunRecordsCannotBeEnumerated(t *testing.T) {
 
 	f := &fakeGCAdapter{
 		id:        "hetzner-vm",
-		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_live"}},
+		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_live", Tags: map[string]string{"dispatcher": "true"}}},
 	}
 	withGCAdapter(t, f)
 
@@ -424,6 +424,39 @@ func TestGC_StandingInfraNeverReaped(t *testing.T) {
 	_, _, err := executeCommand("gc", "--yes")
 	require.NoError(t, err)
 	assert.Empty(t, f.destroyed, "standing infra (no run-id) must never be reaped")
+}
+
+// A resource dispatcher does not own (no dispatcher=true tag) must be listed
+// for cost visibility but never counted as an orphan and never reaped — even
+// though it, like standing infra, carries no run-id.
+func TestGC_ExternalResourceListedNeverReaped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	f := &fakeGCAdapter{
+		id: "gcp-vm",
+		resources: []adapter.ResourceInfo{{
+			ResourceID: "team-nfs-snapshot", Provider: "gcp",
+			Kind: adapter.ResourceSnapshot, MonthlyUSD: 4.10,
+			Tags: map[string]string{"owner": "other-team"}, // NOT dispatcher-owned
+		}},
+	}
+	withGCAdapter(t, f)
+
+	stdout := captureStdout(t, func() {
+		_, _, err := executeCommand("gc", "--json", "--dry-run")
+		require.NoError(t, err)
+	})
+
+	assert.Empty(t, f.destroyed, "external resource must never be reaped")
+	var report gcReport
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	assert.Equal(t, 0, report.Found, "external resource is not an orphan")
+	assert.Empty(t, report.Standing, "external resource is not dispatcher standing infra")
+	require.Len(t, report.External, 1)
+	assert.Equal(t, "team-nfs-snapshot", report.External[0].ResourceID)
 }
 
 // ---- P2: --json output ----

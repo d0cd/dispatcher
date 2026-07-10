@@ -13,7 +13,7 @@ import (
 func gcOrphanAdapter() *fakeGCAdapter {
 	return &fakeGCAdapter{
 		id:        "hetzner-vm",
-		resources: []adapter.ResourceInfo{{ResourceID: "srv-1", Provider: "hetzner", RunID: "run_gone"}},
+		resources: []adapter.ResourceInfo{{ResourceID: "srv-1", Provider: "hetzner", RunID: "run_gone", Tags: map[string]string{"dispatcher": "true"}}},
 	}
 }
 
