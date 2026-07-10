@@ -69,7 +69,7 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 | hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated: provisioning + gc reap/safety (needs hcloud CLI) |
 | aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = provisioning only (VLEK path unbuilt); no attested run completes. |
 | gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = provisioning + SEV-SNP verifier golden-tested vs a captured report; no live attested run (fails closed pending evidence fetch). |
-| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Built; unit-tested only. Live run blocked on the local az CLI crashing on Python 3.14 (`az vm create`). |
+| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Live-validated: provisioning + gc reap/teardown-cascade, and a ConfidentialVM (SEV-SNP, vTPM, secure boot) create+reap. Attestation not verified (fails closed / `off` only, like the others). |
 
 ### Key Features
 
