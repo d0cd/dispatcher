@@ -1,12 +1,16 @@
 package cloudvm
 
 import (
+	"context"
 	"crypto"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // GCP Confidential Space attestation is a Google-signed OIDC/EAT token — not a
@@ -121,4 +125,57 @@ func containsFold(hay []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// csEvidence is what the Confidential Space fetch returns: the Google-signed
+// attestation token (binding the verifier's nonce in eat_nonce) and the in-TEE
+// channel public key secrets are later sealed to.
+type csEvidence struct {
+	token      string
+	channelKey []byte
+}
+
+// csFetch obtains a Confidential Space attestation token from a booted CS VM
+// (via the container-launcher teeserver socket), passing the per-run nonce. It
+// needs the measured CS runtime, so it is the one part not unit-testable offline.
+type csFetch func(ctx context.Context, vm *VMInfo, sshKeyPath, sshUser string, nonce []byte) (csEvidence, error)
+
+// csAttester verifies GCP Confidential Space attestation tokens. keys are the
+// trusted Google signing keys (JWKS); isReady is false until a real fetch is
+// wired, so the preflight fails closed before provisioning. The run's
+// ConfidentialRequirement.Measurements carries the accepted container image
+// digests (the CS analog of a launch-measurement allowlist).
+type csAttester struct {
+	keys    map[string]crypto.PublicKey
+	fetch   csFetch
+	isReady bool
+}
+
+func (a *csAttester) ready() bool { return a.isReady }
+
+func (a *csAttester) Verify(ctx context.Context, vm *VMInfo, sshKeyPath, sshUser string, req types.ConfidentialRequirement) (AttestationResult, error) {
+	if a.fetch == nil {
+		return AttestationResult{}, fmt.Errorf("cs attester has no evidence fetch wired")
+	}
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return AttestationResult{}, fmt.Errorf("generate attestation nonce: %w", err)
+	}
+	ev, err := a.fetch(ctx, vm, sshKeyPath, sshUser, nonce)
+	if err != nil {
+		return AttestationResult{}, fmt.Errorf("fetch cs evidence: %w", err)
+	}
+	digest, err := verifyCSToken(ev.token, a.keys, CSPolicy{Nonce: nonce, ImageDigests: req.Measurements})
+	if err != nil {
+		// A token that fails verification is a verdict (abort the run), not a
+		// fetch fault — surface the reason.
+		return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
+	}
+	return AttestationResult{
+		Verified:    true,
+		Type:        "sev-snp",
+		Measurement: digest, // the attested container image digest
+		Nonce:       hex.EncodeToString(nonce),
+		Verdict:     "verified",
+	}, nil
 }

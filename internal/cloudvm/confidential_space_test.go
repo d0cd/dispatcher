@@ -2,12 +2,15 @@ package cloudvm
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/d0cd/dispatcher/internal/types"
 )
 
 var csNonce = bytes.Repeat([]byte{0xAB}, 32)
@@ -89,4 +92,42 @@ func TestVerifyCSToken_Rejects(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.want)
 		})
 	}
+}
+
+func TestCSAttester_VerifyAccepts(t *testing.T) {
+	key, keys := maaSigningKey(t)
+	att := &csAttester{keys: keys, isReady: true,
+		fetch: func(_ context.Context, _ *VMInfo, _, _ string, nonce []byte) (csEvidence, error) {
+			c := validCSClaims()
+			c["eat_nonce"] = []string{hex.EncodeToString(nonce)} // echo the challenge
+			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c)}, nil
+		}}
+	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}}
+
+	res, err := att.Verify(context.Background(), &VMInfo{ID: "vm"}, "/k", "u", req)
+	require.NoError(t, err)
+	assert.True(t, res.Verified)
+	assert.Equal(t, csDigest, res.Measurement)
+}
+
+func TestCSAttester_RejectsReplay(t *testing.T) {
+	key, keys := maaSigningKey(t)
+	att := &csAttester{keys: keys, isReady: true,
+		fetch: func(_ context.Context, _ *VMInfo, _, _ string, _ []byte) (csEvidence, error) {
+			c := validCSClaims() // eat_nonce is a STALE nonce, not this run's
+			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c)}, nil
+		}}
+	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}}
+
+	res, err := att.Verify(context.Background(), &VMInfo{}, "/k", "u", req)
+	require.NoError(t, err)
+	assert.False(t, res.Verified, "a token not echoing this run's nonce is rejected")
+	assert.Contains(t, res.Verdict, "nonce")
+}
+
+func TestCSAttester_NotReadyAndNoFetch(t *testing.T) {
+	assert.False(t, (&csAttester{}).ready(), "not ready until a fetch is wired")
+	_, err := (&csAttester{isReady: true}).Verify(context.Background(), &VMInfo{}, "/k", "u",
+		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
+	require.Error(t, err, "no fetch wired must error, not panic")
 }
