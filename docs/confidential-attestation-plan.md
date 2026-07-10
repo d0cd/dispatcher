@@ -1,9 +1,21 @@
 # Making confidential attestation operational
 
-**Status:** plan. The verifier core is built and correct; nothing that actually
-runs is attested. This doc is the "how to close that gap" — the *what/why*
-(requirements R1–R13, the threat model) lives in
-[confidential-computing.md](confidential-computing.md).
+**Status:** GCP Confidential Space is operational and live-validated end-to-end
+(build → provision → attest → seal → run-in-TEE → sealed result → teardown); AWS
+and Azure confidential runs still fail closed or require `attestation: off`. This
+doc is the "how to close that gap" — the *what/why* (requirements R1–R13, the
+threat model) lives in [confidential-computing.md](confidential-computing.md).
+
+**Assurance (read before shipping):** this is an **MVP — the happy path is
+live-validated, not a security-audited production feature.** All cryptography
+uses vetted libraries — JWS/JWT verification via **go-jose v4**, HPKE (RFC 9180)
+sealing via **cloudflare/circl**, hashes via the Go stdlib; there is no
+hand-rolled crypto in any operational path. What remains bespoke is a small,
+non-cryptographic **policy + binding layer** (issuer/`kid` pinning, measurement
+allowlist, debug-off, and the nonce ↔ channel-key binding), covered by adversarial
+negative tests + a bit-exact binding property test + an SNP-parser fuzz target.
+Before customers rely on this, that policy layer still warrants a **lightweight
+independent security review** (an app-logic review, not a crypto audit).
 
 ## Where we are
 
