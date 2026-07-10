@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
 	"strconv"
 	"time"
@@ -340,6 +341,16 @@ func azureSpend(ctx context.Context, start, end time.Time, all, byService bool) 
 	return out
 }
 
+// gcpBillingTablePattern matches a fully-qualified BigQuery table:
+// project.dataset.table. Projects may contain hyphens; datasets and tables are
+// word characters. Anything else (backticks, quotes, whitespace, punctuation)
+// is rejected so the value can't break out of the SQL identifier quoting.
+var gcpBillingTablePattern = regexp.MustCompile(`^[A-Za-z0-9-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$`)
+
+func validGCPBillingTable(table string) bool {
+	return gcpBillingTablePattern.MatchString(table)
+}
+
 // buildGCPBillingSQL builds a BigQuery query over the billing-export table.
 // Net cost = cost + credits. Without all, it filters to resources labeled
 // dispatcher=true; with byService it groups by service.description.
@@ -397,6 +408,13 @@ func gcpSpend(ctx context.Context, start, end time.Time, all, byService bool) pr
 	table := os.Getenv("DISPATCHER_GCP_BILLING_TABLE")
 	if table == "" {
 		return unavailable(out, "set DISPATCHER_GCP_BILLING_TABLE=project.dataset.gcp_billing_export_v1_XXXX (from your BigQuery billing export)")
+	}
+	// The table name is interpolated into the BigQuery SQL, so validate it as a
+	// strict fully-qualified identifier before use — a backtick would otherwise
+	// escape the identifier quoting and inject arbitrary SQL run with the
+	// caller's BigQuery credentials.
+	if !validGCPBillingTable(table) {
+		return unavailable(out, "DISPATCHER_GCP_BILLING_TABLE must be a plain project.dataset.table identifier (letters, digits, _ and - only)")
 	}
 	if _, err := exec.LookPath("bq"); err != nil {
 		return unavailable(out, "bq CLI not installed (ships with the gcloud SDK)")

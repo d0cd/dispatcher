@@ -69,7 +69,7 @@ func TestGC_JSON_Force(t *testing.T) {
 	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
 
 	var runErr error
-	out := captureStdout(t, func() { _, _, runErr = executeCommand("--output", "json", "gc", "--yes") })
+	out := captureStdout(t, func() { _, _, runErr = executeCommand("--output", "json", "gc", "--yes", "--allow-empty-store") })
 	require.NoError(t, runErr)
 
 	var r gcReport

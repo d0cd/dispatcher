@@ -17,9 +17,10 @@ import (
 )
 
 var gcFlags struct {
-	dryRun   bool
-	force    bool
-	warnOver float64
+	dryRun          bool
+	force           bool
+	warnOver        float64
+	allowEmptyStore bool
 }
 
 // gcOrphanJSON / gcReport are the --json shape for gc.
@@ -162,6 +163,20 @@ before running for real, especially with long-lived state directories.`,
 					fmt.Fprintln(os.Stderr, resourceCostLabel(res))
 				}
 			}
+		}
+
+		// Empty-store safety guard. run.ListRecords() does NOT error on a fresh or
+		// mispointed state dir — it silently returns zero records — so the enumerate-
+		// error guard above doesn't cover it. If the store has zero records yet
+		// adapters report dispatcher-owned resources referencing run IDs, those "run
+		// IDs" are absent from the store: almost always a misconfigured state dir
+		// (wrong $DISPATCHER_HOME / user / cwd) rather than genuine orphans — and
+		// reaping would destroy the whole live fleet. Refuse unless overridden.
+		// Dry-run is exempt (it never destroys and shows the user the problem); the
+		// JSON path without --yes is exempt too (it errors out before destroying).
+		willDestroy := !gcFlags.dryRun && (!asJSON || gcFlags.force)
+		if willDestroy && !gcFlags.allowEmptyStore && len(runIDs) == 0 && len(orphans) > 0 {
+			return fmt.Errorf("refusing to GC: run store has 0 records but %d dispatcher-owned resource(s) reference run IDs — the state dir is likely misconfigured (check $DISPATCHER_HOME / --state-dir). Re-run with --allow-empty-store if the store is genuinely empty and these are real orphans", len(orphans))
 		}
 
 		if asJSON {
@@ -311,6 +326,7 @@ func init() {
 	gcCmd.Flags().BoolVar(&gcFlags.dryRun, "dry-run", false, "list orphans without destroying them")
 	gcCmd.Flags().BoolVarP(&gcFlags.force, "yes", "y", false, "skip confirmation prompt")
 	gcCmd.Flags().Float64Var(&gcFlags.warnOver, "warn-over", 10.0, "warn loudly when total ongoing cost exceeds this USD/mo (0 disables)")
+	gcCmd.Flags().BoolVar(&gcFlags.allowEmptyStore, "allow-empty-store", false, "permit reaping when the run store has zero records (bypasses the misconfigured-state-dir guard)")
 	rootCmd.AddCommand(gcCmd)
 }
 

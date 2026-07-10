@@ -277,7 +277,7 @@ func TestGC_NoConfirmDoesNotDestroy(t *testing.T) {
 	withGCAdapter(t, f)
 	withStdin(t, "n\n")
 
-	_, _, err := executeCommand("gc")
+	_, _, err := executeCommand("gc", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Empty(t, f.destroyed, "declining the prompt must not destroy anything")
 }
@@ -290,7 +290,7 @@ func TestGC_EmptyInputDoesNotDestroy(t *testing.T) {
 	withGCAdapter(t, f)
 	withStdin(t, "\n")
 
-	_, _, err := executeCommand("gc")
+	_, _, err := executeCommand("gc", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Empty(t, f.destroyed)
 }
@@ -303,7 +303,7 @@ func TestGC_YesConfirmDestroys(t *testing.T) {
 	withGCAdapter(t, f)
 	withStdin(t, "y\n")
 
-	_, _, err := executeCommand("gc")
+	_, _, err := executeCommand("gc", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"srv-123"}, f.destroyed)
 }
@@ -315,7 +315,7 @@ func TestGC_YesFlagDestroysWithoutPrompt(t *testing.T) {
 	f := orphanFixture()
 	withGCAdapter(t, f)
 
-	_, _, err := executeCommand("gc", "--yes")
+	_, _, err := executeCommand("gc", "--yes", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"srv-123"}, f.destroyed)
 }
@@ -334,7 +334,7 @@ func TestGC_ReclaimsPerRunSSHKey(t *testing.T) {
 	f := orphanFixture()
 	withGCAdapter(t, f)
 
-	_, _, err = executeCommand("gc", "--yes")
+	_, _, err = executeCommand("gc", "--yes", "--allow-empty-store")
 	require.NoError(t, err)
 	require.Equal(t, []string{"srv-123"}, f.destroyed)
 
@@ -424,6 +424,43 @@ func TestGC_StandingInfraNeverReaped(t *testing.T) {
 	_, _, err := executeCommand("gc", "--yes")
 	require.NoError(t, err)
 	assert.Empty(t, f.destroyed, "standing infra (no run-id) must never be reaped")
+}
+
+// If the run store is empty (0 records) but adapters report dispatcher-owned
+// resources that reference run IDs, the state dir is almost certainly
+// misconfigured (mispointed $DISPATCHER_HOME, wrong user, fresh checkout) — and
+// reaping would destroy the entire live fleet. gc must refuse loudly.
+func TestGC_RefusesReapWhenStoreEmptyButOrphansPresent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // fresh, empty run store (0 records)
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	gcFlags.allowEmptyStore = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false; gcFlags.allowEmptyStore = false })
+
+	f := orphanFixture() // dispatcher-owned resource referencing run_gone
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--yes")
+	require.Error(t, err, "empty run store + owned orphans must refuse to reap")
+	assert.Contains(t, err.Error(), "state dir")
+	assert.Empty(t, f.destroyed, "nothing destroyed when the store is suspiciously empty")
+}
+
+// The --allow-empty-store override lets a user reap a genuine orphan whose run
+// record was legitimately cleaned.
+func TestGC_AllowEmptyStoreOverrideReaps(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	gcFlags.allowEmptyStore = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false; gcFlags.allowEmptyStore = false })
+
+	f := orphanFixture()
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--yes", "--allow-empty-store")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"srv-123"}, f.destroyed, "override permits reaping a genuine orphan from an empty store")
 }
 
 // A resource dispatcher does not own (no dispatcher=true tag) must be listed

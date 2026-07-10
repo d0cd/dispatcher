@@ -96,6 +96,20 @@ func TestParseAzureCost(t *testing.T) {
 	require.Len(t, svcs, 2)
 }
 
+func TestValidGCPBillingTable(t *testing.T) {
+	// Valid fully-qualified BigQuery table (project may hyphenate; dataset/table
+	// are word chars).
+	assert.True(t, validGCPBillingTable("finops-502014.billing_export.gcp_billing_export_v1_01ED3F_AEE40B_2EA468"))
+
+	// Injection attempts and malformed inputs must be rejected.
+	assert.False(t, validGCPBillingTable("`x` UNION SELECT secret_col AS net, 'USD' AS currency FROM `other.d.t` -- "),
+		"a backtick that escapes the identifier quoting must be rejected")
+	assert.False(t, validGCPBillingTable("proj.dataset"), "must be fully qualified project.dataset.table")
+	assert.False(t, validGCPBillingTable("proj.dataset.table; DROP TABLE x"))
+	assert.False(t, validGCPBillingTable("proj.dataset.table WHERE 1=1"))
+	assert.False(t, validGCPBillingTable(""))
+}
+
 func TestProviderTargetID(t *testing.T) {
 	assert.Equal(t, "aws-vm", providerTargetID("aws"))
 	assert.Equal(t, "azure-vm", providerTargetID("azure"))
