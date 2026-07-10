@@ -113,6 +113,40 @@ func TestApplyPolicy_TCBComparedPerComponent(t *testing.T) {
 	assert.NoError(t, applyPolicy(c, p))
 }
 
+// TestApplyPolicy_BindingIsBitExact proves the anti-replay/relay binding is an
+// exact match — no single-bit change to REPORT_DATA, and no different nonce or
+// channel key, can satisfy it. This guards against a truncated or partial
+// comparison silently weakening the freshness/key binding.
+func TestApplyPolicy_BindingIsBitExact(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0xA5}, 32)
+	channelKey := bytes.Repeat([]byte{0x5A}, 32)
+	policy := VerificationPolicy{
+		ExpectedType: "sev-snp", Measurements: []string{"abcd"},
+		Nonce: nonce, ChannelKey: channelKey,
+	}
+	good := Claims{TEEType: "sev-snp", Measurement: "abcd", ReportData: bindingHash(nonce, channelKey)}
+	require.NoError(t, applyPolicy(good, policy), "the exact binding must be accepted")
+
+	for i := range good.ReportData {
+		for bit := 0; bit < 8; bit++ {
+			c := good
+			rd := append([]byte(nil), good.ReportData...)
+			rd[i] ^= 1 << uint(bit)
+			c.ReportData = rd
+			if applyPolicy(c, policy) == nil {
+				t.Fatalf("a one-bit change to REPORT_DATA (byte %d, bit %d) was accepted", i, bit)
+			}
+		}
+	}
+
+	p2 := policy
+	p2.Nonce = bytes.Repeat([]byte{0xA6}, 32)
+	require.Error(t, applyPolicy(good, p2), "a different nonce must not satisfy the binding")
+	p3 := policy
+	p3.ChannelKey = bytes.Repeat([]byte{0x5B}, 32)
+	require.Error(t, applyPolicy(good, p3), "a different channel key must not satisfy the binding")
+}
+
 func TestBindingHash_Deterministic(t *testing.T) {
 	h1 := bindingHash([]byte("n"), []byte("k"))
 	h2 := bindingHash([]byte("n"), []byte("k"))

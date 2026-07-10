@@ -70,6 +70,8 @@ func TestVerifyCSToken_Rejects(t *testing.T) {
 	}{
 		"wrong issuer":                 {mutate: func(c map[string]any) { c["iss"] = "https://evil.example" }, want: "issuer"},
 		"expired":                      {mutate: func(c map[string]any) { c["exp"] = time.Now().Add(-time.Hour).Unix() }, want: "expired"},
+		"missing exp":                  {mutate: func(c map[string]any) { delete(c, "exp") }, want: "exp"},
+		"not yet valid (nbf)":          {mutate: func(c map[string]any) { c["nbf"] = time.Now().Add(time.Hour).Unix() }, want: "not yet valid"},
 		"nonce not echoed":             {mutate: func(c map[string]any) { c["eat_nonce"] = []string{"deadbeef"} }, want: "nonce"},
 		"not confidential-space":       {mutate: func(c map[string]any) { c["swname"] = "SOMETHING_ELSE" }, want: "CONFIDENTIAL_SPACE"},
 		"not sev hardware":             {mutate: func(c map[string]any) { c["hwmodel"] = "GCP_INTEL_TDX" }, want: "SEV"},

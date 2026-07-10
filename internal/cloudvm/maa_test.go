@@ -100,6 +100,15 @@ func TestVerifyMAAToken_RejectsExpiredAndWrongIssuer(t *testing.T) {
 	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, wrongIss), keys, "https://trusted.attest.azure.net")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "issuer")
+
+	// Not yet valid (nbf in the future).
+	future := map[string]any{"nbf": time.Now().Add(time.Hour).Unix()}
+	for k, v := range base {
+		future[k] = v
+	}
+	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, future), keys, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not yet valid")
 }
 
 func TestAzureAttester_VerifyAccepts(t *testing.T) {
