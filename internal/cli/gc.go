@@ -50,8 +50,15 @@ var gcCmd = &cobra.Command{
 	Use:         "gc",
 	Annotations: map[string]string{supportsJSON: "true"},
 	Short:       "Find and destroy orphaned cloud resources",
-	Long: `Scans all configured cloud providers for VMs tagged by Dispatcher that no
-longer have an active run, and destroys them.
+	Long: `Scans all configured cloud providers for billable resources and reports their
+ongoing cost. Resources are classified three ways:
+
+  orphan   - tagged by Dispatcher, its run is gone      -> destroyed
+  standing - tagged by Dispatcher, tied to no run       -> listed, kept
+  external - not tagged by Dispatcher                   -> listed only
+
+Only resources Dispatcher owns (tag dispatcher=true) are ever destroyed;
+everything else is listed purely for cost visibility.
 
 Use --dry-run to preview what would be destroyed without acting — recommended
 before running for real, especially with long-lived state directories.`,
