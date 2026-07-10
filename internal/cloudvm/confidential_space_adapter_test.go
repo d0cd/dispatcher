@@ -39,7 +39,7 @@ func TestExecuteConfidentialSpace_HappyPath(t *testing.T) {
 	signKey, keys := maaSigningKey(t)
 	var got runPayload
 	agent, err := newConfidentialAgent(agentConfig{
-		fetchToken: tokenMinter(t, signKey),
+		attest: tokenMinter(t, signKey),
 		runner: func(_ context.Context, p runPayload) runResult {
 			got = p
 			return runResult{ExitCode: 0, Stdout: []byte("trained")}
@@ -79,8 +79,8 @@ func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
 	signKey, keys := maaSigningKey(t)
 	ran := false
 	agent, err := newConfidentialAgent(agentConfig{
-		fetchToken: tokenMinter(t, signKey),
-		runner:     func(context.Context, runPayload) runResult { ran = true; return runResult{} },
+		attest: tokenMinter(t, signKey),
+		runner: func(context.Context, runPayload) runResult { ran = true; return runResult{} },
 	})
 	require.NoError(t, err)
 	srv := httptest.NewServer(agent.handler())

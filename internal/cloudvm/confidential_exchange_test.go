@@ -3,6 +3,8 @@ package cloudvm
 import (
 	"context"
 	"crypto"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http/httptest"
 	"testing"
 
@@ -12,12 +14,14 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// tokenMinter returns a fetchToken that mints a CS token echoing the requested
-// nonces (standing in for the teeserver), signed by the given test key.
-func tokenMinter(t *testing.T, signKey crypto.Signer) func(context.Context, []string) (string, error) {
-	return func(_ context.Context, nonces []string) (string, error) {
+// tokenMinter returns an attestFunc that mints a CS token binding [runNonce,
+// SHA-256(channelPub)] in eat_nonce (standing in for the teeserver), signed by
+// the given test key.
+func tokenMinter(t *testing.T, signKey crypto.Signer) attestFunc {
+	return func(_ context.Context, runNonce, channelPub []byte) (string, error) {
+		sum := sha256.Sum256(channelPub)
 		c := validCSClaims()
-		c["eat_nonce"] = nonces
+		c["eat_nonce"] = []string{hex.EncodeToString(runNonce), hex.EncodeToString(sum[:])}
 		return mintJWT(t, "maa1", "RS256", signKey, c), nil
 	}
 }
@@ -27,7 +31,7 @@ func tokenMinter(t *testing.T, signKey crypto.Signer) func(context.Context, []st
 // channel key — the exact contract the dispatcher-side verifier enforces.
 func TestConfidentialAgent_AttestBindsChannelKey(t *testing.T) {
 	signKey, keys := maaSigningKey(t)
-	agent, err := newConfidentialAgent(agentConfig{fetchToken: tokenMinter(t, signKey)})
+	agent, err := newConfidentialAgent(agentConfig{attest: tokenMinter(t, signKey)})
 	require.NoError(t, err)
 	srv := httptest.NewServer(agent.handler())
 	t.Cleanup(srv.Close)
@@ -55,7 +59,7 @@ func TestConfidentialExchange_SealedRoundTrip(t *testing.T) {
 
 	var gotPayload runPayload
 	agent, err := newConfidentialAgent(agentConfig{
-		fetchToken: tokenMinter(t, signKey),
+		attest: tokenMinter(t, signKey),
 		runner: func(_ context.Context, p runPayload) runResult {
 			gotPayload = p
 			return runResult{ExitCode: 0, Stdout: []byte("trained on " + string(p.DotEnv))}
@@ -90,8 +94,8 @@ func TestConfidentialAgent_RejectsUnsealablePayload(t *testing.T) {
 	signKey, _ := maaSigningKey(t)
 	ran := false
 	agent, err := newConfidentialAgent(agentConfig{
-		fetchToken: tokenMinter(t, signKey),
-		runner:     func(context.Context, runPayload) runResult { ran = true; return runResult{} },
+		attest: tokenMinter(t, signKey),
+		runner: func(context.Context, runPayload) runResult { ran = true; return runResult{} },
 	})
 	require.NoError(t, err)
 	srv := httptest.NewServer(agent.handler())

@@ -27,21 +27,35 @@ type confidentialAgent struct {
 	result    runResult
 }
 
+// attestFunc obtains an attestation token that binds this run's nonce and the
+// agent's channel public key. It is the one provider-specific part of the agent:
+// GCP Confidential Space fetches a CS token from the teeserver socket; Azure
+// fetches an MAA token via the vTPM. Everything downstream (seal-open, run,
+// sealed result) is provider-agnostic.
+type attestFunc func(ctx context.Context, runNonce, channelPub []byte) (string, error)
+
 type agentConfig struct {
-	// fetchToken obtains an attestation token binding the given nonces. Defaults
-	// to the container-launcher teeserver socket; tests inject a stub.
-	fetchToken func(ctx context.Context, nonces []string) (string, error)
+	// attest obtains the attestation token; defaults to the GCP Confidential
+	// Space teeserver fetch. Tests inject a stub.
+	attest attestFunc
 	// runner executes the opened payload's workload and returns its result. The
 	// default exec runner ships with the agent binary; the core is injectable.
-	runner   func(ctx context.Context, p runPayload) runResult
-	audience string
+	runner func(ctx context.Context, p runPayload) runResult
+}
+
+// csAttestFunc binds [runNonce, SHA-256(channelPub)] into a Confidential Space
+// token from the container-launcher teeserver socket.
+func csAttestFunc(socket, audience string) attestFunc {
+	return func(ctx context.Context, runNonce, channelPub []byte) (string, error) {
+		sum := sha256.Sum256(channelPub)
+		nonces := []string{hex.EncodeToString(runNonce), hex.EncodeToString(sum[:])}
+		return requestAttestationToken(ctx, socket, tokenRequest{Audience: audience, Nonces: nonces})
+	}
 }
 
 func newConfidentialAgent(cfg agentConfig) (*confidentialAgent, error) {
-	if cfg.fetchToken == nil {
-		cfg.fetchToken = func(ctx context.Context, nonces []string) (string, error) {
-			return requestAttestationToken(ctx, csTeeserverSocket, tokenRequest{Audience: cfg.audience, Nonces: nonces})
-		}
+	if cfg.attest == nil {
+		cfg.attest = csAttestFunc(csTeeserverSocket, "dispatcher")
 	}
 	pub, priv, err := newChannelKeypair()
 	if err != nil {
@@ -58,8 +72,8 @@ func (a *confidentialAgent) handler() http.Handler {
 	return mux
 }
 
-// handleAttest fetches a token binding [runNonce, SHA-256(channelPub)] and
-// returns it with the channel public key — the evidence dispatcher verifies and
+// handleAttest obtains an attestation token binding this run's nonce and the
+// channel public key, and returns both — the evidence dispatcher verifies and
 // seals to.
 func (a *confidentialAgent) handleAttest(w http.ResponseWriter, r *http.Request) {
 	nonceHex := r.URL.Query().Get("nonce")
@@ -67,9 +81,12 @@ func (a *confidentialAgent) handleAttest(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "missing nonce", http.StatusBadRequest)
 		return
 	}
-	sum := sha256.Sum256(a.pub)
-	nonces := []string{nonceHex, hex.EncodeToString(sum[:])}
-	token, err := a.cfg.fetchToken(r.Context(), nonces)
+	runNonce, err := hex.DecodeString(nonceHex)
+	if err != nil {
+		http.Error(w, "nonce is not hex", http.StatusBadRequest)
+		return
+	}
+	token, err := a.cfg.attest(r.Context(), runNonce, a.pub)
 	if err != nil {
 		http.Error(w, "fetch token: "+err.Error(), http.StatusBadGateway)
 		return
