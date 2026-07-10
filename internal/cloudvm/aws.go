@@ -137,16 +137,12 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if sshCIDR == "" {
 		sshCIDR = "0.0.0.0/0"
 	}
-	sgID, err := awsCreateSSHSecurityGroup(ctx, region, awsSGName(opts), sshCIDR)
+	sgID, err := awsCreateSSHSecurityGroup(ctx, region, awsSGName(opts), sshCIDR, opts.Tags)
 	if err != nil {
 		return nil, err
 	}
 
-	var tagSpecs []string
-	for k, v := range opts.Tags {
-		tagSpecs = append(tagSpecs, fmt.Sprintf("{Key=%s,Value=%s}", k, v))
-	}
-	tagSpec := fmt.Sprintf("ResourceType=instance,Tags=[%s]", strings.Join(tagSpecs, ","))
+	tagSpec := awsTagSpec("instance", opts.Tags)
 
 	args := []string{
 		"ec2", "run-instances",
@@ -279,10 +275,22 @@ func awsSGName(opts VMOptions) string {
 	return "dispatcher-" + adapter.SanitizeName(id)
 }
 
+// awsTagSpec builds a --tag-specifications value for a resource type from a tag
+// map. AWS joins the KV pairs with commas inside a single structured argument;
+// tags are validated at the boundary (validateLabels) so no value can break out.
+func awsTagSpec(resourceType string, tags map[string]string) string {
+	var pairs []string
+	for k, v := range tags {
+		pairs = append(pairs, fmt.Sprintf("{Key=%s,Value=%s}", k, v))
+	}
+	return fmt.Sprintf("ResourceType=%s,Tags=[%s]", resourceType, strings.Join(pairs, ","))
+}
+
 // awsCreateSSHSecurityGroup creates a security group in the region's default VPC
-// admitting inbound SSH from cidr, and returns its group id. The group is
+// admitting inbound SSH from cidr, and returns its group id. The group carries
+// the run's dispatcher tags so gc can recognize and reap a leaked one, and is
 // deleted on teardown (or if run-instances fails).
-func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string) (string, error) {
+func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string, tags map[string]string) (string, error) {
 	out, err := runCLI(ctx, "aws", "ec2", "describe-vpcs", "--region", region,
 		"--filters", "Name=isDefault,Values=true", "--query", "Vpcs[0].VpcId", "--output", "text")
 	if err != nil {
@@ -292,9 +300,13 @@ func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string) (
 	if vpc == "" || vpc == "None" {
 		return "", fmt.Errorf("no default VPC in %s to place the SSH security group", region)
 	}
-	out, err = runCLI(ctx, "aws", "ec2", "create-security-group", "--region", region,
+	createArgs := []string{"ec2", "create-security-group", "--region", region,
 		"--group-name", name, "--description", "dispatcher per-run SSH access",
-		"--vpc-id", vpc, "--query", "GroupId", "--output", "text")
+		"--vpc-id", vpc, "--query", "GroupId", "--output", "text"}
+	if len(tags) > 0 {
+		createArgs = append(createArgs, "--tag-specifications", awsTagSpec("security-group", tags))
+	}
+	out, err = runCLI(ctx, "aws", createArgs...)
 	if err != nil {
 		return "", fmt.Errorf("aws create security group: %w", err)
 	}
