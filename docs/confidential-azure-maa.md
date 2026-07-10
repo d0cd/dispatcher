@@ -56,9 +56,35 @@ After a verified MAA verdict, seal source/`.env` to the attested channel key and
 unseal on-VM before running — the same sealing step the SSH path lacks today
 (reuse `seal.go`; agent gains a seal-open + exec, like `dispatcher-attest`).
 
-## Phasing
-1. Verifier binding: `x-ms-runtime` + runtime-data channel-key check (TDD, offline).
-2. On-VM MAA agent (vTPM read → MAA REST → token+key) + `maaFetch` wiring.
-3. MAA JWKS load + issuer pin; flip `azureAttester.isReady`.
-4. Full-R9 seal on the SSH path.
-5. Live end-to-end on a real CVM.
+## Grounded findings (from a real captured token)
+
+The assumed schema was wrong; a live capture corrected it:
+- SEV-SNP facts are **nested under `x-ms-isolation-tee`** (`attestation-type`,
+  `compliance-status`, `launchmeasurement`, `is-debuggable`), not top-level.
+- The channel-key binding rides in the top-level
+  **`x-ms-runtime.client-payload.nonce`** (base64), set to
+  `SHA-256(runNonce ‖ channelKey)` — **32 bytes** to fit the TPM quote's
+  qualifying data (SHA-512 is rejected `TPM_RC_SIZE`).
+- Keys come from the pinned MAA instance's **`/certs`** JWKS (`x5c`).
+- The pure-Go agent uses the maintained **edgelesssys/go-azguestattestation**
+  library (vTPM → HCL → MAA REST) — no C++ dependency, no reinvented parser.
+
+## Status
+1. ✅ Verifier corrected + golden-validated against a real token (`verifyMAAToken`,
+   nested schema, client-payload binding, `/certs` x5c keys; signatures on go-jose).
+2. ✅ In-TEE agent: the generalized HTTP sealed-exchange agent attesting via MAA
+   (`RunAzureAgent`, `cmd/dispatcher-attest-azure`) + `endpointMAAFetch`.
+3. ✅ MAA JWKS load + issuer pin (`LoadAzureMAAKeys`).
+4. ✅ Full-R9 sealing — reused directly (the agent runs the same sealed exchange).
+5. ✅ Orchestration core (`executeAzureConfidential`, verify-before-seal, unit-tested).
+6. ✅ **Live end-to-end on a real SEV-SNP CVM** (`TestGolden_AzureLiveExchange`):
+   attest via MAA over the endpoint → verify → seal `.env` → run in the TEE →
+   sealed result; the sealed secret reached the workload inside the TEE.
+
+**Remaining (production `dispatcher run` wiring — mechanical, mirrors GCP):** the
+real `startAgent` (SSH scp the agent + start it + open the NSG for its port), an
+`AzureConfidentialAdapter` TargetAdapter wrapper (Status/Logs/Artifacts/Cleanup
+over `csRunState`), and run-selection routing confidential Azure runs to this
+path with the operator-pinned launch measurement. The launch measurement is set
+by the CVM image, so the operator captures + pins it in `confidential.measurements`
+(the same treatment as a raw launch measurement).
