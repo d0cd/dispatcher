@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,7 +35,7 @@ func TestVerifyMAAToken_ExtractsClaims(t *testing.T) {
 		"x-ms-sevsnpvm-is-debuggable":     false,
 	})
 
-	claims, err := verifyMAAToken(tok, keys)
+	claims, err := verifyMAAToken(tok, keys, "")
 	require.NoError(t, err)
 	assert.Equal(t, "sev-snp", claims.TEEType)
 	assert.Equal(t, meas, claims.Measurement)
@@ -49,7 +50,7 @@ func TestVerifyMAAToken_RejectsBadSignature(t *testing.T) {
 		"x-ms-attestation-type":  "sevsnpvm",
 		"x-ms-compliance-status": "azure-compliant-cvm",
 	})
-	_, err := verifyMAAToken(tok, otherKeys)
+	_, err := verifyMAAToken(tok, otherKeys, "")
 	require.Error(t, err, "a token not signed by a trusted MAA key must be rejected")
 }
 
@@ -59,7 +60,7 @@ func TestVerifyMAAToken_RejectsNonCompliant(t *testing.T) {
 		"x-ms-attestation-type":  "sevsnpvm",
 		"x-ms-compliance-status": "not-compliant",
 	})
-	_, err := verifyMAAToken(tok, keys)
+	_, err := verifyMAAToken(tok, keys, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "compliance")
 }
@@ -70,9 +71,35 @@ func TestVerifyMAAToken_RejectsUnknownTEEType(t *testing.T) {
 		"x-ms-attestation-type":  "mysterytee",
 		"x-ms-compliance-status": "azure-compliant-cvm",
 	})
-	_, err := verifyMAAToken(tok, keys)
+	_, err := verifyMAAToken(tok, keys, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "attestation type")
+}
+
+func TestVerifyMAAToken_RejectsExpiredAndWrongIssuer(t *testing.T) {
+	key, keys := maaSigningKey(t)
+	base := map[string]any{
+		"x-ms-attestation-type":  "sevsnpvm",
+		"x-ms-compliance-status": "azure-compliant-cvm",
+	}
+
+	// Expired token.
+	expired := map[string]any{"exp": time.Now().Add(-time.Hour).Unix()}
+	for k, v := range base {
+		expired[k] = v
+	}
+	_, err := verifyMAAToken(mintJWT(t, "maa1", "RS256", key, expired), keys, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "expired")
+
+	// Wrong issuer, when an expected issuer is configured.
+	wrongIss := map[string]any{"iss": "https://evil.attest.azure.net"}
+	for k, v := range base {
+		wrongIss[k] = v
+	}
+	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, wrongIss), keys, "https://trusted.attest.azure.net")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "issuer")
 }
 
 func TestAzureAttester_VerifyAccepts(t *testing.T) {
@@ -131,7 +158,7 @@ func TestVerifyMAAToken_RejectsNonHexReportData(t *testing.T) {
 		"x-ms-compliance-status":   "azure-compliant-cvm",
 		"x-ms-sevsnpvm-reportdata": "not-hex!!",
 	})
-	_, err := verifyMAAToken(tok, keys)
+	_, err := verifyMAAToken(tok, keys, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hex")
 }

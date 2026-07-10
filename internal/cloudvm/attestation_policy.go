@@ -47,8 +47,8 @@ func applyPolicy(c Claims, p VerificationPolicy) error {
 	// populated them. An empty nonce/key would make the binding check below
 	// degenerate to matching bindingHash("","") = SHA-512(""), a public constant
 	// any host could place in REPORT_DATA with no genuine TEE or fresh challenge.
-	if len(p.Nonce) < 32 {
-		return fmt.Errorf("attestation: per-run nonce missing or too short (need >= 32 bytes) — R1")
+	if len(p.Nonce) != 32 {
+		return fmt.Errorf("attestation: per-run nonce must be exactly 32 bytes, got %d — R1", len(p.Nonce))
 	}
 	if len(p.ChannelKey) == 0 {
 		return fmt.Errorf("attestation: in-TEE channel key missing — R2")
@@ -65,8 +65,8 @@ func applyPolicy(c Claims, p VerificationPolicy) error {
 	if p.ExpectedType != "" && p.ExpectedType != "any" && !strings.EqualFold(c.TEEType, p.ExpectedType) {
 		return fmt.Errorf("attestation: TEE type %q does not match requested %q", c.TEEType, p.ExpectedType)
 	}
-	if c.TCB < p.MinTCB {
-		return fmt.Errorf("attestation: reported TCB %d below minimum %d", c.TCB, p.MinTCB)
+	if !tcbComponentsGTE(c.TCB, p.MinTCB) {
+		return fmt.Errorf("attestation: reported TCB %d has a component below the minimum %d", c.TCB, p.MinTCB)
 	}
 	if !measurementAllowed(c.Measurement, p.Measurements) {
 		return fmt.Errorf("attestation: launch measurement %q is not on the allowlist", c.Measurement)
@@ -75,6 +75,19 @@ func applyPolicy(c Claims, p VerificationPolicy) error {
 		return fmt.Errorf("attestation: REPORT_DATA does not bind this run's nonce and channel key (replay/relay or wrong key)")
 	}
 	return nil
+}
+
+// tcbComponentsGTE compares SEV-SNP REPORTED_TCB values per component. The u64
+// packs per-component SVNs (little-endian: bootloader, TEE, reserved×4, SNP,
+// microcode), so a raw integer `<` is meaningless — the reserved bytes dominate.
+// Every real component of `reported` must be >= the corresponding `minimum`.
+func tcbComponentsGTE(reported, minimum uint64) bool {
+	for _, shift := range []uint{0, 8, 48, 56} { // bootloader, TEE, SNP, microcode SVNs
+		if byte(reported>>shift) < byte(minimum>>shift) {
+			return false
+		}
+	}
+	return true
 }
 
 // measurementAllowed returns true only on an exact (case-insensitive) match

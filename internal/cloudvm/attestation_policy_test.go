@@ -97,6 +97,22 @@ func TestApplyPolicy_EmptyAllowlistFailsClosed(t *testing.T) {
 	require.Error(t, applyPolicy(validClaims(), p), "no measurement allowlist must fail closed (R7)")
 }
 
+// REPORTED_TCB is a packed per-component SVN struct, not a monotonic integer.
+// A raw u64 compare would wrongly accept a report whose bootloader SVN is below
+// the minimum just because a high-order component (microcode) is set.
+func TestApplyPolicy_TCBComparedPerComponent(t *testing.T) {
+	c := validClaims()
+	c.TCB = uint64(2) << 56 // microcode SVN 2, bootloader SVN 0 — raw u64 is huge
+	p := validPolicy()
+	p.MinTCB = 1 // bootloader SVN 1 (raw u64 = 1)
+	assert.Error(t, applyPolicy(c, p),
+		"bootloader 0 < required 1 must reject even though the raw u64 (2<<56) exceeds 1")
+
+	// All components at/above the minimum passes.
+	c.TCB = (uint64(3) << 56) | 5 // microcode 3, bootloader 5
+	assert.NoError(t, applyPolicy(c, p))
+}
+
 func TestBindingHash_Deterministic(t *testing.T) {
 	h1 := bindingHash([]byte("n"), []byte("k"))
 	h2 := bindingHash([]byte("n"), []byte("k"))

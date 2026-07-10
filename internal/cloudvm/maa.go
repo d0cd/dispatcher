@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -21,6 +22,9 @@ type maaToken struct {
 	SNPLaunchMeasurement string `json:"x-ms-sevsnpvm-launchmeasurement"`
 	SNPReportData        string `json:"x-ms-sevsnpvm-reportdata"`
 	SNPIsDebuggable      bool   `json:"x-ms-sevsnpvm-is-debuggable"`
+	Exp                  int64  `json:"exp"` // JWT expiry (unix seconds)
+	Nbf                  int64  `json:"nbf"` // JWT not-before
+	Iss                  string `json:"iss"` // JWT issuer (the MAA instance)
 }
 
 // verifyMAAToken verifies an MAA JWT against the trusted MAA signing keys and
@@ -29,7 +33,7 @@ type maaToken struct {
 // remaining policy (measurement allowlist, REPORT_DATA binding) is applyPolicy's
 // job. TCB is left zero — MAA reports per-component SVNs rather than a single
 // TCB, so minTCB enforcement on the MAA path is not yet wired (see gaps §6).
-func verifyMAAToken(token string, keys map[string]crypto.PublicKey) (Claims, error) {
+func verifyMAAToken(token string, keys map[string]crypto.PublicKey, expectedIssuer string) (Claims, error) {
 	payload, err := verifyJWS(token, keys)
 	if err != nil {
 		return Claims{}, fmt.Errorf("maa token signature: %w", err)
@@ -37,6 +41,19 @@ func verifyMAAToken(token string, keys map[string]crypto.PublicKey) (Claims, err
 	var t maaToken
 	if err := json.Unmarshal(payload, &t); err != nil {
 		return Claims{}, fmt.Errorf("parse maa claims: %w", err)
+	}
+	// Standard JWT freshness/issuer checks — defense-in-depth atop the nonce
+	// binding (which already defeats replay). exp/nbf are enforced when present;
+	// the issuer is enforced when the attester is configured with one.
+	now := time.Now().Unix()
+	if t.Exp != 0 && now >= t.Exp {
+		return Claims{}, fmt.Errorf("maa token expired")
+	}
+	if t.Nbf != 0 && now < t.Nbf {
+		return Claims{}, fmt.Errorf("maa token not yet valid (nbf)")
+	}
+	if expectedIssuer != "" && t.Iss != expectedIssuer {
+		return Claims{}, fmt.Errorf("maa token issuer %q is not the trusted MAA instance %q", t.Iss, expectedIssuer)
 	}
 	if t.ComplianceStatus != "azure-compliant-cvm" {
 		return Claims{}, fmt.Errorf("maa compliance status %q is not azure-compliant-cvm", t.ComplianceStatus)
@@ -80,6 +97,7 @@ type maaFetch func(ctx context.Context, vm *VMInfo, sshKeyPath, sshUser string, 
 // preflight fails closed before provisioning.
 type azureAttester struct {
 	keys    map[string]crypto.PublicKey
+	issuer  string // the trusted MAA instance's `iss`; enforced when set
 	fetch   maaFetch
 	isReady bool
 }
@@ -99,7 +117,7 @@ func (a *azureAttester) Verify(ctx context.Context, vm *VMInfo, sshKeyPath, sshU
 	if err != nil {
 		return AttestationResult{}, fmt.Errorf("fetch maa evidence: %w", err)
 	}
-	claims, err := verifyMAAToken(ev.token, a.keys)
+	claims, err := verifyMAAToken(ev.token, a.keys, a.issuer)
 	if err != nil {
 		return AttestationResult{}, err
 	}

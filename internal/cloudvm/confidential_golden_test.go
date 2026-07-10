@@ -103,7 +103,7 @@ func TestGolden_MAAToken(t *testing.T) {
 	token := strings.TrimSpace(string(skipUnlessFixture(t, filepath.Join(dir, "token.jwt"))))
 	keys := jwksKeys(t, skipUnlessFixture(t, filepath.Join(dir, "jwks.json")))
 
-	claims, err := verifyMAAToken(token, keys)
+	claims, err := verifyMAAToken(token, keys, "")
 	require.NoError(t, err, "real MAA token must verify (confirms signature + the compliance/type claim names)")
 
 	assert.Contains(t, []string{"sev-snp", "tdx"}, claims.TEEType)
