@@ -19,7 +19,7 @@ go build -o dispatcher ./cmd/dispatcher
 cmd/
   dispatcher/         # CLI entry point (main.go)
 internal/
-  cli/                # Cobra command definitions (20 top-level + 5 targets subcommands)
+  cli/                # Cobra command definitions (21 top-level + 5 targets subcommands)
   workload/           # Workload inspection, config loading, recursive scanning
   target/             # Target registry, builtins, YAML config, feasibility matching
   plan/               # Plan generation, validation, formatting, persistence

@@ -168,6 +168,11 @@ confidential:
   confidential image (Azure CVM, GCP Confidential Space, an AWS SEV-SNP image) whose
   launch measurement and built-in (measured) attestation agent dispatcher ships in
   its allowlist. No image work for the operator.
+  > **Not yet shipped.** This is the target design. Today dispatcher boots *stock
+  > Ubuntu* (not a pinned/measured CVM image) and ships **no base measurement
+  > allowlist** — measurements come only from the operator's `dispatcher.yaml`, and
+  > an empty allowlist fails closed. Pinned images + a shipped base allowlist are
+  > prerequisite work (see §6 / ROADMAP) before the measurement control is real.
 - **Custom image — escape hatch.** To run your own image, build it with the in-TEE
   attestation agent, capture its launch measurement, and register it in dispatcher's
   measurement allowlist (config). A confidential run on an unlisted measurement is

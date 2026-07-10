@@ -26,7 +26,7 @@ The reconciler audits what happened.
 
 ## What's Built
 
-### CLI Commands (20 top-level + 5 `targets` subcommands)
+### CLI Commands (21 top-level + 5 `targets` subcommands)
 
 ```bash
 dispatcher init [path]              # Scaffold dispatcher.yaml from workload inspection
@@ -66,10 +66,10 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 | lima-vm | cloud-vm | CloudVMAdapter + LimaProvider | Working (needs limactl) |
 | firecracker-vm | local-vm | CloudVMAdapter + FirecrackerProvider | Working (needs a KVM host; live-validated) |
 | kubernetes | kubernetes | K8sAdapter | Working (needs kubectl) |
-| hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated (needs hcloud CLI) |
-| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated incl. GPU + confidential (needs aws CLI) |
-| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated incl. GPU + confidential (needs gcloud CLI) |
-| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Built (needs az CLI; live run gated on Azure capacity) |
+| hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated: provisioning + gc reap/safety (needs hcloud CLI) |
+| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = provisioning only (VLEK path unbuilt); no attested run completes. |
+| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = provisioning + SEV-SNP verifier golden-tested vs a captured report; no live attested run (fails closed pending evidence fetch). |
+| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Built; unit-tested only. Live run blocked on the local az CLI crashing on Python 3.14 (`az vm create`). |
 
 ### Key Features
 
@@ -84,7 +84,7 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 - **Sharding / fan-out**: `shard:`/`aggregate:` config fans a workload across N shards (fixed `count` or a `discover` command), each a full dispatcher run; bounded-parallel engine with fail/retry/continue; artifact aggregation. See [low-latency-execution.md](low-latency-execution.md).
 - **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer.
 - **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits.
-- **Garbage collection**: `dispatcher gc` finds orphaned VMs across all cloud providers (extending to disks/images/SGs + cost warnings is next — see ROADMAP).
+- **Garbage collection & cost audit**: `dispatcher gc` is a three-tier ownership sweep (orphan → reaped / standing → kept / external → listed) with a hard `dispatcher=true` reap boundary. Each provider enumerates its idle-billable resources (instances, disks, images, snapshots, IPs, per-run SGs/firewalls) with an estimated `$/mo`; `--warn-over` flags ongoing cost. `dispatcher bill [--all] [--by-service] [--reconcile]` reports authoritative per-cloud spend. See ROADMAP.
 - **AI planner**: Tool-use architecture with 5 tools (inspect_workload, evaluate_all_targets, find_cheapest_instances, get_run_history, inspect_run). Aitelier backend (Claude). Deterministic fallback when no LLM configured.
 
 ## Project Structure

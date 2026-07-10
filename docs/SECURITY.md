@@ -61,7 +61,7 @@ The cloud-VM host-key pinning above does not apply to imported targets: they are
 `confidential:` provisions a TEE-backed VM (AMD SEV/SEV-SNP, Intel TDX) so the cloud host/hypervisor can't read the workload's memory — a *data-in-use* protection orthogonal to the operator-boundary hardening above. Boundaries:
 
 - **No silent downgrade.** A confidential job is only feasible on a target/type that supports it; otherwise it's rejected, never run on a normal VM. The provider create flag is emitted from a verified mapping (GCP `--confidential-compute-type`, AWS `--cpu-options AmdSevSnp=enabled`, Azure `--security-type ConfidentialVM`), and unsupported type/provider combos error before launch.
-- **Attestation — current state.** A TEE encrypts memory, but the *proof* is a signed attestation report. Dispatcher does **not yet verify** that report, so `attestation: required` (the default) **fails closed** rather than running as if attested; `attestation: off` is an explicit opt-in to encrypted-memory-without-verification. Report verification (per-provider: Azure MAA, AWS SEV-SNP/AMD-KDS, GCP) is the next increment and will gate the run on a verified measurement.
+- **Attestation — current state.** A TEE encrypts memory, but the *proof* is a signed attestation report. The **GCP SEV-SNP verifier core is implemented** (report parse + VCEK→ASK→ARK chain + firmware signature, golden-tested against a captured GCP report), and the JWS/policy machinery is in place — but there is **no live evidence-fetch channel deployed in any provisioned VM**, so no report is ever actually retrieved and verified at run time. Consequently `attestation: required` (the default) **fails closed** before provisioning, and the only path that runs a workload is `attestation: off` — an explicit opt-in to **encrypted-memory-without-verification** (data-in-use protection, no proof the TEE is genuine or correctly configured). Remaining per-provider work: the in-TEE evidence agent + live fetch; Azure MAA (JWKS fetch/pinning not built); AWS uses **VLEK** signing (not KDS-fetchable VCEK), so its chain path is not yet implemented. Treat confidential mode today as *encrypted memory, unverified*.
 
 ## Cloud CLI argument discipline
 
@@ -76,16 +76,24 @@ Tempfiles holding sensitive content use `WriteSecureTempFile` (O_CREATE|O_EXCL|O
 
 ## Network exposure
 
-Dispatcher-provisioned cloud VMs are created with the **provider's default network posture**: dispatcher does not attach a per-run firewall or security group. In practice that means SSH (port 22) and any port the workload itself binds are reachable from wherever the provider's defaults allow — typically the public internet (Hetzner and AWS attach no firewall unless one is configured on the account/VPC; GCP assigns an external IP; Azure auto-creates an NSG that commonly allows SSH from any source).
+Dispatcher-provisioned cloud VMs default to an **SSH-open posture**, which varies by provider:
+
+- **AWS** — dispatcher creates a **per-run security group** on every VM (deleted on teardown) admitting inbound SSH from `0.0.0.0/0` by default. The default VPC group only permits intra-group traffic, so this group is what makes the VM reachable at all.
+- **GCP** — the instance lands on the project's default network, whose built-in `default-allow-ssh` rule permits tcp:22 from `0.0.0.0/0`; dispatcher adds no per-run rule.
+- **Azure** — `az vm create` auto-creates an NSG that commonly allows SSH from any source; dispatcher adds no per-run rule of its own.
+- **Hetzner** — no firewall unless `--allow-ssh-from` is set (below).
+
+So SSH (port 22) and any port the workload itself binds are reachable from the public internet by default on every provider.
 
 SSH access is gated by a **per-run ed25519 key with no password** and host-key pinning (see above), so the open SSH port is not brute-forceable. The residual exposure is defense-in-depth: SSH-daemon attack surface for the VM's lifetime, and **any workload-bound port (dev server, debugger, datastore) is world-reachable with no network-layer restriction**.
 
-**Per-run firewall (opt-in).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to attach a least-privilege firewall that permits inbound SSH only from that range:
+**Per-run SSH allowlist (`--allow-ssh-from`).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to restrict inbound SSH to that range:
 
-- **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule and attaches it at create time; deleted on teardown.
-- **AWS / Azure / GCP** — not yet implemented; a non-empty `--allow-ssh-from` is **rejected** (no silent fallback). GCP in particular is rejected rather than approximated: instances land on the default network whose built-in `default-allow-ssh` rule permits tcp:22 from `0.0.0.0/0`, and an additive ALLOW rule cannot subtract that access — a per-run ALLOW rule would imply a restriction it does not enforce. Restrict SSH at the account/VPC level (security group / NSG / dedicated VPC) on those providers.
+- **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule from the CIDR, attached at create time; deleted on teardown.
+- **AWS** — the *provider* already applies the CIDR as the per-run security group's SSH ingress (replacing the `0.0.0.0/0` default). **But the CLI currently gates `--allow-ssh-from` to `hetzner-vm` only** (`run` rejects it for other targets), so this AWS capability is not yet reachable end-to-end — an AWS VM's SG defaults to `0.0.0.0/0` until the gate is widened.
+- **GCP / Azure** — **rejected** (no silent fallback). GCP's built-in `default-allow-ssh` permits tcp:22 from `0.0.0.0/0` and an additive ALLOW rule cannot subtract that access, so a per-run rule would imply a restriction it does not enforce; restrict SSH at the network/NSG level instead.
 
-The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. `run` rejects `--allow-ssh-from` up front when the recommended target is not `hetzner-vm`. *Note: the Hetzner firewall create/attach/delete lifecycle is covered by argv-level unit tests but has not been smoke-tested against live cloud APIs.* When `--allow-ssh-from` is unset, no firewall is attached and provider defaults apply — operators remain responsible for account- or VPC-level firewalls, and for any non-SSH workload-bound ports.
+The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. *The AWS per-run SG and Hetzner firewall are covered by argv-level unit tests and live-validated via `gc` reap; live `--allow-ssh-from` restriction on AWS awaits wiring the CLI gate.* Operators remain responsible for restricting any non-SSH workload-bound ports.
 
 ## LLM trust boundary
 
