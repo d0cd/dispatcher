@@ -125,6 +125,9 @@ func (a *AWSProvider) DestroyResource(ctx context.Context, res adapter.ResourceI
 	if region == "" {
 		region = a.defaultRegion
 	}
+	if !destroyArgsSafe(res.ResourceID, region) {
+		return fmt.Errorf("aws: refusing to destroy %q: unsafe resource id or region", res.ResourceID)
+	}
 	var args []string
 	switch res.Kind {
 	case adapter.ResourceInstance:

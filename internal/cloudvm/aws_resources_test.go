@@ -187,6 +187,22 @@ func TestAWSProvider_ListResources_StoppedInstanceNotComputePriced(t *testing.T)
 	assert.True(t, found, "a stopped instance is still enumerated for reap visibility")
 }
 
+// If every region fails to enumerate, ListResources must return an error, not
+// silently report an empty fleet (which would make gc see zero orphans).
+func TestAWSProvider_ListResources_AllRegionsFailAborts(t *testing.T) {
+	resp := func(_ string, args ...string) ([]byte, error) {
+		if len(args) >= 2 && args[1] == "describe-regions" {
+			return []byte(`["us-east-1","eu-west-1"]`), nil
+		}
+		return nil, assert.AnError // every per-region query fails
+	}
+	captureRunCLIWith(t, resp)
+
+	_, err := NewAWSProvider("us-east-1").ListResources(context.Background())
+	require.Error(t, err, "all regions failing must surface as an enumeration error")
+	assert.Contains(t, err.Error(), "region")
+}
+
 func TestAWSProvider_DestroyResource_Argv(t *testing.T) {
 	p := NewAWSProvider("us-east-1")
 

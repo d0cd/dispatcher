@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 )
@@ -139,6 +140,9 @@ func (a *AzureProvider) DestroyResource(ctx context.Context, res adapter.Resourc
 	if !res.DispatcherOwned() {
 		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
 	}
+	if !destroyArgsSafe(res.ResourceID, "") {
+		return fmt.Errorf("azure: refusing to destroy %q: unsafe resource id", res.ResourceID)
+	}
 	var args []string
 	switch res.Kind {
 	case adapter.ResourceInstance:
@@ -177,7 +181,12 @@ func (a *AzureProvider) listVMResources(ctx context.Context) ([]adapter.Resource
 	catalog := NewCatalog()
 	var res []adapter.ResourceInfo
 	for _, vm := range vms {
-		if vm.PowerState == "VM deallocated" {
+		// Positive allowlist: only enumerate a VM in a known billing state
+		// (running, or stopped-but-allocated). A deallocated VM isn't compute-
+		// billing (its disk is enumerated separately), and an empty/unrecognized
+		// powerState is skipped rather than treated as live-and-reapable.
+		ps := strings.ToLower(vm.PowerState)
+		if !strings.Contains(ps, "running") && !strings.Contains(ps, "stopped") {
 			continue
 		}
 		res = append(res, adapter.ResourceInfo{

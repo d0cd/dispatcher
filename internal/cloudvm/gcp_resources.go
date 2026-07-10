@@ -66,6 +66,9 @@ func (g *GCPProvider) DestroyResource(ctx context.Context, res adapter.ResourceI
 	if !res.DispatcherOwned() {
 		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
 	}
+	if !destroyArgsSafe(res.ResourceID, res.Region) {
+		return fmt.Errorf("gcp: refusing to destroy %q: unsafe resource id or region", res.ResourceID)
+	}
 	var args []string
 	switch res.Kind {
 	case adapter.ResourceInstance:

@@ -45,6 +45,9 @@ func (h *HetznerProvider) DestroyResource(ctx context.Context, res adapter.Resou
 	if !res.DispatcherOwned() {
 		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
 	}
+	if !destroyArgsSafe(res.ResourceID, "") {
+		return fmt.Errorf("hetzner: refusing to destroy %q: unsafe resource id", res.ResourceID)
+	}
 	var args []string
 	switch res.Kind {
 	case adapter.ResourceInstance:

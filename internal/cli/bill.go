@@ -201,9 +201,36 @@ func awsBillArgs(start, end time.Time, all, byService bool) []string {
 	return args
 }
 
+// billSummary picks the reported currency and a warning note from the set of
+// currencies seen and the count of unparseable rows. Summing across currencies
+// is meaningless, so it flags "MIXED"; a dropped row means the total is an
+// undercount, which a cost-safety tool must not hide.
+func billSummary(currencies map[string]bool, dropped int) (string, string) {
+	currency := "USD"
+	if len(currencies) == 1 {
+		for c := range currencies {
+			currency = c
+		}
+	} else if len(currencies) > 1 {
+		currency = "MIXED"
+	}
+	var note string
+	if dropped > 0 {
+		note = fmt.Sprintf("%d line item(s) unparseable; total may be understated", dropped)
+	}
+	if len(currencies) > 1 {
+		if note != "" {
+			note += "; "
+		}
+		note += "multiple currencies summed"
+	}
+	return currency, note
+}
+
 // parseAWSCost reads a Cost Explorer response. With byService it returns the
-// per-service breakdown (and their sum); otherwise the period total.
-func parseAWSCost(raw []byte, byService bool) (float64, string, []serviceSpend, error) {
+// per-service breakdown (and their sum); otherwise the period total. The note
+// flags unparseable rows or mixed currencies.
+func parseAWSCost(raw []byte, byService bool) (float64, string, []serviceSpend, string, error) {
 	var parsed struct {
 		ResultsByTime []struct {
 			Total struct {
@@ -224,16 +251,18 @@ func parseAWSCost(raw []byte, byService bool) (float64, string, []serviceSpend, 
 		} `json:"ResultsByTime"`
 	}
 	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return 0, "", nil, err
+		return 0, "", nil, "", err
 	}
 	var total float64
-	currency := "USD"
+	currencies := map[string]bool{}
+	dropped := 0
 	var services []serviceSpend
 	for _, r := range parsed.ResultsByTime {
 		if byService {
 			for _, g := range r.Groups {
 				v, err := strconv.ParseFloat(g.Metrics.UnblendedCost.Amount, 64)
 				if err != nil {
+					dropped++
 					continue
 				}
 				name := ""
@@ -242,7 +271,7 @@ func parseAWSCost(raw []byte, byService bool) (float64, string, []serviceSpend, 
 				}
 				total += v
 				if u := g.Metrics.UnblendedCost.Unit; u != "" {
-					currency = u
+					currencies[u] = true
 				}
 				if v > 0 {
 					services = append(services, serviceSpend{Name: name, Amount: v})
@@ -252,15 +281,17 @@ func parseAWSCost(raw []byte, byService bool) (float64, string, []serviceSpend, 
 		}
 		v, err := strconv.ParseFloat(r.Total.UnblendedCost.Amount, 64)
 		if err != nil {
+			dropped++
 			continue
 		}
 		total += v
 		if u := r.Total.UnblendedCost.Unit; u != "" {
-			currency = u
+			currencies[u] = true
 		}
 	}
 	sortServices(services)
-	return total, currency, services, nil
+	currency, note := billSummary(currencies, dropped)
+	return total, currency, services, note, nil
 }
 
 // awsSpend uses Cost Explorer (needs ce:GetCostAndUsage). Data lags up to ~24h
@@ -277,17 +308,17 @@ func awsSpend(ctx context.Context, start, end time.Time, all, byService bool) pr
 	if err != nil {
 		return unavailable(out, fmt.Sprintf("Cost Explorer query failed (need ce:GetCostAndUsage; data lags ~24h after enabling): %v", trimCmdErr(err)))
 	}
-	amount, currency, services, err := parseAWSCost(raw, byService)
+	amount, currency, services, note, err := parseAWSCost(raw, byService)
 	if err != nil {
 		return unavailable(out, fmt.Sprintf("parse aws output: %v", err))
 	}
-	out.amount, out.currency, out.services = amount, currency, services
+	out.amount, out.currency, out.services, out.note = amount, currency, services, note
 	return out
 }
 
 // parseAzureCost reads `az consumption usage list`. Without all it keeps only
 // dispatcher-tagged rows; with byService it aggregates by consumedService.
-func parseAzureCost(raw []byte, all, byService bool) (float64, string, []serviceSpend, error) {
+func parseAzureCost(raw []byte, all, byService bool) (float64, string, []serviceSpend, string, error) {
 	var rows []struct {
 		PretaxCost      string            `json:"pretaxCost"`
 		Currency        string            `json:"currency"`
@@ -295,10 +326,11 @@ func parseAzureCost(raw []byte, all, byService bool) (float64, string, []service
 		Tags            map[string]string `json:"tags"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
-		return 0, "", nil, err
+		return 0, "", nil, "", err
 	}
 	var total float64
-	currency := "USD"
+	currencies := map[string]bool{}
+	dropped := 0
 	byName := map[string]float64{}
 	for _, r := range rows {
 		if !all && r.Tags["dispatcher"] != "true" {
@@ -306,11 +338,12 @@ func parseAzureCost(raw []byte, all, byService bool) (float64, string, []service
 		}
 		v, err := strconv.ParseFloat(r.PretaxCost, 64)
 		if err != nil {
+			dropped++
 			continue
 		}
 		total += v
 		if r.Currency != "" {
-			currency = r.Currency
+			currencies[r.Currency] = true
 		}
 		byName[r.ConsumedService] += v
 	}
@@ -323,7 +356,8 @@ func parseAzureCost(raw []byte, all, byService bool) (float64, string, []service
 		}
 		sortServices(services)
 	}
-	return total, currency, services, nil
+	currency, note := billSummary(currencies, dropped)
+	return total, currency, services, note, nil
 }
 
 func azureSpend(ctx context.Context, start, end time.Time, all, byService bool) providerSpend {
@@ -341,11 +375,11 @@ func azureSpend(ctx context.Context, start, end time.Time, all, byService bool) 
 	if err != nil {
 		return unavailable(out, fmt.Sprintf("consumption query failed (need Billing Reader role): %v", trimCmdErr(err)))
 	}
-	amount, currency, services, err := parseAzureCost(raw, all, byService)
+	amount, currency, services, note, err := parseAzureCost(raw, all, byService)
 	if err != nil {
 		return unavailable(out, fmt.Sprintf("parse az output: %v", err))
 	}
-	out.amount, out.currency, out.services = amount, currency, services
+	out.amount, out.currency, out.services, out.note = amount, currency, services, note
 	return out
 }
 
@@ -379,33 +413,36 @@ func buildGCPBillingSQL(table string, start, end time.Time, all, byService bool)
 
 // parseGCPBillingRows reads `bq query --format=json` rows (net, currency, and
 // optionally service).
-func parseGCPBillingRows(raw []byte) (float64, string, []serviceSpend, error) {
+func parseGCPBillingRows(raw []byte) (float64, string, []serviceSpend, string, error) {
 	var rows []struct {
 		Service  string `json:"service"`
 		Net      string `json:"net"`
 		Currency string `json:"currency"`
 	}
 	if err := json.Unmarshal(raw, &rows); err != nil {
-		return 0, "", nil, err
+		return 0, "", nil, "", err
 	}
 	var total float64
-	currency := "USD"
+	currencies := map[string]bool{}
+	dropped := 0
 	var services []serviceSpend
 	for _, r := range rows {
 		v, err := strconv.ParseFloat(r.Net, 64)
 		if err != nil {
+			dropped++
 			continue
 		}
 		total += v
 		if r.Currency != "" {
-			currency = r.Currency
+			currencies[r.Currency] = true
 		}
 		if r.Service != "" && v > 0 {
 			services = append(services, serviceSpend{Name: r.Service, Amount: v})
 		}
 	}
 	sortServices(services)
-	return total, currency, services, nil
+	currency, note := billSummary(currencies, dropped)
+	return total, currency, services, note, nil
 }
 
 // gcpSpend queries the BigQuery billing export named by
@@ -432,11 +469,11 @@ func gcpSpend(ctx context.Context, start, end time.Time, all, byService bool) pr
 	if err != nil {
 		return unavailable(out, fmt.Sprintf("bq query failed (table may not have ingested data yet, ~hours after enabling): %v", trimCmdErr(err)))
 	}
-	amount, currency, services, err := parseGCPBillingRows(raw)
+	amount, currency, services, note, err := parseGCPBillingRows(raw)
 	if err != nil {
 		return unavailable(out, fmt.Sprintf("parse bq output: %v", err))
 	}
-	out.amount, out.currency, out.services = amount, currency, services
+	out.amount, out.currency, out.services, out.note = amount, currency, services, note
 	return out
 }
 

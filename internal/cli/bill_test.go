@@ -36,7 +36,7 @@ func TestAWSBillArgs(t *testing.T) {
 
 func TestParseAWSCost_Total(t *testing.T) {
 	raw := []byte(`{"ResultsByTime":[{"Total":{"UnblendedCost":{"Amount":"12.34","Unit":"USD"}}}]}`)
-	amount, currency, services, err := parseAWSCost(raw, false)
+	amount, currency, services, _, err := parseAWSCost(raw, false)
 	require.NoError(t, err)
 	assert.InDelta(t, 12.34, amount, 0.001)
 	assert.Equal(t, "USD", currency)
@@ -47,7 +47,7 @@ func TestParseAWSCost_ByService(t *testing.T) {
 	raw := []byte(`{"ResultsByTime":[{"Groups":[
 		{"Keys":["Amazon Elastic Compute Cloud - Compute"],"Metrics":{"UnblendedCost":{"Amount":"7.00","Unit":"USD"}}},
 		{"Keys":["Amazon Simple Storage Service"],"Metrics":{"UnblendedCost":{"Amount":"3.50","Unit":"USD"}}}]}]}`)
-	amount, currency, services, err := parseAWSCost(raw, true)
+	amount, currency, services, _, err := parseAWSCost(raw, true)
 	require.NoError(t, err)
 	assert.InDelta(t, 10.50, amount, 0.001, "total sums the service breakdown")
 	assert.Equal(t, "USD", currency)
@@ -76,11 +76,25 @@ func TestParseGCPBillingRows(t *testing.T) {
 	// bq --format=json returns an array of row objects.
 	raw := []byte(`[{"service":"Compute Engine","net":"4.20","currency":"USD"},
 		{"service":"Cloud Storage","net":"0.80","currency":"USD"}]`)
-	amount, currency, services, err := parseGCPBillingRows(raw)
+	amount, currency, services, _, err := parseGCPBillingRows(raw)
 	require.NoError(t, err)
 	assert.InDelta(t, 5.00, amount, 0.001)
 	assert.Equal(t, "USD", currency)
 	require.Len(t, services, 2)
+}
+
+// Summing across currencies is meaningless and an unparseable row understates
+// the total — both must be flagged, not hidden.
+func TestParseAWSCost_MixedCurrencyAndDroppedRow(t *testing.T) {
+	raw := []byte(`{"ResultsByTime":[{"Groups":[
+		{"Keys":["A"],"Metrics":{"UnblendedCost":{"Amount":"7.00","Unit":"USD"}}},
+		{"Keys":["B"],"Metrics":{"UnblendedCost":{"Amount":"3.00","Unit":"EUR"}}},
+		{"Keys":["C"],"Metrics":{"UnblendedCost":{"Amount":"not-a-number","Unit":"USD"}}}]}]}`)
+	_, currency, _, note, err := parseAWSCost(raw, true)
+	require.NoError(t, err)
+	assert.Equal(t, "MIXED", currency, "more than one currency must not be summed under a single label")
+	assert.Contains(t, note, "unparseable", "a dropped row must be surfaced")
+	assert.Contains(t, note, "currencies")
 }
 
 func TestParseAzureCost(t *testing.T) {
@@ -89,12 +103,12 @@ func TestParseAzureCost(t *testing.T) {
 		{"pretaxCost":"2.00","currency":"USD","consumedService":"Microsoft.Storage","tags":{}}]`)
 
 	// tagged only
-	amt, _, _, err := parseAzureCost(raw, false, false)
+	amt, _, _, _, err := parseAzureCost(raw, false, false)
 	require.NoError(t, err)
 	assert.InDelta(t, 5.00, amt, 0.001, "tagged mode counts only dispatcher=true rows")
 
 	// all, by service
-	amtAll, _, svcs, err := parseAzureCost(raw, true, true)
+	amtAll, _, svcs, _, err := parseAzureCost(raw, true, true)
 	require.NoError(t, err)
 	assert.InDelta(t, 7.00, amtAll, 0.001, "--all counts every row")
 	require.Len(t, svcs, 2)

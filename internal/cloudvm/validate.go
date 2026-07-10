@@ -66,6 +66,19 @@ func isSafeArg(s string) bool {
 	return true
 }
 
+// destroyArgsSafe guards a resource's cloud-derived id and region before they
+// are interpolated into a delete argv — defense-in-depth so a value can never
+// be reinterpreted as a flag. Region may be empty (global/RG-scoped kinds).
+func destroyArgsSafe(id, region string) bool {
+	if !isSafeArg(id) {
+		return false
+	}
+	if region != "" && !isSafeArg(region) {
+		return false
+	}
+	return true
+}
+
 // validateVMArgs validates the resolved region, instance type, and image
 // before they are interpolated into a provider's CLI argv.
 func validateVMArgs(region, instanceType, image string) error {
