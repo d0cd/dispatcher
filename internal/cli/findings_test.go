@@ -194,9 +194,11 @@ func TestCheckSSH_UnreachableHostFails(t *testing.T) {
 // ---- S3: gc confirmation ----
 
 type fakeGCAdapter struct {
-	id        string
-	resources []adapter.ResourceInfo
-	destroyed []string
+	id         string
+	resources  []adapter.ResourceInfo
+	destroyed  []string
+	destroyErr map[string]error // per-resource-id destroy failure
+	listErr    error            // ListResources failure
 }
 
 func (f *fakeGCAdapter) ID() string { return f.id }
@@ -228,9 +230,12 @@ func (f *fakeGCAdapter) ExtendWatchdog(context.Context, *adapter.RunHandle, time
 	return time.Time{}, nil
 }
 func (f *fakeGCAdapter) ListResources(context.Context) ([]adapter.ResourceInfo, error) {
-	return f.resources, nil
+	return f.resources, f.listErr
 }
 func (f *fakeGCAdapter) DestroyResource(_ context.Context, res adapter.ResourceInfo) error {
+	if err := f.destroyErr[res.ResourceID]; err != nil {
+		return err // a failed destroy must NOT be recorded as destroyed
+	}
 	f.destroyed = append(f.destroyed, res.ResourceID)
 	return nil
 }
@@ -461,6 +466,85 @@ func TestGC_AllowEmptyStoreOverrideReaps(t *testing.T) {
 	_, _, err := executeCommand("gc", "--yes", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"srv-123"}, f.destroyed, "override permits reaping a genuine orphan from an empty store")
+}
+
+// A destroy that fails must be reported as an error, not silently counted as
+// destroyed — the JSON report must show Found=2, Destroyed=1, and the error.
+func TestGC_JSON_PartialFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	owned := map[string]string{"dispatcher": "true"}
+	f := &fakeGCAdapter{
+		id: "gcp-vm",
+		resources: []adapter.ResourceInfo{
+			{ResourceID: "ok-1", Provider: "gcp", RunID: "run_a", Tags: owned},
+			{ResourceID: "fail-1", Provider: "gcp", RunID: "run_b", Tags: owned},
+		},
+		destroyErr: map[string]error{"fail-1": assert.AnError},
+	}
+	withGCAdapter(t, f)
+
+	stdout := captureStdout(t, func() {
+		_, _, err := executeCommand("--output", "json", "gc", "--yes", "--allow-empty-store")
+		require.NoError(t, err)
+	})
+
+	var r gcReport
+	require.NoError(t, json.Unmarshal([]byte(stdout), &r))
+	assert.Equal(t, 2, r.Found)
+	assert.Equal(t, 1, r.Destroyed, "a failed destroy must not be counted")
+	assert.Equal(t, []string{"ok-1"}, f.destroyed)
+	var errored int
+	for _, o := range r.Orphans {
+		if o.Error != "" {
+			errored++
+		}
+	}
+	assert.Equal(t, 1, errored, "the failed orphan must carry its error")
+}
+
+// A failed destroy must NOT reclaim the run's per-run SSH key material — the VM
+// may still be live.
+func TestGC_FailedDestroyDoesNotReclaimKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	keyDir, err := statedir.Subdir("keys")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(keyDir, 0o700))
+	keyPath := keyDir + "/dispatcher-run_gone" // orphanFixture's RunID
+	require.NoError(t, os.WriteFile(keyPath, []byte("k"), 0o600))
+
+	f := orphanFixture()
+	f.destroyErr = map[string]error{"srv-123": assert.AnError}
+	withGCAdapter(t, f)
+
+	_, _, err = executeCommand("gc", "--yes", "--allow-empty-store")
+	require.NoError(t, err)
+	assert.Empty(t, f.destroyed, "the failing destroy is not recorded")
+
+	_, statErr := os.Stat(keyPath)
+	assert.NoError(t, statErr, "SSH key must survive when the destroy failed (VM may be live)")
+}
+
+// A provider whose ListResources fails is warned about and skipped, not treated
+// as zero resources and not aborting the whole GC.
+func TestGC_ListResourcesFailureWarnsAndContinues(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = true
+	t.Cleanup(func() { gcFlags.dryRun = false })
+
+	f := &fakeGCAdapter{id: "gcp-vm", listErr: assert.AnError}
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--dry-run")
+	require.NoError(t, err, "a listing failure must not abort gc")
+	assert.Empty(t, f.destroyed)
 }
 
 // A resource dispatcher does not own (no dispatcher=true tag) must be listed
