@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/cloudflare/circl v1.6.4
 	github.com/fatih/color v1.18.0
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/spf13/cobra v1.8.1
 	github.com/stretchr/testify v1.9.0
 	gopkg.in/yaml.v3 v3.0.1

@@ -159,6 +159,19 @@ func TestVerifyJWS_ES256_Negative(t *testing.T) {
 	})
 }
 
+// TestVerifyJWS_BindsToPinnedKeyNotToken: an attacker who signs a token with
+// their own key under a trusted kid must fail — verification uses the key we
+// pinned, never the identity the token claims.
+func TestVerifyJWS_BindsToPinnedKeyNotToken(t *testing.T) {
+	trusted, _ := rsa.GenerateKey(rand.Reader, 2048)
+	attacker, _ := rsa.GenerateKey(rand.Reader, 2048)
+	keys := map[string]crypto.PublicKey{"k1": &trusted.PublicKey}
+
+	tok := mintJWT(t, "k1", "RS256", attacker, map[string]any{"iss": "evil"})
+	_, err := verifyJWS(tok, keys)
+	require.Error(t, err, "a token signed by an untrusted key must fail even when its kid matches a trusted one")
+}
+
 func TestVerifyJWS_WrongKeyType(t *testing.T) {
 	ec, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	rsaKey, _ := rsa.GenerateKey(rand.Reader, 2048)
