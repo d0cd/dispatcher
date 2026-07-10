@@ -1,103 +1,144 @@
 package cloudvm
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// maaToken holds the subset of Microsoft Azure Attestation (MAA) claims the
-// verifier enforces. MAA validates the hardware quote (SEV-SNP or TDX) and
-// re-issues the result as a signed JWT, so trust reduces to the JWS signature
-// plus these claims. Field names are MAA's published SEV-SNP claim schema.
+// Azure Confidential VM attestation is a Microsoft Azure Attestation (MAA) JWT.
+// The token has two parts, confirmed against a real captured token: the SEV-SNP
+// hardware facts are NESTED under `x-ms-isolation-tee` (the isolation TEE), while
+// the per-run binding rides in the top-level `x-ms-runtime.client-payload.nonce`
+// (base64) — the value the guest supplied as the TPM-quote qualifying data, which
+// MAA echoes. The vTPM SNP report's own REPORT_DATA is boot-fixed (the AK hash),
+// so it cannot carry our nonce — the client-payload is the binding channel.
 type maaToken struct {
-	AttestationType      string `json:"x-ms-attestation-type"`
-	ComplianceStatus     string `json:"x-ms-compliance-status"`
-	SNPLaunchMeasurement string `json:"x-ms-sevsnpvm-launchmeasurement"`
-	SNPReportData        string `json:"x-ms-sevsnpvm-reportdata"`
-	SNPIsDebuggable      bool   `json:"x-ms-sevsnpvm-is-debuggable"`
-	Exp                  int64  `json:"exp"` // JWT expiry (unix seconds)
-	Nbf                  int64  `json:"nbf"` // JWT not-before
-	Iss                  string `json:"iss"` // JWT issuer (the MAA instance)
+	Iss     string `json:"iss"`
+	Exp     int64  `json:"exp"`
+	Nbf     int64  `json:"nbf"`
+	Runtime struct {
+		ClientPayload struct {
+			Nonce string `json:"nonce"` // base64 of the nonce the guest supplied
+		} `json:"client-payload"`
+	} `json:"x-ms-runtime"`
+	IsolationTEE struct {
+		AttestationType   string `json:"x-ms-attestation-type"`  // "sevsnpvm"
+		ComplianceStatus  string `json:"x-ms-compliance-status"` // "azure-compliant-cvm"
+		LaunchMeasurement string `json:"x-ms-sevsnpvm-launchmeasurement"`
+		IsDebuggable      bool   `json:"x-ms-sevsnpvm-is-debuggable"`
+	} `json:"x-ms-isolation-tee"`
 }
 
-// verifyMAAToken verifies an MAA JWT against the trusted MAA signing keys and
-// projects it onto provider-agnostic Claims. It enforces the signature, that
-// the platform is an Azure-compliant CVM, and a recognized TEE type; the
-// remaining policy (measurement allowlist, REPORT_DATA binding) is applyPolicy's
-// job. TCB is left zero — MAA reports per-component SVNs rather than a single
-// TCB, so minTCB enforcement on the MAA path is not yet wired (see gaps §6).
-func verifyMAAToken(token string, keys map[string]crypto.PublicKey, expectedIssuer string) (Claims, error) {
+// MAAPolicy is what an Azure confidential run demands of an MAA token.
+type MAAPolicy struct {
+	Issuer       string   // pinned MAA instance issuer (required)
+	Nonce        []byte   // expected client-payload nonce (= maaBindingNonce)
+	Measurements []string // exact allowlist of accepted launch measurements (hex)
+}
+
+// maaBindingNonce is the value the guest passes to MAA as the TPM-quote
+// qualifying data: SHA-256 over the per-run nonce concatenated with the in-TEE
+// channel key. SHA-256 (32 bytes) fits the TPM quote's qualifying-data limit
+// (SHA-512 does not — the live TPM rejects it with TPM_RC_SIZE). MAA echoes it in
+// x-ms-runtime.client-payload.nonce, binding this run + sealing key to the token.
+func maaBindingNonce(nonce, channelKey []byte) []byte {
+	h := sha256.New()
+	h.Write(nonce)
+	h.Write(channelKey)
+	return h.Sum(nil)
+}
+
+// verifyMAAToken verifies an Azure MAA CVM token against the pinned MAA signing
+// keys and enforces: the pinned issuer; freshness (exp/nbf plus the per-run nonce
+// echoed in client-payload); and, from the nested isolation TEE, a genuine
+// azure-compliant SEV-SNP CVM with debug off and its launch measurement on the
+// allowlist. Returns the attested launch measurement on success.
+func verifyMAAToken(token string, keys map[string]crypto.PublicKey, p MAAPolicy) (string, error) {
 	payload, err := verifyJWS(token, keys)
 	if err != nil {
-		return Claims{}, fmt.Errorf("maa token signature: %w", err)
+		return "", fmt.Errorf("maa token signature: %w", err)
 	}
 	var t maaToken
 	if err := json.Unmarshal(payload, &t); err != nil {
-		return Claims{}, fmt.Errorf("parse maa claims: %w", err)
+		return "", fmt.Errorf("parse maa token: %w", err)
 	}
-	// Standard JWT freshness/issuer checks — defense-in-depth atop the nonce
-	// binding (which already defeats replay). exp/nbf are enforced when present;
-	// the issuer is enforced when the attester is configured with one.
+
+	if p.Issuer == "" {
+		return "", fmt.Errorf("maa policy issuer must be set (pin the MAA instance)")
+	}
+	if t.Iss != p.Issuer {
+		return "", fmt.Errorf("maa token issuer %q is not the pinned MAA instance %q", t.Iss, p.Issuer)
+	}
 	now := time.Now().Unix()
-	if t.Exp != 0 && now >= t.Exp {
-		return Claims{}, fmt.Errorf("maa token expired")
+	if t.Exp == 0 || now >= t.Exp {
+		return "", fmt.Errorf("maa token is missing exp or has expired")
 	}
 	if t.Nbf != 0 && now < t.Nbf {
-		return Claims{}, fmt.Errorf("maa token not yet valid (nbf)")
-	}
-	if expectedIssuer != "" && t.Iss != expectedIssuer {
-		return Claims{}, fmt.Errorf("maa token issuer %q is not the trusted MAA instance %q", t.Iss, expectedIssuer)
-	}
-	if t.ComplianceStatus != "azure-compliant-cvm" {
-		return Claims{}, fmt.Errorf("maa compliance status %q is not azure-compliant-cvm", t.ComplianceStatus)
+		return "", fmt.Errorf("maa token is not yet valid (nbf)")
 	}
 
-	var teeType string
-	switch t.AttestationType {
-	case "sevsnpvm":
-		teeType = "sev-snp"
-	case "tdxvm":
-		teeType = "tdx"
-	default:
-		return Claims{}, fmt.Errorf("maa attestation type %q is not a recognized confidential VM type", t.AttestationType)
+	// Freshness/anti-replay + channel-key binding: the echoed client-payload
+	// nonce must equal our expected value (SHA-256(nonce ‖ channelKey)).
+	if len(p.Nonce) == 0 {
+		return "", fmt.Errorf("maa policy nonce missing — fail closed")
 	}
-
-	reportData, err := hex.DecodeString(t.SNPReportData)
+	got, err := base64.StdEncoding.DecodeString(t.Runtime.ClientPayload.Nonce)
 	if err != nil {
-		return Claims{}, fmt.Errorf("maa report data is not hex: %w", err)
+		return "", fmt.Errorf("maa client-payload nonce is not base64: %w", err)
 	}
-	return Claims{
-		TEEType:      teeType,
-		Measurement:  t.SNPLaunchMeasurement,
-		DebugEnabled: t.SNPIsDebuggable,
-		ReportData:   reportData,
-	}, nil
+	if !bytes.Equal(got, p.Nonce) {
+		return "", fmt.Errorf("maa token client-payload nonce does not bind this run's nonce and channel key (replay/relay)")
+	}
+
+	// The SEV-SNP facts live in the nested isolation TEE.
+	tee := t.IsolationTEE
+	if !strings.EqualFold(tee.AttestationType, "sevsnpvm") {
+		return "", fmt.Errorf("maa isolation-tee attestation type %q is not sevsnpvm", tee.AttestationType)
+	}
+	if !strings.EqualFold(tee.ComplianceStatus, "azure-compliant-cvm") {
+		return "", fmt.Errorf("maa compliance status %q is not azure-compliant-cvm", tee.ComplianceStatus)
+	}
+	if tee.IsDebuggable {
+		return "", fmt.Errorf("maa token reports a debuggable VM (debug must be off)")
+	}
+	if !measurementAllowed(tee.LaunchMeasurement, p.Measurements) {
+		return "", fmt.Errorf("maa launch measurement %q is not on the allowlist", tee.LaunchMeasurement)
+	}
+	return tee.LaunchMeasurement, nil
 }
 
 // maaEvidence is what the per-VM fetch returns: the MAA token the guest obtained
-// (binding the verifier's nonce in its runtime data) and the in-TEE channel key.
+// (its client-payload nonce binding SHA-256(nonce ‖ channelKey)) and the in-TEE
+// channel key dispatcher seals to.
 type maaEvidence struct {
 	token      string
 	channelKey []byte
 }
 
-// maaFetch obtains an MAA token from a booted Azure confidential VM. It needs a
-// live guest agent, so it is the one part not unit-testable offline.
+// maaFetch obtains an MAA token from a booted Azure confidential VM. The guest
+// generates the channel key, passes SHA-256(nonce ‖ channelKey) to MAA as the
+// TPM-quote qualifying data, and returns the token + channel key. It needs a live
+// vTPM, so it is the one part not unit-testable offline.
 type maaFetch func(ctx context.Context, vm *VMInfo, sshKeyPath, sshUser string, nonce []byte) (maaEvidence, error)
 
-// azureAttester verifies Azure confidential VMs via MAA. keys are the trusted
-// MAA signing keys (JWKS); isReady is false until a real fetch is wired, so the
-// preflight fails closed before provisioning.
+// azureAttester verifies Azure confidential VMs via MAA. keys are the trusted MAA
+// signing keys (the instance's /certs JWKS); issuer is the pinned MAA instance;
+// isReady is false until a real fetch is wired, so the preflight fails closed
+// before provisioning.
 type azureAttester struct {
 	keys    map[string]crypto.PublicKey
-	issuer  string // the trusted MAA instance's `iss`; enforced when set
+	issuer  string
 	fetch   maaFetch
 	isReady bool
 }
@@ -117,27 +158,23 @@ func (a *azureAttester) Verify(ctx context.Context, vm *VMInfo, sshKeyPath, sshU
 	if err != nil {
 		return AttestationResult{}, fmt.Errorf("fetch maa evidence: %w", err)
 	}
-	claims, err := verifyMAAToken(ev.token, a.keys, a.issuer)
-	if err != nil {
-		return AttestationResult{}, err
-	}
 
-	policy := VerificationPolicy{
-		ExpectedType: req.Type,
+	measurement, err := verifyMAAToken(ev.token, a.keys, MAAPolicy{
+		Issuer:       a.issuer,
+		Nonce:        maaBindingNonce(nonce, ev.channelKey),
 		Measurements: req.Measurements,
-		MinTCB:       req.MinTCB,
-		Nonce:        nonce,
-		ChannelKey:   ev.channelKey,
-	}
-	if err := applyPolicy(claims, policy); err != nil {
+	})
+	if err != nil {
+		// A token that fails verification is a verdict (abort the run), not a
+		// fetch fault — surface the reason.
 		return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
 	}
 	return AttestationResult{
 		Verified:    true,
-		Type:        claims.TEEType,
-		Measurement: claims.Measurement,
-		TCB:         claims.TCB,
+		Type:        "sev-snp",
+		Measurement: measurement,
 		Nonce:       hex.EncodeToString(nonce),
 		Verdict:     "verified",
+		ChannelKey:  ev.channelKey, // verified-bound; the adapter seals to it
 	}, nil
 }

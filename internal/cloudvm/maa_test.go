@@ -1,12 +1,13 @@
 package cloudvm
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rand"
 	"crypto/rsa"
-	"encoding/hex"
-	"fmt"
+	"crypto/sha256"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -23,173 +24,156 @@ func maaSigningKey(t *testing.T) (*rsa.PrivateKey, map[string]crypto.PublicKey) 
 	return key, map[string]crypto.PublicKey{"maa1": &key.PublicKey}
 }
 
-func TestVerifyMAAToken_ExtractsClaims(t *testing.T) {
-	key, keys := maaSigningKey(t)
-	meas := hex.EncodeToString(make48(0x33))
-	rd := bytesRepeat(0x44, 64)
-	tok := mintJWT(t, "maa1", "RS256", key, map[string]any{
-		"x-ms-attestation-type":           "sevsnpvm",
-		"x-ms-compliance-status":          "azure-compliant-cvm",
-		"x-ms-sevsnpvm-launchmeasurement": meas,
-		"x-ms-sevsnpvm-reportdata":        hex.EncodeToString(rd),
-		"x-ms-sevsnpvm-is-debuggable":     false,
-	})
+const (
+	maaIssuer      = "https://sharedeus.eus.attest.azure.net"
+	maaMeasurement = "5b0ce64ad1c1f6375dbda5f760b98526"
+)
 
-	claims, err := verifyMAAToken(tok, keys, "")
+var maaNonce = bytes.Repeat([]byte{0xC3}, 32)
+
+// validMAAClaims builds a token in the real MAA CVM shape: SEV-SNP facts nested
+// under x-ms-isolation-tee, the binding nonce echoed in the top-level
+// x-ms-runtime.client-payload (base64).
+func validMAAClaims() map[string]any {
+	return map[string]any{
+		"iss":                   maaIssuer,
+		"exp":                   time.Now().Add(time.Hour).Unix(),
+		"nbf":                   time.Now().Add(-time.Minute).Unix(),
+		"x-ms-attestation-type": "azurevm",
+		"x-ms-runtime": map[string]any{
+			"client-payload": map[string]any{
+				"nonce": base64.StdEncoding.EncodeToString(maaNonce),
+			},
+		},
+		"x-ms-isolation-tee": map[string]any{
+			"x-ms-attestation-type":           "sevsnpvm",
+			"x-ms-compliance-status":          "azure-compliant-cvm",
+			"x-ms-sevsnpvm-is-debuggable":     false,
+			"x-ms-sevsnpvm-launchmeasurement": maaMeasurement,
+		},
+	}
+}
+
+func maaPolicy() MAAPolicy {
+	return MAAPolicy{Issuer: maaIssuer, Nonce: maaNonce, Measurements: []string{maaMeasurement}}
+}
+
+func TestVerifyMAAToken_Accepts(t *testing.T) {
+	key, keys := maaSigningKey(t)
+	m, err := verifyMAAToken(mintJWT(t, "maa1", "RS256", key, validMAAClaims()), keys, maaPolicy())
 	require.NoError(t, err)
-	assert.Equal(t, "sev-snp", claims.TEEType)
-	assert.Equal(t, meas, claims.Measurement)
-	assert.Equal(t, rd, claims.ReportData)
-	assert.False(t, claims.DebugEnabled)
+	assert.Equal(t, maaMeasurement, m, "returns the attested launch measurement")
 }
 
 func TestVerifyMAAToken_RejectsBadSignature(t *testing.T) {
 	key, _ := maaSigningKey(t)
-	_, otherKeys := maaSigningKey(t) // a different key than the one that signed
-	tok := mintJWT(t, "maa1", "RS256", key, map[string]any{
-		"x-ms-attestation-type":  "sevsnpvm",
-		"x-ms-compliance-status": "azure-compliant-cvm",
-	})
-	_, err := verifyMAAToken(tok, otherKeys, "")
-	require.Error(t, err, "a token not signed by a trusted MAA key must be rejected")
+	_, otherKeys := maaSigningKey(t)
+	_, err := verifyMAAToken(mintJWT(t, "maa1", "RS256", key, validMAAClaims()), otherKeys, maaPolicy())
+	require.Error(t, err, "a token not signed by a pinned MAA key must be rejected")
 }
 
-func TestVerifyMAAToken_RejectsNonCompliant(t *testing.T) {
-	key, keys := maaSigningKey(t)
-	tok := mintJWT(t, "maa1", "RS256", key, map[string]any{
-		"x-ms-attestation-type":  "sevsnpvm",
-		"x-ms-compliance-status": "not-compliant",
-	})
-	_, err := verifyMAAToken(tok, keys, "")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "compliance")
+func TestVerifyMAAToken_Rejects(t *testing.T) {
+	setTEE := func(c map[string]any, k string, v any) {
+		c["x-ms-isolation-tee"].(map[string]any)[k] = v
+	}
+	cases := map[string]struct {
+		mutate func(c map[string]any)
+		policy func(p *MAAPolicy)
+		want   string
+	}{
+		"wrong issuer":        {mutate: func(c map[string]any) { c["iss"] = "https://evil.attest.azure.net" }, want: "issuer"},
+		"expired":             {mutate: func(c map[string]any) { c["exp"] = time.Now().Add(-time.Hour).Unix() }, want: "expired"},
+		"missing exp":         {mutate: func(c map[string]any) { delete(c, "exp") }, want: "exp"},
+		"not yet valid (nbf)": {mutate: func(c map[string]any) { c["nbf"] = time.Now().Add(time.Hour).Unix() }, want: "not yet valid"},
+		"nonce not bound": {mutate: func(c map[string]any) {
+			c["x-ms-runtime"].(map[string]any)["client-payload"].(map[string]any)["nonce"] = base64.StdEncoding.EncodeToString([]byte("wrong"))
+		}, want: "nonce"},
+		"not sevsnpvm":            {mutate: func(c map[string]any) { setTEE(c, "x-ms-attestation-type", "tdxvm") }, want: "sevsnpvm"},
+		"not compliant":           {mutate: func(c map[string]any) { setTEE(c, "x-ms-compliance-status", "non-compliant") }, want: "compliant"},
+		"debuggable":              {mutate: func(c map[string]any) { setTEE(c, "x-ms-sevsnpvm-is-debuggable", true) }, want: "debug"},
+		"measurement not allowed": {policy: func(p *MAAPolicy) { p.Measurements = []string{"other"} }, want: "allowlist"},
+		"empty allowlist":         {policy: func(p *MAAPolicy) { p.Measurements = nil }, want: "allowlist"},
+		"no issuer pinned":        {policy: func(p *MAAPolicy) { p.Issuer = "" }, want: "issuer must be set"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			key, keys := maaSigningKey(t)
+			c := validMAAClaims()
+			if tc.mutate != nil {
+				tc.mutate(c)
+			}
+			p := maaPolicy()
+			if tc.policy != nil {
+				tc.policy(&p)
+			}
+			_, err := verifyMAAToken(mintJWT(t, "maa1", "RS256", key, c), keys, p)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
 }
 
-func TestVerifyMAAToken_RejectsUnknownTEEType(t *testing.T) {
-	key, keys := maaSigningKey(t)
-	tok := mintJWT(t, "maa1", "RS256", key, map[string]any{
-		"x-ms-attestation-type":  "mysterytee",
-		"x-ms-compliance-status": "azure-compliant-cvm",
-	})
-	_, err := verifyMAAToken(tok, keys, "")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "attestation type")
+func TestMAABindingNonce_BindsBothInputs(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0x01}, 32)
+	key := bytes.Repeat([]byte{0x02}, 32)
+	base := maaBindingNonce(nonce, key)
+	assert.Len(t, base, 32, "SHA-256 output fits the TPM quote qualifying data")
+	assert.NotEqual(t, base, maaBindingNonce(bytes.Repeat([]byte{0x03}, 32), key), "a different nonce changes the binding")
+	assert.NotEqual(t, base, maaBindingNonce(nonce, bytes.Repeat([]byte{0x04}, 32)), "a different channel key changes the binding")
+	// Concatenation is order-sensitive (no ambiguity between nonce and key).
+	sum := sha256.Sum256(append(append([]byte{}, nonce...), key...))
+	assert.Equal(t, sum[:], base)
 }
 
-func TestVerifyMAAToken_RejectsExpiredAndWrongIssuer(t *testing.T) {
+func TestAzureAttester_BindsNonceAndChannelKey(t *testing.T) {
 	key, keys := maaSigningKey(t)
-	base := map[string]any{
-		"x-ms-attestation-type":  "sevsnpvm",
-		"x-ms-compliance-status": "azure-compliant-cvm",
-	}
-
-	// Expired token.
-	expired := map[string]any{"exp": time.Now().Add(-time.Hour).Unix()}
-	for k, v := range base {
-		expired[k] = v
-	}
-	_, err := verifyMAAToken(mintJWT(t, "maa1", "RS256", key, expired), keys, "")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "expired")
-
-	// Wrong issuer, when an expected issuer is configured.
-	wrongIss := map[string]any{"iss": "https://evil.attest.azure.net"}
-	for k, v := range base {
-		wrongIss[k] = v
-	}
-	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, wrongIss), keys, "https://trusted.attest.azure.net")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "issuer")
-
-	// Not yet valid (nbf in the future).
-	future := map[string]any{"nbf": time.Now().Add(time.Hour).Unix()}
-	for k, v := range base {
-		future[k] = v
-	}
-	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, future), keys, "")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not yet valid")
-}
-
-func TestAzureAttester_VerifyAccepts(t *testing.T) {
-	key, keys := maaSigningKey(t)
-	meas := make48(0x55)
-	channelKey := []byte("azure-channel-key")
-
-	att := &azureAttester{keys: keys, isReady: true,
+	channelKey := bytes.Repeat([]byte{0x9A}, 32)
+	att := &azureAttester{keys: keys, issuer: maaIssuer, isReady: true,
 		fetch: func(_ context.Context, _ *VMInfo, _, _ string, nonce []byte) (maaEvidence, error) {
-			tok := mintJWT(t, "maa1", "RS256", key, map[string]any{
-				"x-ms-attestation-type":           "sevsnpvm",
-				"x-ms-compliance-status":          "azure-compliant-cvm",
-				"x-ms-sevsnpvm-launchmeasurement": hex.EncodeToString(meas),
-				"x-ms-sevsnpvm-reportdata":        hex.EncodeToString(bindingHash(nonce, channelKey)),
-				"x-ms-sevsnpvm-is-debuggable":     false,
-			})
-			return maaEvidence{token: tok, channelKey: channelKey}, nil
+			c := validMAAClaims()
+			// echo the binding the guest would have supplied
+			c["x-ms-runtime"].(map[string]any)["client-payload"].(map[string]any)["nonce"] =
+				base64.StdEncoding.EncodeToString(maaBindingNonce(nonce, channelKey))
+			return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
 		}}
+	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}}
 
-	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp",
-		Measurements: []string{hex.EncodeToString(meas)}}
-	res, err := att.Verify(context.Background(), &VMInfo{ID: "vm"}, "/k", "u", req)
-	require.NoError(t, err)
-	assert.True(t, res.Verified)
-	assert.Equal(t, "sev-snp", res.Type)
-	assert.Equal(t, hex.EncodeToString(meas), res.Measurement)
-}
-
-func TestAzureAttester_VerifyRejectsReplay(t *testing.T) {
-	key, keys := maaSigningKey(t)
-	meas := make48(0x66)
-	channelKey := []byte("k")
-	stale := bytesRepeat(0xCC, 32)
-	att := &azureAttester{keys: keys, isReady: true,
-		fetch: func(_ context.Context, _ *VMInfo, _, _ string, _ []byte) (maaEvidence, error) {
-			tok := mintJWT(t, "maa1", "RS256", key, map[string]any{
-				"x-ms-attestation-type":           "sevsnpvm",
-				"x-ms-compliance-status":          "azure-compliant-cvm",
-				"x-ms-sevsnpvm-launchmeasurement": hex.EncodeToString(meas),
-				"x-ms-sevsnpvm-reportdata":        hex.EncodeToString(bindingHash(stale, channelKey)),
-			})
-			return maaEvidence{token: tok, channelKey: channelKey}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp",
-		Measurements: []string{hex.EncodeToString(meas)}}
 	res, err := att.Verify(context.Background(), &VMInfo{}, "/k", "u", req)
 	require.NoError(t, err)
-	assert.False(t, res.Verified)
-	assert.Contains(t, res.Verdict, "REPORT_DATA")
+	assert.True(t, res.Verified)
+	assert.Equal(t, maaMeasurement, res.Measurement)
+	assert.Equal(t, channelKey, res.ChannelKey, "the verified channel key is carried for sealing")
 }
 
-func TestVerifyMAAToken_RejectsNonHexReportData(t *testing.T) {
+func TestAzureAttester_RejectsUnboundToken(t *testing.T) {
 	key, keys := maaSigningKey(t)
-	tok := mintJWT(t, "maa1", "RS256", key, map[string]any{
-		"x-ms-attestation-type":    "sevsnpvm",
-		"x-ms-compliance-status":   "azure-compliant-cvm",
-		"x-ms-sevsnpvm-reportdata": "not-hex!!",
-	})
-	_, err := verifyMAAToken(tok, keys, "")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "hex")
+	att := &azureAttester{keys: keys, issuer: maaIssuer, isReady: true,
+		fetch: func(_ context.Context, _ *VMInfo, _, _ string, _ []byte) (maaEvidence, error) {
+			c := validMAAClaims() // client-payload nonce is a stale constant, not this run's binding
+			return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: bytes.Repeat([]byte{0x9A}, 32)}, nil
+		}}
+	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}}
+
+	res, err := att.Verify(context.Background(), &VMInfo{}, "/k", "u", req)
+	require.NoError(t, err)
+	assert.False(t, res.Verified, "a token not binding this run's nonce+key is rejected")
+	assert.Contains(t, res.Verdict, "nonce")
+}
+
+func TestAzureAttester_NotReadyAndNoFetch(t *testing.T) {
+	assert.False(t, (&azureAttester{}).ready())
+	_, err := (&azureAttester{isReady: true}).Verify(context.Background(), &VMInfo{}, "/k", "u",
+		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
+	require.Error(t, err, "no fetch wired must error, not panic")
 }
 
 func TestAzureAttester_PropagatesFetchFailure(t *testing.T) {
 	_, keys := maaSigningKey(t)
-	att := &azureAttester{keys: keys, isReady: true,
+	att := &azureAttester{keys: keys, issuer: maaIssuer, isReady: true,
 		fetch: func(_ context.Context, _ *VMInfo, _, _ string, _ []byte) (maaEvidence, error) {
-			return maaEvidence{}, fmt.Errorf("guest unreachable")
+			return maaEvidence{}, assertErr("vTPM unavailable")
 		}}
 	_, err := att.Verify(context.Background(), &VMInfo{}, "/k", "u",
-		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "guest unreachable")
-}
-
-func TestAzureAttester_NoFetchWired(t *testing.T) {
-	_, err := (&azureAttester{isReady: true}).Verify(context.Background(), &VMInfo{}, "/k", "u",
-		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
-	require.Error(t, err, "an attester with no fetch must error, not panic")
-}
-
-func TestAzureAttester_NotReadyByDefault(t *testing.T) {
-	assert.False(t, (&azureAttester{}).ready())
+		types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}})
+	require.Error(t, err, "a fetch failure is an error, not an unverified verdict")
 }

@@ -1,11 +1,8 @@
 package cloudvm
 
 import (
-	"crypto"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"os"
 	"path/filepath"
@@ -75,39 +72,5 @@ func TestGolden_SNPReport(t *testing.T) {
 	t.Logf("verified real SEV-SNP report: measurement=%s tcb=%d debug=%v", claims.Measurement, claims.TCB, claims.DebugEnabled)
 }
 
-// jwksKeys parses a JWKS document (MAA publishes signing certs in x5c) into the
-// kid->public-key map verifyMAAToken expects.
-func jwksKeys(t *testing.T, raw []byte) map[string]crypto.PublicKey {
-	t.Helper()
-	var doc struct {
-		Keys []struct {
-			Kid string   `json:"kid"`
-			X5c []string `json:"x5c"`
-		} `json:"keys"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &doc))
-	keys := map[string]crypto.PublicKey{}
-	for _, k := range doc.Keys {
-		require.NotEmpty(t, k.X5c, "MAA JWKS entry %q has no x5c chain", k.Kid)
-		der, err := base64.StdEncoding.DecodeString(k.X5c[0])
-		require.NoError(t, err)
-		cert, err := x509.ParseCertificate(der)
-		require.NoError(t, err)
-		keys[k.Kid] = cert.PublicKey
-	}
-	return keys
-}
-
-func TestGolden_MAAToken(t *testing.T) {
-	dir := filepath.Join(fixturesDir(), "maa")
-	token := strings.TrimSpace(string(skipUnlessFixture(t, filepath.Join(dir, "token.jwt"))))
-	keys := jwksKeys(t, skipUnlessFixture(t, filepath.Join(dir, "jwks.json")))
-
-	claims, err := verifyMAAToken(token, keys, "")
-	require.NoError(t, err, "real MAA token must verify (confirms signature + the compliance/type claim names)")
-
-	assert.Contains(t, []string{"sev-snp", "tdx"}, claims.TEEType)
-	assert.NotEmpty(t, claims.Measurement, "launchmeasurement claim name mismatch — got empty measurement")
-	assert.NotEmpty(t, claims.ReportData, "reportdata claim name mismatch — got empty report data")
-	t.Logf("verified real MAA token: tee=%s measurement=%s", claims.TEEType, claims.Measurement)
-}
+// The MAA golden test lives in confidential_maa_golden_test.go (it verifies the
+// real nested-schema token via verifyMAAToken + parseJWKS).

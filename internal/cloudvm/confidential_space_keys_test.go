@@ -19,7 +19,7 @@ func TestParseRSAJWKS_RoundTrip(t *testing.T) {
 	e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes())
 	jwks := fmt.Sprintf(`{"keys":[{"kid":"k1","kty":"RSA","n":%q,"e":%q}]}`, n, e)
 
-	keys, err := parseRSAJWKS([]byte(jwks))
+	keys, err := parseJWKS([]byte(jwks))
 	require.NoError(t, err)
 	got, ok := keys["k1"].(*rsa.PublicKey)
 	require.True(t, ok, "kid must map to an RSA public key")
@@ -28,6 +28,6 @@ func TestParseRSAJWKS_RoundTrip(t *testing.T) {
 }
 
 func TestParseRSAJWKS_Empty(t *testing.T) {
-	_, err := parseRSAJWKS([]byte(`{"keys":[]}`))
+	_, err := parseJWKS([]byte(`{"keys":[]}`))
 	require.Error(t, err, "no keys is a fail-closed error, not an empty trust set")
 }
