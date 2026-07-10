@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,10 +28,15 @@ func captureRunCLI(t *testing.T) *[]cliCall {
 // run id) instead of failing at the first call.
 func captureRunCLIWith(t *testing.T, resp func(name string, args ...string) ([]byte, error)) *[]cliCall {
 	t.Helper()
+	var mu sync.Mutex
 	var calls []cliCall
 	prev := runCLI
 	runCLI = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		// Providers may enumerate regions concurrently, so the recorder must be
+		// safe for parallel calls.
+		mu.Lock()
 		calls = append(calls, cliCall{name: name, args: append([]string(nil), args...)})
+		mu.Unlock()
 		return resp(name, args...)
 	}
 	t.Cleanup(func() { runCLI = prev })

@@ -17,8 +17,9 @@ import (
 )
 
 var gcFlags struct {
-	dryRun bool
-	force  bool
+	dryRun   bool
+	force    bool
+	warnOver float64
 }
 
 // gcOrphanJSON / gcReport are the --json shape for gc.
@@ -38,12 +39,14 @@ type gcStandingJSON struct {
 }
 
 type gcReport struct {
-	Found     int              `json:"found"`
-	Destroyed int              `json:"destroyed"`
-	DryRun    bool             `json:"dryRun"`
-	Orphans   []gcOrphanJSON   `json:"orphans"`
-	Standing  []gcStandingJSON `json:"standing,omitempty"` // dispatcher-owned, kept (never reaped)
-	External  []gcStandingJSON `json:"external,omitempty"` // not dispatcher-owned, listed only
+	Found       int              `json:"found"`
+	Destroyed   int              `json:"destroyed"`
+	DryRun      bool             `json:"dryRun"`
+	Orphans     []gcOrphanJSON   `json:"orphans"`
+	Standing    []gcStandingJSON `json:"standing,omitempty"`    // dispatcher-owned, kept (never reaped)
+	External    []gcStandingJSON `json:"external,omitempty"`    // not dispatcher-owned, listed only
+	MonthlyUSD  float64          `json:"monthlyUsdTotal"`       // total ongoing cost across all listed resources
+	CostWarning bool             `json:"costWarning,omitempty"` // MonthlyUSD exceeds the warn threshold
 }
 
 var gcCmd = &cobra.Command{
@@ -198,6 +201,16 @@ before running for real, especially with long-lived state directories.`,
 					Kind: string(e.Kind), MonthlyUSD: e.MonthlyUSD,
 				})
 			}
+			for _, o := range orphans {
+				report.MonthlyUSD += o.res.MonthlyUSD
+			}
+			for _, s := range standing {
+				report.MonthlyUSD += s.MonthlyUSD
+			}
+			for _, e := range external {
+				report.MonthlyUSD += e.MonthlyUSD
+			}
+			report.CostWarning = gcFlags.warnOver > 0 && report.MonthlyUSD > gcFlags.warnOver
 			return emitJSON(report)
 		}
 
@@ -209,6 +222,10 @@ before running for real, especially with long-lived state directories.`,
 		if ongoing > 0 {
 			fmt.Fprintf(os.Stderr, "\nTotal ongoing ~$%.2f/mo across %d listed resource(s).\n",
 				ongoing, len(standing)+len(external)+len(orphans))
+		}
+		if gcFlags.warnOver > 0 && ongoing > gcFlags.warnOver {
+			red.Fprintf(os.Stderr, "\nWARNING: ongoing cost ~$%.2f/mo exceeds the $%.2f/mo threshold (--warn-over).\n",
+				ongoing, gcFlags.warnOver)
 		}
 
 		if len(orphans) == 0 {
@@ -293,6 +310,7 @@ func confirmDestroy(n int) bool {
 func init() {
 	gcCmd.Flags().BoolVar(&gcFlags.dryRun, "dry-run", false, "list orphans without destroying them")
 	gcCmd.Flags().BoolVarP(&gcFlags.force, "yes", "y", false, "skip confirmation prompt")
+	gcCmd.Flags().Float64Var(&gcFlags.warnOver, "warn-over", 10.0, "warn loudly when total ongoing cost exceeds this USD/mo (0 disables)")
 	rootCmd.AddCommand(gcCmd)
 }
 

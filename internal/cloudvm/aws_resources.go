@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 )
@@ -42,20 +43,71 @@ func awsTagsToMap(tags []awsTag) map[string]string {
 	return m
 }
 
-// ListResources enumerates billable AWS resources in the provider's region for
-// the cost audit and GC: instances, EBS volumes, snapshots, Elastic IPs, and
-// dispatcher-owned security groups. The instances list is reaping-critical and
-// fails loud; auxiliary kinds are best-effort so a denied list can't blind gc to
-// reapable instances. Resources in other regions are not visible (like ListVMs).
+// ListResources enumerates billable AWS resources across ALL enabled regions
+// for the cost audit and GC: instances, EBS volumes, snapshots, Elastic IPs, and
+// dispatcher-owned security groups. A run can be provisioned in any region, so a
+// single-region sweep would leave an orphan elsewhere billing forever, invisible
+// to gc. Regions are swept concurrently. Each region is best-effort — a region
+// that errors contributes nothing (gc simply won't act on it, never a wrong
+// destroy); only a total failure to enumerate anything is surfaced.
 func (a *AWSProvider) ListResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := a.listInstanceResources(ctx)
+	regions := a.enabledRegions(ctx)
+
+	var (
+		mu      sync.Mutex
+		all     []adapter.ResourceInfo
+		errored int
+		wg      sync.WaitGroup
+	)
+	for _, region := range regions {
+		wg.Add(1)
+		go func(region string) {
+			defer wg.Done()
+			res, err := a.listRegionResources(ctx, region)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errored++
+				return
+			}
+			all = append(all, res...)
+		}(region)
+	}
+	wg.Wait()
+
+	if errored == len(regions) {
+		return nil, fmt.Errorf("aws: could not enumerate resources in any of %d region(s)", len(regions))
+	}
+	return all, nil
+}
+
+// enabledRegions lists the account's enabled regions, falling back to the
+// provider's default region if discovery fails (preserving single-region
+// behavior when EC2 describe-regions is unavailable).
+func (a *AWSProvider) enabledRegions(ctx context.Context) []string {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-regions",
+		"--query", "Regions[].RegionName", "--output", "json")
+	if err != nil {
+		return []string{a.defaultRegion}
+	}
+	var regions []string
+	if err := json.Unmarshal(out, &regions); err != nil || len(regions) == 0 {
+		return []string{a.defaultRegion}
+	}
+	return regions
+}
+
+// listRegionResources enumerates one region: the instance list is reaping-
+// critical and fails the region loud; the auxiliary kinds are best-effort.
+func (a *AWSProvider) listRegionResources(ctx context.Context, region string) ([]adapter.ResourceInfo, error) {
+	out, err := a.listInstanceResources(ctx, region)
 	if err != nil {
 		return nil, err
 	}
-	for _, step := range []func(context.Context) ([]adapter.ResourceInfo, error){
+	for _, step := range []func(context.Context, string) ([]adapter.ResourceInfo, error){
 		a.listVolumeResources, a.listSnapshotResources, a.listAddressResources, a.listSecurityGroupResources,
 	} {
-		if rs, err := step(ctx); err == nil {
+		if rs, err := step(ctx, region); err == nil {
 			out = append(out, rs...)
 		}
 	}
@@ -90,8 +142,8 @@ func (a *AWSProvider) DestroyResource(ctx context.Context, res adapter.ResourceI
 	return nil
 }
 
-func (a *AWSProvider) listInstanceResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "aws", "ec2", "describe-instances", "--region", a.defaultRegion, "--output", "json")
+func (a *AWSProvider) listInstanceResources(ctx context.Context, region string) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-instances", "--region", region, "--output", "json")
 	if err != nil {
 		return nil, wrapExecError("aws ec2 describe-instances", err)
 	}
@@ -120,7 +172,7 @@ func (a *AWSProvider) listInstanceResources(ctx context.Context) ([]adapter.Reso
 				ResourceID:   in.InstanceId,
 				Provider:     string(ProviderAWS),
 				Kind:         adapter.ResourceInstance,
-				Region:       a.defaultRegion,
+				Region:       region,
 				InstanceType: in.InstanceType,
 				RunID:        tags["dispatcher-run-id"],
 				Tags:         tags,
@@ -131,8 +183,8 @@ func (a *AWSProvider) listInstanceResources(ctx context.Context) ([]adapter.Reso
 	return res, nil
 }
 
-func (a *AWSProvider) listVolumeResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "aws", "ec2", "describe-volumes", "--region", a.defaultRegion, "--output", "json")
+func (a *AWSProvider) listVolumeResources(ctx context.Context, region string) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-volumes", "--region", region, "--output", "json")
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +210,7 @@ func (a *AWSProvider) listVolumeResources(ctx context.Context) ([]adapter.Resour
 			ResourceID: v.VolumeId,
 			Provider:   string(ProviderAWS),
 			Kind:       adapter.ResourceDisk,
-			Region:     a.defaultRegion,
+			Region:     region,
 			RunID:      tags["dispatcher-run-id"],
 			Tags:       tags,
 			MonthlyUSD: float64(v.Size) * rate,
@@ -167,8 +219,8 @@ func (a *AWSProvider) listVolumeResources(ctx context.Context) ([]adapter.Resour
 	return res, nil
 }
 
-func (a *AWSProvider) listSnapshotResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "aws", "ec2", "describe-snapshots", "--owner-ids", "self", "--region", a.defaultRegion, "--output", "json")
+func (a *AWSProvider) listSnapshotResources(ctx context.Context, region string) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-snapshots", "--owner-ids", "self", "--region", region, "--output", "json")
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +241,7 @@ func (a *AWSProvider) listSnapshotResources(ctx context.Context) ([]adapter.Reso
 			ResourceID: s.SnapshotId,
 			Provider:   string(ProviderAWS),
 			Kind:       adapter.ResourceSnapshot,
-			Region:     a.defaultRegion,
+			Region:     region,
 			RunID:      tags["dispatcher-run-id"],
 			Tags:       tags,
 			MonthlyUSD: float64(s.VolumeSize) * awsSnapshotRatePerGBMonth,
@@ -198,8 +250,8 @@ func (a *AWSProvider) listSnapshotResources(ctx context.Context) ([]adapter.Reso
 	return res, nil
 }
 
-func (a *AWSProvider) listAddressResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "aws", "ec2", "describe-addresses", "--region", a.defaultRegion, "--output", "json")
+func (a *AWSProvider) listAddressResources(ctx context.Context, region string) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-addresses", "--region", region, "--output", "json")
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +278,7 @@ func (a *AWSProvider) listAddressResources(ctx context.Context) ([]adapter.Resou
 			ResourceID: ad.AllocationId,
 			Provider:   string(ProviderAWS),
 			Kind:       adapter.ResourceAddress,
-			Region:     a.defaultRegion,
+			Region:     region,
 			RunID:      tags["dispatcher-run-id"],
 			Tags:       tags,
 			MonthlyUSD: monthly,
@@ -238,8 +290,8 @@ func (a *AWSProvider) listAddressResources(ctx context.Context) ([]adapter.Resou
 // listSecurityGroupResources lists only dispatcher-tagged groups: SGs are free,
 // so listing every group in the account would be pure noise. The value here is
 // reaping a per-run SG that leaked when teardown's best-effort delete failed.
-func (a *AWSProvider) listSecurityGroupResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "aws", "ec2", "describe-security-groups", "--region", a.defaultRegion,
+func (a *AWSProvider) listSecurityGroupResources(ctx context.Context, region string) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-security-groups", "--region", region,
 		"--filters", "Name=tag:dispatcher,Values=true", "--output", "json")
 	if err != nil {
 		return nil, err
@@ -260,7 +312,7 @@ func (a *AWSProvider) listSecurityGroupResources(ctx context.Context) ([]adapter
 			ResourceID: sg.GroupId,
 			Provider:   string(ProviderAWS),
 			Kind:       adapter.ResourceFirewall,
-			Region:     a.defaultRegion,
+			Region:     region,
 			RunID:      tags["dispatcher-run-id"],
 			Tags:       tags,
 		})

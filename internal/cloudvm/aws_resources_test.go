@@ -130,6 +130,43 @@ func TestAWSProvider_ListResources_AuxKindErrorIsNonFatal(t *testing.T) {
 	assert.Equal(t, "i-1", res[0].ResourceID)
 }
 
+// gc must see orphans in every enabled region, not just the provider's default
+// — a run can be provisioned in another region, and its leaked instance would
+// otherwise bill forever, invisible to the audit.
+func TestAWSProvider_ListResources_SweepsAllRegions(t *testing.T) {
+	resp := func(_ string, args ...string) ([]byte, error) {
+		region := ""
+		for i, a := range args {
+			if a == "--region" && i+1 < len(args) {
+				region = args[i+1]
+			}
+		}
+		switch {
+		case len(args) >= 2 && args[1] == "describe-regions":
+			return []byte(`["us-east-1","eu-west-1"]`), nil
+		case len(args) >= 2 && args[1] == "describe-instances":
+			return []byte(`{"Reservations":[{"Instances":[{"InstanceId":"i-` + region +
+				`","InstanceType":"t3.micro","State":{"Name":"running"},"Tags":[{"Key":"dispatcher","Value":"true"}]}]}]}`), nil
+		}
+		return []byte("{}"), nil
+	}
+	captureRunCLIWith(t, resp)
+	p := NewAWSProvider("us-east-1")
+
+	res, err := p.ListResources(context.Background())
+	require.NoError(t, err)
+
+	byID := map[string]adapter.ResourceInfo{}
+	for _, r := range res {
+		byID[r.ResourceID] = r
+	}
+	require.Contains(t, byID, "i-us-east-1")
+	require.Contains(t, byID, "i-eu-west-1")
+	assert.Equal(t, "us-east-1", byID["i-us-east-1"].Region)
+	assert.Equal(t, "eu-west-1", byID["i-eu-west-1"].Region,
+		"a resource must carry the region it was found in, so DestroyResource targets it")
+}
+
 func TestAWSProvider_DestroyResource_Argv(t *testing.T) {
 	p := NewAWSProvider("us-east-1")
 

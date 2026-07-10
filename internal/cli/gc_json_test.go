@@ -10,6 +10,33 @@ import (
 	"github.com/d0cd/dispatcher/internal/adapter"
 )
 
+// gc must flag ongoing cost that crosses the --warn-over threshold, so a leaked
+// expensive resource can't sit unnoticed.
+func TestGC_CostWarningOverThreshold(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false; gcFlags.warnOver = 10.0 })
+
+	f := &fakeGCAdapter{
+		id: "gcp-vm",
+		resources: []adapter.ResourceInfo{{
+			ResourceID: "leaked-gpu", Provider: "gcp", Kind: adapter.ResourceInstance,
+			MonthlyUSD: 500, RunID: "run_gone",
+			Tags: map[string]string{"dispatcher": "true", "dispatcher-run-id": "run_gone"},
+		}},
+	}
+	withGCAdapter(t, f)
+
+	stdout := captureStdout(t, func() {
+		_, _, err := executeCommand("--output", "json", "gc", "--dry-run", "--warn-over", "100")
+		require.NoError(t, err)
+	})
+
+	var r gcReport
+	require.NoError(t, json.Unmarshal([]byte(stdout), &r))
+	assert.InDelta(t, 500.0, r.MonthlyUSD, 0.01, "total ongoing cost is reported")
+	assert.True(t, r.CostWarning, "cost over the threshold must set the warning flag")
+}
+
 func gcOrphanAdapter() *fakeGCAdapter {
 	return &fakeGCAdapter{
 		id:        "hetzner-vm",
