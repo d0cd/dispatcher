@@ -230,8 +230,8 @@ func (f *fakeGCAdapter) ExtendWatchdog(context.Context, *adapter.RunHandle, time
 func (f *fakeGCAdapter) ListResources(context.Context) ([]adapter.ResourceInfo, error) {
 	return f.resources, nil
 }
-func (f *fakeGCAdapter) DestroyResource(_ context.Context, id string) error {
-	f.destroyed = append(f.destroyed, id)
+func (f *fakeGCAdapter) DestroyResource(_ context.Context, res adapter.ResourceInfo) error {
+	f.destroyed = append(f.destroyed, res.ResourceID)
 	return nil
 }
 
@@ -401,6 +401,29 @@ func TestGC_AbortsWhenRunRecordsCannotBeEnumerated(t *testing.T) {
 	_, _, err := executeCommand("gc", "--yes")
 	require.Error(t, err, "gc must refuse to run when run records can't be enumerated")
 	assert.Empty(t, f.destroyed, "nothing destroyed when active runs are unknowable")
+}
+
+// A dispatcher-owned resource with NO run-id is standing infra (e.g. a
+// driver-baked GPU image) — it must be reported, never reaped.
+func TestGC_StandingInfraNeverReaped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	f := &fakeGCAdapter{
+		id: "gcp-vm",
+		resources: []adapter.ResourceInfo{{
+			ResourceID: "dispatcher-gpu-l4", Provider: "gcp",
+			Kind: adapter.ResourceImage, // no RunID → standing infra
+			Tags: map[string]string{"dispatcher": "true"},
+		}},
+	}
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--yes")
+	require.NoError(t, err)
+	assert.Empty(t, f.destroyed, "standing infra (no run-id) must never be reaped")
 }
 
 // ---- P2: --json output ----

@@ -59,7 +59,9 @@ func (m *mockDurableAdapter) ExtendWatchdog(_ context.Context, _ *adapter.RunHan
 func (m *mockDurableAdapter) ListResources(_ context.Context) ([]adapter.ResourceInfo, error) {
 	return nil, nil
 }
-func (m *mockDurableAdapter) DestroyResource(_ context.Context, _ string) error { return nil }
+func (m *mockDurableAdapter) DestroyResource(_ context.Context, _ adapter.ResourceInfo) error {
+	return nil
+}
 
 func TestReconnectToRun_TerminalState(t *testing.T) {
 	tmpHome := t.TempDir()

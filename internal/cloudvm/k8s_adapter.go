@@ -253,6 +253,7 @@ func (a *K8sAdapter) ListResources(ctx context.Context) ([]adapter.ResourceInfo,
 		resources = append(resources, adapter.ResourceInfo{
 			ResourceID: vm.ID,
 			Provider:   "kubernetes",
+			Kind:       adapter.ResourceInstance, // a dispatcher-owned Job
 			CreatedAt:  vm.CreatedAt,
 			RunID:      vm.Tags["dispatcher-run-id"],
 			Tags:       vm.Tags,
@@ -261,8 +262,11 @@ func (a *K8sAdapter) ListResources(ctx context.Context) ([]adapter.ResourceInfo,
 	return resources, nil
 }
 
-func (a *K8sAdapter) DestroyResource(ctx context.Context, resourceID string) error {
-	return a.provider.DestroyVM(ctx, resourceID)
+func (a *K8sAdapter) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
+	return a.provider.DestroyVM(ctx, res.ResourceID)
 }
 
 // helpers

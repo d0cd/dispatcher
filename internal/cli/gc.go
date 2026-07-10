@@ -30,11 +30,19 @@ type gcOrphanJSON struct {
 	Error      string `json:"error,omitempty"`
 }
 
+type gcStandingJSON struct {
+	ResourceID string  `json:"resourceId"`
+	Provider   string  `json:"provider"`
+	Kind       string  `json:"kind,omitempty"`
+	MonthlyUSD float64 `json:"monthlyUsd,omitempty"`
+}
+
 type gcReport struct {
-	Found     int            `json:"found"`
-	Destroyed int            `json:"destroyed"`
-	DryRun    bool           `json:"dryRun"`
-	Orphans   []gcOrphanJSON `json:"orphans"`
+	Found     int              `json:"found"`
+	Destroyed int              `json:"destroyed"`
+	DryRun    bool             `json:"dryRun"`
+	Orphans   []gcOrphanJSON   `json:"orphans"`
+	Standing  []gcStandingJSON `json:"standing,omitempty"` // dispatcher-owned, kept (never reaped)
 }
 
 var gcCmd = &cobra.Command{
@@ -92,6 +100,7 @@ before running for real, especially with long-lived state directories.`,
 			res     adapter.ResourceInfo
 		}
 		var orphans []orphan
+		var standing []adapter.ResourceInfo
 
 		for _, a := range adapters {
 			resources, err := a.ListResources(ctx)
@@ -103,10 +112,17 @@ before running for real, especially with long-lived state directories.`,
 			}
 
 			for _, res := range resources {
-				if res.RunID != "" && activeRuns[res.RunID] {
+				// Standing infra: dispatcher-owned but tied to no run (a
+				// driver-baked image, a shared disk). Report it, never reap it —
+				// only run-scoped resources whose run is gone are orphans.
+				if res.RunID == "" {
+					standing = append(standing, res)
+					continue
+				}
+				if activeRuns[res.RunID] {
 					continue // active run, not an orphan
 				}
-				if res.RunID != "" && unreadableRuns[res.RunID] {
+				if unreadableRuns[res.RunID] {
 					if !asJSON {
 						red.Fprintf(os.Stderr, "  Skipping %s: run %s record is unreadable; refusing to destroy (could be live). Remove the run record to allow GC.\n", res.ResourceID, res.RunID)
 					}
@@ -140,7 +156,7 @@ before running for real, especially with long-lived state directories.`,
 			for _, o := range orphans {
 				e := gcOrphanJSON{ResourceID: o.res.ResourceID, Provider: o.res.Provider, RunID: o.res.RunID}
 				if !gcFlags.dryRun {
-					if err := o.adapter.DestroyResource(ctx, o.res.ResourceID); err != nil {
+					if err := o.adapter.DestroyResource(ctx, o.res); err != nil {
 						e.Error = err.Error()
 					} else {
 						e.Destroyed = true
@@ -153,7 +169,29 @@ before running for real, especially with long-lived state directories.`,
 				report.Orphans = append(report.Orphans, e)
 			}
 			report.Found = len(orphans)
+			for _, s := range standing {
+				report.Standing = append(report.Standing, gcStandingJSON{
+					ResourceID: s.ResourceID, Provider: s.Provider,
+					Kind: string(s.Kind), MonthlyUSD: s.MonthlyUSD,
+				})
+			}
 			return emitJSON(report)
+		}
+
+		if len(standing) > 0 {
+			var total float64
+			fmt.Fprintln(os.Stderr, "\nStanding dispatcher resources (kept, never reaped):")
+			for _, s := range standing {
+				total += s.MonthlyUSD
+				fmt.Fprintf(os.Stderr, "  %s (%s %s)", s.ResourceID, s.Provider, s.Kind)
+				if s.MonthlyUSD > 0 {
+					fmt.Fprintf(os.Stderr, " ~$%.2f/mo", s.MonthlyUSD)
+				}
+				fmt.Fprintln(os.Stderr)
+			}
+			if total > 0 {
+				fmt.Fprintf(os.Stderr, "  standing total ~$%.2f/mo\n", total)
+			}
 		}
 
 		if len(orphans) == 0 {
@@ -173,7 +211,7 @@ before running for real, especially with long-lived state directories.`,
 
 		totalDestroyed := 0
 		for _, o := range orphans {
-			if err := o.adapter.DestroyResource(ctx, o.res.ResourceID); err != nil {
+			if err := o.adapter.DestroyResource(ctx, o.res); err != nil {
 				red.Fprintf(os.Stderr, "  destroy %s failed: %v\n", o.res.ResourceID, err)
 			} else {
 				green.Fprintf(os.Stderr, "  destroyed %s\n", o.res.ResourceID)

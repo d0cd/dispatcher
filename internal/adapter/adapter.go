@@ -49,15 +49,40 @@ type SerializableState interface {
 	MarshalHandleState() (json.RawMessage, error)
 }
 
-// ResourceInfo describes a cloud resource managed by an adapter.
+// ResourceKind classifies a billable cloud resource for the GC/cost audit.
+type ResourceKind string
+
+const (
+	ResourceInstance ResourceKind = "instance"
+	ResourceDisk     ResourceKind = "disk"
+	ResourceImage    ResourceKind = "image"
+	ResourceSnapshot ResourceKind = "snapshot"
+	ResourceAddress  ResourceKind = "address"  // reserved/static IP
+	ResourceFirewall ResourceKind = "firewall" // security group / NSG
+)
+
+// ResourceInfo describes a cloud resource for GC and the cost audit.
 type ResourceInfo struct {
 	ResourceID   string            `json:"resourceId"`
 	Provider     string            `json:"provider"`
+	Kind         ResourceKind      `json:"kind"`
 	Region       string            `json:"region"`
-	InstanceType string            `json:"instanceType"`
+	InstanceType string            `json:"instanceType,omitempty"`
 	CreatedAt    time.Time         `json:"createdAt"`
 	RunID        string            `json:"runId,omitempty"`
 	Tags         map[string]string `json:"tags,omitempty"`
+	// MonthlyUSD is the estimated ongoing cost of this resource (0 if free or
+	// unknown). Instances report their hourly rate as a monthly figure only as a
+	// worst-case; the real ongoing concern is persistent disks/images/IPs.
+	MonthlyUSD float64 `json:"monthlyUsd,omitempty"`
+}
+
+// DispatcherOwned reports whether dispatcher created this resource — the hard
+// boundary for any destructive action. GC lists non-owned resources (cost
+// visibility) but must never modify them. dispatcher tags everything it creates
+// with dispatcher=true.
+func (r ResourceInfo) DispatcherOwned() bool {
+	return r.Tags["dispatcher"] == "true"
 }
 
 // DurableAdapter extends TargetAdapter with reconnection and resource management.
@@ -71,11 +96,17 @@ type DurableAdapter interface {
 	// ExtendWatchdog extends the self-destruct timer on the remote resource.
 	ExtendWatchdog(ctx context.Context, h *RunHandle, ttl time.Duration) (time.Time, error)
 
-	// ListResources returns all resources this adapter manages, for GC.
+	// ListResources returns every dispatcher-tagged billable resource this
+	// adapter can enumerate (instances and, where implemented, disks/images/
+	// snapshots/addresses/firewalls), each with Kind + MonthlyUSD, for GC and
+	// the cost audit.
 	ListResources(ctx context.Context) ([]ResourceInfo, error)
 
-	// DestroyResource forcibly destroys a resource by its provider-specific ID.
-	DestroyResource(ctx context.Context, resourceID string) error
+	// DestroyResource destroys a resource returned by ListResources, dispatching
+	// on its Kind. Implementations MUST refuse a resource that is not
+	// DispatcherOwned() — the hard boundary against touching another owner's
+	// infrastructure.
+	DestroyResource(ctx context.Context, res ResourceInfo) error
 }
 
 // TargetAdapter is the interface every execution target must implement.

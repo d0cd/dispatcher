@@ -202,6 +202,56 @@ func TestCloudVMAdapter_ListResources(t *testing.T) {
 	assert.Equal(t, "run_1", resources[0].RunID)
 }
 
+func TestCloudVMAdapter_DestroyResource_RefusesUnowned(t *testing.T) {
+	mock := NewMockProvider(ProviderHetzner)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})
+	ctx := context.Background()
+
+	// A resource that dispatcher did NOT create (no dispatcher=true tag) — e.g.
+	// another project's VM surfaced by a listing. Destroying it would be
+	// irreversible loss of something we don't own.
+	vm, _ := mock.CreateVM(ctx, VMOptions{
+		Name: "someone-elses-vm",
+		Tags: map[string]string{"owner": "other-team"},
+	})
+
+	err := a.DestroyResource(ctx, adapter.ResourceInfo{
+		ResourceID: vm.ID,
+		Provider:   string(ProviderHetzner),
+		Kind:       adapter.ResourceInstance,
+		Tags:       vm.Tags,
+	})
+
+	require.Error(t, err, "must refuse to destroy a resource dispatcher doesn't own")
+	assert.Contains(t, err.Error(), "not dispatcher-owned")
+	if _, ok := mock.vms[vm.ID]; !ok {
+		t.Fatal("DestroyVM was called on an unowned resource; the ownership guard failed")
+	}
+}
+
+func TestCloudVMAdapter_DestroyResource_DestroysOwned(t *testing.T) {
+	mock := NewMockProvider(ProviderHetzner)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})
+	ctx := context.Background()
+
+	vm, _ := mock.CreateVM(ctx, VMOptions{
+		Name: "dispatcher-vm",
+		Tags: map[string]string{"dispatcher": "true", "dispatcher-run-id": "run_1"},
+	})
+
+	err := a.DestroyResource(ctx, adapter.ResourceInfo{
+		ResourceID: vm.ID,
+		Provider:   string(ProviderHetzner),
+		Kind:       adapter.ResourceInstance,
+		Tags:       vm.Tags,
+	})
+
+	require.NoError(t, err)
+	if _, ok := mock.vms[vm.ID]; ok {
+		t.Fatal("a dispatcher-owned instance should have been destroyed")
+	}
+}
+
 func TestCloudVMState_Serialization(t *testing.T) {
 	state := &CloudVMState{
 		Provider:     ProviderAWS,

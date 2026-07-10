@@ -606,17 +606,32 @@ func (a *CloudVMAdapter) ExtendWatchdog(ctx context.Context, h *adapter.RunHandl
 	return ExtendWatchdogViaSSH(ctx, state, ttl)
 }
 
+// resourceEnumerator is an optional Provider capability: enumerate ALL
+// dispatcher-tagged billable resources (beyond instances — disks/images/
+// snapshots/addresses/firewalls) and destroy them by kind. Providers implement
+// it incrementally; the adapter falls back to ListVMs/DestroyVM otherwise.
+type resourceEnumerator interface {
+	ListResources(ctx context.Context) ([]adapter.ResourceInfo, error)
+	DestroyResource(ctx context.Context, res adapter.ResourceInfo) error
+}
+
 func (a *CloudVMAdapter) ListResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	if re, ok := a.provider.(resourceEnumerator); ok {
+		return re.ListResources(ctx)
+	}
+	// Fallback: instances only. VMInfo doesn't carry the instance type, so cost
+	// is left to the per-provider enumerator (Phase 2); an orphaned running
+	// instance is reaped regardless.
 	vms, err := a.provider.ListVMs(ctx, map[string]string{"dispatcher": "true"})
 	if err != nil {
 		return nil, err
 	}
-
 	var resources []adapter.ResourceInfo
 	for _, vm := range vms {
 		resources = append(resources, adapter.ResourceInfo{
 			ResourceID: vm.ID,
 			Provider:   string(a.config.ProviderID),
+			Kind:       adapter.ResourceInstance,
 			CreatedAt:  vm.CreatedAt,
 			RunID:      vm.Tags["dispatcher-run-id"],
 			Tags:       vm.Tags,
@@ -625,8 +640,19 @@ func (a *CloudVMAdapter) ListResources(ctx context.Context) ([]adapter.ResourceI
 	return resources, nil
 }
 
-func (a *CloudVMAdapter) DestroyResource(ctx context.Context, resourceID string) error {
-	return a.provider.DestroyVM(ctx, resourceID)
+func (a *CloudVMAdapter) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	// Hard ownership boundary: never modify a resource dispatcher doesn't own.
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
+	if re, ok := a.provider.(resourceEnumerator); ok {
+		return re.DestroyResource(ctx, res)
+	}
+	// Fallback providers only know how to destroy instances.
+	if res.Kind != "" && res.Kind != adapter.ResourceInstance {
+		return fmt.Errorf("provider %s cannot destroy %s resources yet", a.config.ProviderID, res.Kind)
+	}
+	return a.provider.DestroyVM(ctx, res.ResourceID)
 }
 
 // --- helpers ---
