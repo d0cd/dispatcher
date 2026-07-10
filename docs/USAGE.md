@@ -58,7 +58,7 @@ dispatcher stop <run-id>       # Stop and clean up
 | `list [--refresh]` | All runs with status / cost / duration. `--refresh` reconnects to non-terminal runs and updates state. Idle non-terminal runs (>6h) are flagged `STALE` so you can spot orphans. |
 | `history` | Per-target historical statistics. |
 | `diagnose <run-id>` | Explain why a run failed, stalled, or overran. |
-| `bill` | Per-cloud dispatcher-tagged spend month-to-date (AWS Cost Explorer, Azure Consumption; GCP requires BigQuery export; Hetzner falls back to dispatcher's tracking since no public billing API). |
+| `bill [--all] [--by-service] [--reconcile]` | Per-cloud spend month-to-date (AWS Cost Explorer, Azure Consumption, GCP BigQuery export, Hetzner falls back to dispatcher's tracking since no public billing API). Default shows only `dispatcher=true`-tagged spend; **`--all`** shows total spend across every service; **`--by-service`** breaks it down per service; **`--reconcile`** shows dispatcher's tracked estimate beside the authoritative bill and flags a positive delta as possible untracked spend. GCP needs `DISPATCHER_GCP_BILLING_TABLE=project.dataset.gcp_billing_export_v1_XXXX`. |
 
 ### Lifecycle
 
