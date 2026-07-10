@@ -46,6 +46,7 @@ func (g *GCPProvider) ListResources(ctx context.Context) ([]adapter.ResourceInfo
 	}
 	for _, step := range []func(context.Context) ([]adapter.ResourceInfo, error){
 		g.listDiskResources, g.listImageResources, g.listSnapshotResources, g.listAddressResources,
+		g.listFirewallResources, g.listArtifactRegistryResources,
 	} {
 		if rs, err := step(ctx); err == nil {
 			out = append(out, rs...)
@@ -89,6 +90,18 @@ func (g *GCPProvider) DestroyResource(ctx context.Context, res adapter.ResourceI
 		} else {
 			args = []string{"compute", "addresses", "delete", res.ResourceID, "--region", res.Region, "--quiet"}
 		}
+	case adapter.ResourceFirewall:
+		args = []string{"compute", "firewall-rules", "delete", res.ResourceID, "--quiet"}
+	case adapter.ResourceContainerImage:
+		// Artifact Registry repos are location-scoped, not under `compute`.
+		arArgs := []string{"artifacts", "repositories", "delete", res.ResourceID, "--location", res.Region, "--quiet"}
+		if g.project != "" {
+			arArgs = append(arArgs, "--project", g.project)
+		}
+		if _, err := runCLI(ctx, "gcloud", arArgs...); err != nil {
+			return fmt.Errorf("gcloud artifacts repositories delete failed: %w", err)
+		}
+		return nil
 	default:
 		return fmt.Errorf("gcp: cannot destroy resource of kind %q", res.Kind)
 	}
@@ -284,6 +297,96 @@ func (g *GCPProvider) listAddressResources(ctx context.Context) ([]adapter.Resou
 		})
 	}
 	return res, nil
+}
+
+// gcpArtifactRegistryRatePerGBMonth is a rough Artifact Registry storage list
+// rate (USD/GB-month) for cost visibility.
+const gcpArtifactRegistryRatePerGBMonth = 0.10
+
+// listFirewallResources enumerates dispatcher-created firewall rules (GCP takes
+// no labels on them, so ownership is the name prefix + the run-id description
+// marker). A leaked per-run agent-port rule is thus an orphan of a gone run, not
+// silent standing infra. Firewalls are free, so cost stays 0 — the value is
+// reaping a rule whose VM's teardown never ran.
+func (g *GCPProvider) listFirewallResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "gcloud", g.listArgs("firewall-rules")...)
+	if err != nil {
+		return nil, err
+	}
+	var rules []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(out, &rules); err != nil {
+		return nil, fmt.Errorf("parse gcp firewall-rules: %w", err)
+	}
+	var res []adapter.ResourceInfo
+	for _, r := range rules {
+		if !strings.HasPrefix(r.Name, dispatcherFirewallPrefix) {
+			continue // never touch the project's own rules
+		}
+		runID := ""
+		if i := strings.Index(r.Description, firewallRunIDMarker); i >= 0 {
+			runID = strings.TrimSpace(r.Description[i+len(firewallRunIDMarker):])
+		}
+		res = append(res, adapter.ResourceInfo{
+			ResourceID: r.Name,
+			Provider:   string(ProviderGCP),
+			Kind:       adapter.ResourceFirewall,
+			RunID:      runID,
+			Tags:       map[string]string{"dispatcher": "true", "dispatcher-run-id": runID},
+		})
+	}
+	return res, nil
+}
+
+// listArtifactRegistryResources surfaces dispatcher's measured-agent image repo
+// so its storage never slips past the audit. It is shared infra reused across
+// runs (no run id), so gc classifies it as standing — listed, not auto-reaped.
+func (g *GCPProvider) listArtifactRegistryResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	args := []string{"artifacts", "repositories", "list", "--format", "json"}
+	if g.project != "" {
+		args = append(args, "--project", g.project)
+	}
+	out, err := runCLI(ctx, "gcloud", args...)
+	if err != nil {
+		return nil, err
+	}
+	var repos []struct {
+		Name      string `json:"name"` // projects/P/locations/L/repositories/NAME
+		SizeBytes string `json:"sizeBytes"`
+	}
+	if err := json.Unmarshal(out, &repos); err != nil {
+		return nil, fmt.Errorf("parse gcp artifact repositories: %w", err)
+	}
+	var res []adapter.ResourceInfo
+	for _, r := range repos {
+		if gcpLastSegment(r.Name) != "dispatcher-cs" {
+			continue // only dispatcher's own agent-image repo
+		}
+		bytes, _ := strconv.ParseFloat(r.SizeBytes, 64)
+		res = append(res, adapter.ResourceInfo{
+			ResourceID: gcpLastSegment(r.Name),
+			Provider:   string(ProviderGCP),
+			Kind:       adapter.ResourceContainerImage,
+			Region:     gcpArtifactRegistryLocation(r.Name),
+			Tags:       map[string]string{"dispatcher": "true"},
+			MonthlyUSD: gcpBytesToGiB(bytes) * gcpArtifactRegistryRatePerGBMonth,
+		})
+	}
+	return res, nil
+}
+
+// gcpArtifactRegistryLocation extracts the location from a repo resource name
+// like "projects/P/locations/us-east1/repositories/dispatcher-cs".
+func gcpArtifactRegistryLocation(name string) string {
+	parts := strings.Split(name, "/")
+	for i, p := range parts {
+		if p == "locations" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 // gcpLastSegment returns the trailing path segment of a GCP self-link URL (e.g.

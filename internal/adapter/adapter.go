@@ -59,6 +59,9 @@ const (
 	ResourceSnapshot ResourceKind = "snapshot"
 	ResourceAddress  ResourceKind = "address"  // reserved/static IP
 	ResourceFirewall ResourceKind = "firewall" // security group / NSG
+	// ResourceContainerImage is a pushed container image / registry repository
+	// (e.g. GCP Artifact Registry) — the measured agent image for confidential runs.
+	ResourceContainerImage ResourceKind = "container-image"
 )
 
 // ResourceInfo describes a cloud resource for GC and the cost audit.

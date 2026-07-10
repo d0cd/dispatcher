@@ -61,7 +61,7 @@ func TestGCPConfidentialSpaceCreateArgs_NetworkTagWhenFirewalled(t *testing.T) {
 }
 
 func TestGCPAgentFirewallArgs(t *testing.T) {
-	create := gcpAgentFirewallCreateArgs("dispatcher-cs-fw-job", "dispatcher-cs-fw-job", "203.0.113.4/32", "proj")
+	create := gcpAgentFirewallCreateArgs("dispatcher-cs-fw-job", "dispatcher-cs-fw-job", "203.0.113.4/32", "run-1", "proj")
 	joined := strings.Join(create, " ")
 	assert.Contains(t, joined, "firewall-rules create dispatcher-cs-fw-job")
 	assert.True(t, slices.Contains(create, "--allow=tcp:8443"), "opens exactly the agent port")

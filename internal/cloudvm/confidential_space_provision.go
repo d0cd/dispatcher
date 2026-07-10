@@ -72,13 +72,16 @@ func agentFirewallName(vmName string) string {
 
 // gcpAgentFirewallCreateArgs opens the agent port (8443) to cidr for VMs carrying
 // targetTag. The endpoint is safe to expose (sealing + attestation), so this is
-// defense-in-depth, not the security boundary.
-func gcpAgentFirewallCreateArgs(name, targetTag, cidr, project string) []string {
+// defense-in-depth, not the security boundary. The run id rides in the
+// description (GCP firewalls take no labels) so gc can recognize a leaked rule as
+// an orphan of a gone run rather than mere standing infra.
+func gcpAgentFirewallCreateArgs(name, targetTag, cidr, runID, project string) []string {
 	args := []string{
 		"compute", "firewall-rules", "create", name,
 		fmt.Sprintf("--allow=tcp:%d", csAgentPort),
 		"--source-ranges=" + cidr,
 		"--target-tags=" + targetTag,
+		"--description=" + firewallRunIDMarker + runID,
 		"--quiet",
 	}
 	if project != "" {
@@ -86,6 +89,14 @@ func gcpAgentFirewallCreateArgs(name, targetTag, cidr, project string) []string 
 	}
 	return args
 }
+
+// firewallRunIDMarker prefixes the run id in a dispatcher firewall's description
+// and is how ListResources both recognizes ownership and recovers the run id.
+const firewallRunIDMarker = "dispatcher-run-id="
+
+// dispatcherFirewallPrefix is the name prefix every dispatcher-created firewall
+// shares (via firewallNameFromString), the first ownership signal for GC.
+const dispatcherFirewallPrefix = "dispatcher-fw-"
 
 func gcpAgentFirewallDeleteArgs(name, project string) []string {
 	args := []string{"compute", "firewall-rules", "delete", name, "--quiet"}
@@ -97,11 +108,11 @@ func gcpAgentFirewallDeleteArgs(name, project string) []string {
 
 // createAgentFirewall / deleteAgentFirewall let the Confidential Space adapter
 // manage the agent-port rule's lifecycle alongside the VM (agentFirewaller).
-func (g *GCPProvider) createAgentFirewall(ctx context.Context, name, cidr string) error {
+func (g *GCPProvider) createAgentFirewall(ctx context.Context, name, cidr, runID string) error {
 	if err := validateFirewallCIDR(cidr); err != nil {
 		return err
 	}
-	_, err := runCLI(ctx, "gcloud", gcpAgentFirewallCreateArgs(name, name, cidr, g.project)...)
+	_, err := runCLI(ctx, "gcloud", gcpAgentFirewallCreateArgs(name, name, cidr, runID, g.project)...)
 	return err
 }
 
@@ -137,7 +148,7 @@ func (g *GCPProvider) createConfidentialSpaceVM(ctx context.Context, opts VMOpti
 	// is useless, so on failure reap the VM before returning (CreateVM's error
 	// contract leaves no handle for the caller to clean up).
 	if opts.ConfidentialAllowFrom != "" {
-		if err := g.createAgentFirewall(ctx, agentFirewallName(opts.Name), opts.ConfidentialAllowFrom); err != nil {
+		if err := g.createAgentFirewall(ctx, agentFirewallName(opts.Name), opts.ConfidentialAllowFrom, opts.Tags["dispatcher-run-id"]); err != nil {
 			cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			_ = g.DestroyVM(cctx, opts.Name)
