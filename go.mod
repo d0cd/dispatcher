@@ -9,6 +9,7 @@ require (
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/go-sev-guest v0.15.0
+	github.com/google/go-tpm v0.9.8
 	github.com/hf/nsm v0.0.0-20220930140112-cd181bd646b9
 	github.com/mdlayher/vsock v1.3.0
 	github.com/spf13/cobra v1.8.1
@@ -24,7 +25,6 @@ require (
 	github.com/google/go-attestation v0.5.1 // indirect
 	github.com/google/go-configfs-tsm v0.2.2 // indirect
 	github.com/google/go-tdx-guest v0.3.1 // indirect
-	github.com/google/go-tpm v0.9.1-0.20240510201744-5c2f0887e003 // indirect
 	github.com/google/go-tpm-tools v0.4.4 // indirect
 	github.com/google/go-tspi v0.3.0 // indirect
 	github.com/google/logger v1.1.1 // indirect
