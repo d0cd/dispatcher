@@ -4,11 +4,27 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/go-sev-guest/verify/trust"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// TestPinARK_RejectsMismatchedRoot proves the ARK pinning rejects a chain whose
+// root is not go-sev-guest's embedded AMD root — the defense against a compromised
+// KDS/DNS substituting a fake self-signed root.
+func TestPinARK_RejectsMismatchedRoot(t *testing.T) {
+	genoa := trust.DefaultRootCerts["Genoa"]
+	if genoa == nil || genoa.ProductCerts == nil || genoa.ProductCerts.Ark == nil {
+		t.Skip("no embedded Genoa root to use as a mismatched ARK")
+	}
+	// A chain carrying Genoa's ARK, checked against Milan's pinned root → mismatch.
+	pc := &trust.ProductCerts{Ark: genoa.ProductCerts.Ark}
+	err := pinARKAndCheckRevocation(pc, "Milan")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not match the pinned")
+}
 
 func TestAWSAttester_NotReadyAndNoFetch(t *testing.T) {
 	assert.False(t, (&awsAttester{}).ready(), "not ready until a fetch is wired")

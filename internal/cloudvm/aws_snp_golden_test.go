@@ -24,11 +24,17 @@ func TestGolden_AWSSNPReport(t *testing.T) {
 	wantRD, err := hex.DecodeString(strings.TrimSpace(string(skipUnlessFixture(t, filepath.Join(dir, "report-data.hex")))))
 	require.NoError(t, err)
 
+	crlDER := skipUnlessFixture(t, filepath.Join(dir, "vlek_crl.der"))
 	raw, err := base64.StdEncoding.DecodeString(b64)
 	require.NoError(t, err)
 
+	// Serve the captured CRL offline so ARK-pin + revocation run without KDS.
+	prev := awsCRLGetter
+	awsCRLGetter = func(string) ([]byte, error) { return crlDER, nil }
+	t.Cleanup(func() { awsCRLGetter = prev })
+
 	claims, err := verifyAWSSNPReport(raw, func(string) ([]byte, error) { return chain, nil })
-	require.NoError(t, err, "a real VLEK-signed report must verify via go-sev-guest + the VLEK chain")
+	require.NoError(t, err, "a real VLEK-signed report must verify via go-sev-guest + the pinned ARK + CRL")
 
 	assert.Equal(t, "sev-snp", claims.TEEType)
 	assert.Len(t, claims.Measurement, 2*snpLenMeas, "48-byte measurement as hex")

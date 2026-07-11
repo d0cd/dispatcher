@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -75,11 +76,19 @@ func verifyAWSSNPReport(raw []byte, fetchChain awsVLEKChainFetcher) (Claims, err
 		return Claims{}, fmt.Errorf("parse VLEK chain: %w", err)
 	}
 
+	// Pin the ARK to go-sev-guest's embedded AMD root (so a compromised KDS/DNS
+	// can't substitute a fake self-signed root) and check the ASVK isn't revoked.
+	if err := pinARKAndCheckRevocation(pc, productLine); err != nil {
+		return Claims{}, err
+	}
+
 	opts := verify.DefaultOptions()
 	opts.Product = product
 	opts.TrustedRoots = map[string][]*trust.AMDRootCerts{
 		productLine: {{ProductLine: productLine, ProductCerts: pc}},
 	}
+	// Revocation is checked above (go-sev-guest's own CheckRevocations panics on
+	// the VLEK path), so leave it off here.
 	if err := verify.SnpAttestation(att, opts); err != nil {
 		return Claims{}, fmt.Errorf("aws snp verification: %w", err)
 	}
@@ -92,6 +101,57 @@ func verifyAWSSNPReport(raw []byte, fetchChain awsVLEKChainFetcher) (Claims, err
 		TCB:              r.GetReportedTcb(),
 		ReportData:       r.GetReportData(),
 	}, nil
+}
+
+// awsCRLGetter fetches a CRL by URL. A seam so the golden test runs offline.
+var awsCRLGetter = func(url string) ([]byte, error) {
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("CRL %s: %d", url, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// pinARKAndCheckRevocation pins the fetched ARK to go-sev-guest's embedded AMD
+// root and checks the ASVK isn't revoked via its CRL (stdlib x509 — go-sev-guest's
+// own CheckRevocations nil-derefs on the VLEK path). The CRL must itself be signed
+// by the pinned ARK.
+func pinARKAndCheckRevocation(pc *trust.ProductCerts, productLine string) error {
+	pinned := trust.DefaultRootCerts[productLine]
+	if pinned == nil || pinned.ProductCerts == nil || pinned.ProductCerts.Ark == nil {
+		return fmt.Errorf("no pinned AMD root for product %q", productLine)
+	}
+	ark := pinned.ProductCerts.Ark
+	if pc.Ark == nil || !pc.Ark.Equal(ark) {
+		return fmt.Errorf("KDS ARK does not match the pinned AMD root (possible KDS/DNS compromise)")
+	}
+	if pc.Asvk == nil {
+		return fmt.Errorf("VLEK chain has no ASVK intermediate")
+	}
+	if len(pc.Asvk.CRLDistributionPoints) == 0 {
+		return fmt.Errorf("ASVK has no CRL distribution point")
+	}
+	body, err := awsCRLGetter(pc.Asvk.CRLDistributionPoints[0])
+	if err != nil {
+		return fmt.Errorf("fetch ASVK CRL: %w", err)
+	}
+	crl, err := x509.ParseRevocationList(body)
+	if err != nil {
+		return fmt.Errorf("parse ASVK CRL: %w", err)
+	}
+	if err := crl.CheckSignatureFrom(ark); err != nil {
+		return fmt.Errorf("ASVK CRL is not signed by the pinned ARK: %w", err)
+	}
+	for _, e := range crl.RevokedCertificateEntries {
+		if e.SerialNumber.Cmp(pc.Asvk.SerialNumber) == 0 {
+			return fmt.Errorf("the ASVK has been revoked by AMD")
+		}
+	}
+	return nil
 }
 
 // awsAttester verifies AWS SEV-SNP VMs via a raw report (go-sev-guest + the VLEK
