@@ -81,10 +81,20 @@ The assumed schema was wrong; a live capture corrected it:
    attest via MAA over the endpoint → verify → seal `.env` → run in the TEE →
    sealed result; the sealed secret reached the workload inside the TEE.
 
-**Remaining (production `dispatcher run` wiring — mechanical, mirrors GCP):** the
-real `startAgent` (SSH scp the agent + start it + open the NSG for its port), an
-`AzureConfidentialAdapter` TargetAdapter wrapper (Status/Logs/Artifacts/Cleanup
-over `csRunState`), and run-selection routing confidential Azure runs to this
-path with the operator-pinned launch measurement. The launch measurement is set
-by the CVM image, so the operator captures + pins it in `confidential.measurements`
-(the same treatment as a raw launch measurement).
+7. ✅ **Production `dispatcher run` wiring** — `AzureConfidentialAdapter` (full
+   TargetAdapter), `azureStartAgent` (SSH scp + start + NSG), `OpenAgentPort`,
+   and run-selection routing (confidential Azure → this path; fails closed without
+   `DISPATCHER_AZURE_AGENT_BIN`). **Integrated live-validated end-to-end**
+   (`TestGolden_AzureLiveAdapter`): provision → agent → attest → seal → run → result
+   → Cleanup, reaped to $0. The operator pins the launch measurement in
+   `confidential.measurements` (set by the CVM image).
+
+## Trust caveat (important)
+
+Unlike GCP Confidential Space — where the **container image digest is the attested
+measurement**, so attestation proves the agent — Azure's launch measurement covers
+the **CVM/OS image, not the scp'd agent**. The current path therefore assumes the
+SSH delivery channel and the host do not substitute a different agent. Closing
+this requires baking `dispatcher-attest-azure` into a **measured custom CVM image**
+(so its identity is in the launch measurement) — deferred hardening, flagged in
+`azureStartAgent`.
