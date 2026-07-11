@@ -31,7 +31,8 @@ type awsDeps struct {
 // raw SEV-SNP verification (go-sev-guest + VLEK chain) over the agent endpoint.
 func executeAWSConfidential(ctx context.Context, d awsDeps, p *types.Plan) (*confidentialRunState, error) {
 	deps := sshConfidentialDeps{
-		provider: d.provider, image: d.image, sshPubKey: d.sshPubKey, sshUser: d.sshUser,
+		provider: d.provider, image: d.image, confidential: "sev-snp",
+		sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
 		verify: func(ctx context.Context, _ *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
 			return attest.NewAWSAttester(baseURL).Verify(ctx, req)

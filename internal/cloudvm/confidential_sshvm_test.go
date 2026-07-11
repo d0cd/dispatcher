@@ -66,6 +66,29 @@ func TestExecuteSSHConfidential_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, provider.VMCount(), "the VM stays up until Cleanup")
 }
 
+// TestExecuteSSHConfidential_ThreadsEnclaveShape confirms the generalized VM shape
+// reaches the provider: a Nitro parent requests enclave support + a pinned
+// instance type and NO memory-encryption type (the enclave is the TEE, not the
+// parent), while the CVM paths keep ConfidentialType.
+func TestExecuteSSHConfidential_ThreadsEnclaveShape(t *testing.T) {
+	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+
+	provider := NewMockProvider(ProviderAWS)
+	deps := sshConfidentialDeps{
+		provider:     provider,
+		enclave:      true,
+		instanceType: "c6a.xlarge",
+		startAgent:   func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
+		waitReady:    func(context.Context, string) error { return nil },
+		verify:       cannedVerify(attest.AttestationResult{Verified: true, Measurement: "pcr0", ChannelKey: []byte("k")}, nil),
+	}
+	_, err := executeSSHConfidential(context.Background(), deps, sshConfTestPlan(t, "run-enc", []string{"true"}), "dispatcher-nitro-job")
+	require.NoError(t, err)
+	assert.True(t, provider.LastCreateOpts.EnclaveEnabled, "a Nitro parent must request enclave support")
+	assert.Equal(t, "c6a.xlarge", provider.LastCreateOpts.InstanceType, "the parent pins an enclave-capable type")
+	assert.Empty(t, provider.LastCreateOpts.ConfidentialType, "the parent is not a memory-encrypted CVM")
+}
+
 // TestExecuteSSHConfidential_UnverifiedTearsDown is the security gate: an
 // unverified verdict seals and runs nothing and tears the VM down.
 func TestExecuteSSHConfidential_UnverifiedTearsDown(t *testing.T) {

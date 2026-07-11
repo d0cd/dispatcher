@@ -157,6 +157,12 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	args = append(args, confArgs...)
 
+	// A Nitro Enclaves parent needs enclave support enabled at launch; the parent
+	// is a normal instance (no memory encryption) — the measured enclave is the TEE.
+	if opts.EnclaveEnabled {
+		args = append(args, "--enclave-options", "Enabled=true")
+	}
+
 	// AWS has no metadata SSH channel like GCP, so dispatcher's per-run key is
 	// folded into the boot user-data (installed into the login user's
 	// authorized_keys). Without it the instance authorizes no key and SSH fails.

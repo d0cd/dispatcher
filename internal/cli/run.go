@@ -216,6 +216,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		a, err = newConfidentialSpaceAdapter(cmd.Context())
 	case usesAzureConfidential(p):
 		a, err = newAzureConfidentialAdapter(cmd.Context())
+	case usesAWSNitro(p):
+		a, err = newNitroConfidentialAdapter(cmd.Context())
 	case usesAWSConfidential(p):
 		a, err = newAWSConfidentialAdapter(cmd.Context())
 	default:

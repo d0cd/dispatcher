@@ -25,6 +25,10 @@ type MockProvider struct {
 	// tests can assert cleanup uses a fresh (non-cancelled) context.
 	DestroyCtx context.Context
 
+	// LastCreateOpts records the options of the most recent CreateVM, so tests can
+	// assert the provisioning shape (confidential type, enclave support, etc.).
+	LastCreateOpts VMOptions
+
 	// Lima-style overrides: when set, CreateVM populates these on the
 	// returned VMInfo so tests can exercise the provider-supplied-identity
 	// path (the same code path Lima uses).
@@ -55,6 +59,7 @@ func (m *MockProvider) CreateVM(_ context.Context, opts VMOptions) (*VMInfo, err
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.LastCreateOpts = opts
 	m.nextID++
 	id := fmt.Sprintf("mock-%s-%d", m.id, m.nextID)
 	vm := &VMInfo{

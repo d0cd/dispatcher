@@ -41,7 +41,8 @@ type azureDeps struct {
 // (operator-pinned, since Azure's launch measurement is set by the CVM image).
 func executeAzureConfidential(ctx context.Context, d azureDeps, p *types.Plan) (*confidentialRunState, error) {
 	deps := sshConfidentialDeps{
-		provider: d.provider, sshPubKey: d.sshPubKey, sshUser: d.sshUser,
+		provider: d.provider, confidential: "sev-snp",
+		sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
 		verify: func(ctx context.Context, _ *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
 			return attest.NewAzureAttester(d.keys, d.issuer, baseURL, d.mb).Verify(ctx, req)

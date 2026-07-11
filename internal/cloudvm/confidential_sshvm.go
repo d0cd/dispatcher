@@ -21,14 +21,21 @@ var runSealedExchange = agent.RunSealedExchange
 // orchestration serves both; the live ops (provision, start-agent, endpoint
 // reachability) are seams so the verify-before-seal ordering is unit-testable.
 type sshConfidentialDeps struct {
-	provider   Provider
-	image      string // optional VM image override (AWS pins a SEV-SNP 24.04 AMI)
-	sshPubKey  string
-	sshUser    string
-	startAgent func(ctx context.Context, vm *VMInfo) (baseURL string, err error)
-	waitReady  func(ctx context.Context, baseURL string) error
+	provider Provider
+	image    string // optional VM image override (AWS pins a SEV-SNP 24.04 AMI)
+	// confidential is VMOptions.ConfidentialType: "sev-snp" for a memory-encrypted
+	// CVM (Azure MAA, AWS SEV-SNP), or "" for a Nitro Enclaves parent (the parent
+	// is a plain instance — the measured enclave it launches is the TEE).
+	confidential string
+	enclave      bool   // request Nitro Enclaves support on the parent
+	instanceType string // optional; a Nitro parent pins an enclave-capable type
+	sshPubKey    string
+	sshUser      string
+	startAgent   func(ctx context.Context, vm *VMInfo) (baseURL string, err error)
+	waitReady    func(ctx context.Context, baseURL string) error
 	// verify runs the provider's attester over the agent endpoint (MAA for Azure,
-	// raw SEV-SNP for AWS) and returns the verdict + the channel key to seal to.
+	// raw SEV-SNP for AWS, Nitro doc for enclaves) and returns the verdict + the
+	// channel key to seal to.
 	verify func(ctx context.Context, vm *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error)
 }
 
@@ -49,7 +56,9 @@ func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types
 		Name:             vmName,
 		Region:           region,
 		Image:            d.image,
-		ConfidentialType: "sev-snp",
+		InstanceType:     d.instanceType,
+		ConfidentialType: d.confidential,
+		EnclaveEnabled:   d.enclave,
 		SSHKeyPath:       d.sshPubKey,
 		SSHUser:          d.sshUser,
 		Tags: map[string]string{

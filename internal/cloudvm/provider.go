@@ -55,6 +55,10 @@ type VMOptions struct {
 	// The untrusted-channel design makes the endpoint safe to expose, but scoping
 	// it is defense-in-depth against unsolicited traffic.
 	ConfidentialAllowFrom string
+	// EnclaveEnabled requests a Nitro Enclaves-capable parent instance (AWS
+	// --enclave-options Enabled=true). The parent itself is not memory-encrypted;
+	// the measured enclave it launches is the TEE. Distinct from ConfidentialType.
+	EnclaveEnabled bool
 }
 
 // VMInfo describes a provisioned VM.

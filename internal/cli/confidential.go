@@ -30,12 +30,23 @@ func usesAzureConfidential(p *types.Plan) bool {
 	return c.Required && c.Attestation != "off" && p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
 }
 
-// usesAWSConfidential reports whether a run should take the AWS confidential
-// (SEV-SNP, go-sev-guest-verified + sealed) path: a confidential AWS run with
-// attestation on. `attestation: off` stays on the plain SSH path.
+// usesAWSNitro reports whether a confidential AWS run should take the Nitro
+// Enclaves path (measured enclave image), selected by `confidential.type: nitro`.
+// This is the AWS path that measures the agent; the SEV-SNP path does not.
+func usesAWSNitro(p *types.Plan) bool {
+	c := p.Workload.Requirements.Confidential
+	return c.Required && c.Attestation != "off" && c.Type == "nitro" &&
+		p.Recommendation != nil && p.Recommendation.Target == "aws-vm"
+}
+
+// usesAWSConfidential reports whether a run should take the AWS SEV-SNP
+// confidential (go-sev-guest-verified + sealed) path: a confidential AWS run with
+// attestation on that isn't a Nitro run. `attestation: off` stays on the plain
+// SSH path.
 func usesAWSConfidential(p *types.Plan) bool {
 	c := p.Workload.Requirements.Confidential
-	return c.Required && c.Attestation != "off" && p.Recommendation != nil && p.Recommendation.Target == "aws-vm"
+	return c.Required && c.Attestation != "off" && c.Type != "nitro" &&
+		p.Recommendation != nil && p.Recommendation.Target == "aws-vm"
 }
 
 // newAWSConfidentialAdapter builds the AWS confidential adapter. Verification is
@@ -51,6 +62,27 @@ func newAWSConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, error)
 	return cloudvm.NewAWSConfidentialAdapter(
 		cloudvm.NewAWSProvider(region), agentBin,
 		cloudvm.Config{ProviderID: cloudvm.ProviderAWS, Region: region, SSHUser: "ubuntu"},
+	), nil
+}
+
+// newNitroConfidentialAdapter builds the AWS Nitro Enclaves adapter from the
+// pre-built, pinned enclave image: DISPATCHER_AWS_NITRO_EIF (the EIF),
+// DISPATCHER_AWS_NITRO_PCR0 (its measured PCR0), and DISPATCHER_AWS_NITRO_PROXY_BIN
+// (a cross-compiled dispatcher-nitro-proxy). Fails closed when unconfigured; build
+// the EIF + read PCR0 with deploy/nitro/build-eif.sh.
+func newNitroConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, error) {
+	eif := os.Getenv("DISPATCHER_AWS_NITRO_EIF")
+	proxy := os.Getenv("DISPATCHER_AWS_NITRO_PROXY_BIN")
+	pcr0 := os.Getenv("DISPATCHER_AWS_NITRO_PCR0")
+	if eif == "" || proxy == "" || pcr0 == "" {
+		return nil, fmt.Errorf("confidential AWS Nitro runs need the pinned enclave image: set DISPATCHER_AWS_NITRO_EIF, " +
+			"DISPATCHER_AWS_NITRO_PROXY_BIN (a cross-compiled dispatcher-nitro-proxy), and DISPATCHER_AWS_NITRO_PCR0 " +
+			"(build with deploy/nitro/build-eif.sh)")
+	}
+	region := os.Getenv("DISPATCHER_AWS_REGION")
+	return cloudvm.NewAWSNitroConfidentialAdapter(
+		cloudvm.NewAWSProvider(region), eif, proxy, pcr0, os.Getenv("DISPATCHER_AWS_NITRO_INSTANCE_TYPE"),
+		cloudvm.Config{ProviderID: cloudvm.ProviderAWS, Region: region, SSHUser: "ec2-user"},
 	), nil
 }
 
