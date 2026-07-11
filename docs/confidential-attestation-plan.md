@@ -18,25 +18,27 @@ vTPM/MAA) — no hand-rolled crypto in any operational path. This doc is the
 
 - ✅ **AWS ARK pinning + CRL (cc-6): closed.** The AWS verifier pins the KDS ARK
   to go-sev-guest's embedded AMD root and checks the ASVK CRL (stdlib x509).
-- ⚠️ **Agent not in the measurement (Azure + AWS): open — a dedicated build.**
-  GCP measures the agent (the container digest *is* the measurement). On the
-  SSH-VM paths the agent is scp'd after boot, so it's outside the launch
-  measurement. What each measurement *does* anchor:
-  - **GCP** — the workload container image digest (agent included). ✅
-  - **Azure** — the CVM OS image (agent excluded).
-  - **AWS** — the AWS guest **firmware** only; the OS image is loaded from EBS
-    after the measured launch, so the measurement anchors "genuine AWS SEV-SNP
-    firmware", not the OS or agent.
+- ⚠️ **Agent not in the measurement (Azure + AWS): verifier done, image build
+  pending.** GCP measures the agent (the container digest *is* the measurement).
+  On the SSH-VM paths the agent is scp'd after boot, so it's outside the launch
+  measurement. What each measurement *does* anchor, and how each closes:
+  - **GCP** — the workload container image digest (agent included). ✅ closed.
+  - **Azure** — the SEV-SNP launch measurement covers only the CVM firmware, but
+    the **vTPM measures the boot chain into PCRs that MAA attests** (PCR4 = the
+    boot application / UKI). **Verifier done** (`MAAMeasuredBoot`,
+    `DISPATCHER_AZURE_PCR*`); pending: build the custom UKI image + pin PCR4.
+  - **AWS** — EC2 SEV-SNP measures the AWS guest **firmware** only, and there is
+    **no vTPM/PCR chain**, so the agent cannot be folded into the launch
+    measurement via a custom AMI. The only path is **Nitro Enclaves**, where the
+    enclave image itself is measured (PCR0). **Verifier done**
+    (`NewAWSNitroAttester`); pending: the enclave EIF + vsock execution model +
+    live validation. Note Nitro is a distinct, restricted execution model (no
+    direct network/disk in the enclave).
 
-  Closing this requires **measured boot**: a custom image whose kernel/initrd (or
-  a dm-verity roothash on the measured cmdline) carries the agent, plus
-  re-capturing + pinning the measurement per image. It's a real per-cloud
-  pipeline with platform-specific work (Azure needs `DiskWithVMGuestState`
-  confidential OS-disk encryption; AWS EC2's OVMF→EBS boot flow makes measuring
-  the OS non-trivial), so it's scoped as a dedicated effort rather than bolted on.
-  Until then, agent integrity assumes the host does not tamper with the on-disk
-  binary before it runs (a malicious-cloud-provider threat; passive host reads of
-  live guest memory are already blocked by SEV-SNP).
+  Until the image/enclave builds land, agent integrity on the SSH-VM paths
+  assumes the host does not tamper with the on-disk binary before it runs (a
+  malicious-cloud-provider threat; passive host reads of live guest memory are
+  already blocked by SEV-SNP).
 
 **Assurance (read before shipping):** this is an **MVP — the happy path is
 live-validated, not a security-audited production feature.** All cryptography
