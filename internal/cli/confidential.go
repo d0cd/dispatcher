@@ -29,6 +29,30 @@ func usesAzureConfidential(p *types.Plan) bool {
 	return c.Required && c.Attestation != "off" && p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
 }
 
+// usesAWSConfidential reports whether a run should take the AWS confidential
+// (SEV-SNP, go-sev-guest-verified + sealed) path: a confidential AWS run with
+// attestation on. `attestation: off` stays on the plain SSH path.
+func usesAWSConfidential(p *types.Plan) bool {
+	c := p.Workload.Requirements.Confidential
+	return c.Required && c.Attestation != "off" && p.Recommendation != nil && p.Recommendation.Target == "aws-vm"
+}
+
+// newAWSConfidentialAdapter builds the AWS confidential adapter. Verification is
+// go-sev-guest against AMD roots (no vendor keys to load); agentBin is the
+// cross-compiled dispatcher-attest-aws binary. Fails closed when unconfigured.
+func newAWSConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, error) {
+	agentBin := os.Getenv("DISPATCHER_AWS_AGENT_BIN")
+	if agentBin == "" {
+		return nil, fmt.Errorf("confidential AWS runs need the measured agent binary: set DISPATCHER_AWS_AGENT_BIN " +
+			"to a cross-compiled dispatcher-attest-aws (GOOS=linux GOARCH=amd64)")
+	}
+	region := os.Getenv("DISPATCHER_AWS_REGION")
+	return cloudvm.NewAWSConfidentialAdapter(
+		cloudvm.NewAWSProvider(region), agentBin,
+		cloudvm.Config{ProviderID: cloudvm.ProviderAWS, Region: region, SSHUser: "ubuntu"},
+	), nil
+}
+
 // newAzureConfidentialAdapter builds the Azure confidential adapter: the pinned
 // MAA instance's live signing keys + the cross-compiled agent binary + the Azure
 // provider. Fails closed with guidance when unconfigured.

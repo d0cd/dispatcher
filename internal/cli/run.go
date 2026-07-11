@@ -215,6 +215,8 @@ func runRun(cmd *cobra.Command, args []string) error {
 		a, err = newConfidentialSpaceAdapter(cmd.Context())
 	case usesAzureConfidential(p):
 		a, err = newAzureConfidentialAdapter(cmd.Context())
+	case usesAWSConfidential(p):
+		a, err = newAWSConfidentialAdapter(cmd.Context())
 	default:
 		a, err = adapterForTarget(p.Recommendation.Target)
 	}
@@ -423,6 +425,12 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 			cloudvm.NewAzureProvider(rg, os.Getenv("DISPATCHER_AZURE_LOCATION")),
 			nil, "", "", "",
 			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "dispatcher"},
+		), nil
+	case "aws-confidential":
+		// Reconnect only needs VM lifecycle; the agent binary (Execute-only) is nil.
+		return cloudvm.NewAWSConfidentialAdapter(
+			cloudvm.NewAWSProvider(os.Getenv("DISPATCHER_AWS_REGION")), "",
+			cloudvm.Config{ProviderID: cloudvm.ProviderAWS, SSHUser: "ubuntu"},
 		), nil
 	case "firecracker-vm":
 		return cloudvm.NewCloudVMAdapter(

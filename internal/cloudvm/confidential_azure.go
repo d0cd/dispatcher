@@ -10,10 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
-	"github.com/d0cd/dispatcher/internal/dlog"
 	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -48,83 +46,20 @@ type azureDeps struct {
 	waitReady  func(ctx context.Context, baseURL string) error
 }
 
-// executeAzureConfidential is the Azure orchestration core: provision the CVM,
-// start the in-TEE agent, verify the MAA attestation over the untrusted endpoint,
-// and only then seal the source/.env and run the sealed exchange. Any failure
-// before a verified verdict tears the VM down and never ships a secret. Mirrors
-// executeConfidentialSpace but on the SSH-VM + MAA path.
+// executeAzureConfidential is the Azure orchestration: the shared SSH-VM
+// confidential flow with MAA verification over the agent endpoint. The
+// measurement allowlist comes from the workload's confidential.measurements
+// (operator-pinned, since Azure's launch measurement is set by the CVM image).
 func executeAzureConfidential(ctx context.Context, d azureDeps, p *types.Plan) (*csRunState, error) {
-	w := p.Workload
-
-	payload, err := buildConfidentialPayload(w)
-	if err != nil {
-		return nil, fmt.Errorf("build workload payload: %w", err)
-	}
-
-	region := p.Constraints.Region
-	opts := VMOptions{
-		Name:             fmt.Sprintf("dispatcher-cvm-%s", adapter.SanitizeName(w.Name)),
-		Region:           region,
-		ConfidentialType: "sev-snp",
-		SSHKeyPath:       d.sshPubKey,
-		SSHUser:          d.sshUser,
-		Tags: map[string]string{
-			"dispatcher-run-id": p.Metadata.ID,
-			"dispatcher":        "true",
+	deps := sshConfidentialDeps{
+		provider: d.provider, sshPubKey: d.sshPubKey, sshUser: d.sshUser,
+		startAgent: d.startAgent, waitReady: d.waitReady,
+		verify: func(ctx context.Context, vm *VMInfo, baseURL string, req types.ConfidentialRequirement) (AttestationResult, error) {
+			att := &azureAttester{keys: d.keys, issuer: d.issuer, isReady: true, fetch: endpointMAAFetch(baseURL)}
+			return att.Verify(ctx, vm, "", "", req)
 		},
 	}
-
-	dlog.L().Info("azurecvm.create.start", "run", p.Metadata.ID)
-	vm, err := d.provider.CreateVM(ctx, opts)
-	if err != nil {
-		return nil, fmt.Errorf("provision confidential CVM: %w", err)
-	}
-	destroyOnErr := true
-	defer func() {
-		if !destroyOnErr {
-			return
-		}
-		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		_ = d.provider.DestroyVM(cctx, vm.ID)
-	}()
-
-	baseURL, err := d.startAgent(ctx, vm)
-	if err != nil {
-		return nil, fmt.Errorf("start in-TEE agent: %w", err)
-	}
-	if err := d.waitReady(ctx, baseURL); err != nil {
-		return nil, fmt.Errorf("confidential agent endpoint not reachable: %w", err)
-	}
-
-	// Verify MAA attestation BEFORE anything is sealed or shipped. The measurement
-	// allowlist comes from the workload's confidential.measurements (operator-
-	// pinned, since Azure's launch measurement is set by the CVM image).
-	att := &azureAttester{keys: d.keys, issuer: d.issuer, isReady: true, fetch: endpointMAAFetch(baseURL)}
-	result, err := att.Verify(ctx, vm, "", "", w.Requirements.Confidential)
-	if err != nil {
-		return nil, fmt.Errorf("attestation verification failed: %w", err)
-	}
-	if !result.Verified {
-		return nil, fmt.Errorf("attestation rejected: %s", result.Verdict)
-	}
-	dlog.L().Info("azurecvm.attested", "run", p.Metadata.ID, "vm_id", vm.ID, "measurement", result.Measurement)
-
-	runRes, err := runSealedExchange(ctx, baseURL, result.ChannelKey, payload)
-	if err != nil {
-		return nil, fmt.Errorf("sealed run exchange: %w", err)
-	}
-
-	destroyOnErr = false
-	return &csRunState{
-		Provider:    d.provider.Name(),
-		VMID:        vm.ID,
-		Region:      region,
-		Outputs:     w.Outputs,
-		Result:      runRes,
-		Attestation: result,
-		CreatedAt:   time.Now().UTC(),
-	}, nil
+	return executeSSHConfidential(ctx, deps, p, fmt.Sprintf("dispatcher-cvm-%s", adapter.SanitizeName(p.Workload.Name)))
 }
 
 // azurePortOpener is an optional Provider capability: open the in-TEE agent's

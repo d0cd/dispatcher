@@ -51,3 +51,21 @@ func TestUsesAzureConfidential(t *testing.T) {
 		})
 	}
 }
+
+func TestUsesAWSConfidential(t *testing.T) {
+	cases := []struct {
+		name   string
+		plan   *types.Plan
+		expect bool
+	}{
+		{"confidential aws → SEV-SNP path", planWith("aws-vm", types.ConfidentialRequirement{Required: true}), true},
+		{"attestation off stays on SSH path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Attestation: "off"}), false},
+		{"non-confidential aws", planWith("aws-vm", types.ConfidentialRequirement{}), false},
+		{"confidential gcp is not the aws path", planWith("gcp-vm", types.ConfidentialRequirement{Required: true}), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expect, usesAWSConfidential(tc.plan))
+		})
+	}
+}
