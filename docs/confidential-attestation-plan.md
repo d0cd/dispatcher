@@ -14,6 +14,30 @@ vTPM/MAA) — no hand-rolled crypto in any operational path. This doc is the
 "how/why" — requirements R1–R13 + threat model live in
 [confidential-computing.md](confidential-computing.md).
 
+## Known limitations
+
+- ✅ **AWS ARK pinning + CRL (cc-6): closed.** The AWS verifier pins the KDS ARK
+  to go-sev-guest's embedded AMD root and checks the ASVK CRL (stdlib x509).
+- ⚠️ **Agent not in the measurement (Azure + AWS): open — a dedicated build.**
+  GCP measures the agent (the container digest *is* the measurement). On the
+  SSH-VM paths the agent is scp'd after boot, so it's outside the launch
+  measurement. What each measurement *does* anchor:
+  - **GCP** — the workload container image digest (agent included). ✅
+  - **Azure** — the CVM OS image (agent excluded).
+  - **AWS** — the AWS guest **firmware** only; the OS image is loaded from EBS
+    after the measured launch, so the measurement anchors "genuine AWS SEV-SNP
+    firmware", not the OS or agent.
+
+  Closing this requires **measured boot**: a custom image whose kernel/initrd (or
+  a dm-verity roothash on the measured cmdline) carries the agent, plus
+  re-capturing + pinning the measurement per image. It's a real per-cloud
+  pipeline with platform-specific work (Azure needs `DiskWithVMGuestState`
+  confidential OS-disk encryption; AWS EC2's OVMF→EBS boot flow makes measuring
+  the OS non-trivial), so it's scoped as a dedicated effort rather than bolted on.
+  Until then, agent integrity assumes the host does not tamper with the on-disk
+  binary before it runs (a malicious-cloud-provider threat; passive host reads of
+  live guest memory are already blocked by SEV-SNP).
+
 **Assurance (read before shipping):** this is an **MVP — the happy path is
 live-validated, not a security-audited production feature.** All cryptography
 uses vetted libraries — JWS/JWT verification via **go-jose v4**, HPKE (RFC 9180)

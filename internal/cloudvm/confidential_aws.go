@@ -72,9 +72,13 @@ type awsPortOpener interface {
 // SEV-SNP instance: wait for SSH, scp the agent, start it (root, for
 // /dev/sev-guest), and open the security group for its port.
 //
-// SECURITY NOTE: like the Azure path, the scp'd agent is not part of the
-// attested measurement (which covers the guest launch image). Agent integrity
-// rests on the SSH delivery + host until it's baked into a measured image.
+// SECURITY NOTE: the scp'd agent is not part of the attested measurement. On
+// EC2 the SEV-SNP launch measurement anchors the AWS-provided guest firmware —
+// not the OS image or this agent — so a pinned measurement proves "genuine AWS
+// SEV-SNP firmware", and freshness/binding come from REPORT_DATA. Verifying the
+// OS + agent needs measured boot (a custom image whose kernel/initrd or dm-verity
+// roothash is in the launch measurement). Until then, agent integrity rests on
+// the SSH delivery + host not tampering with the on-disk binary.
 func awsStartAgent(agentBin, keyPath, sshUser, egressCIDR string, provider Provider) func(context.Context, *VMInfo) (string, error) {
 	return func(ctx context.Context, vm *VMInfo) (string, error) {
 		if err := provider.WaitReady(ctx, vm.ID, vm.IP, keyPath); err != nil {
