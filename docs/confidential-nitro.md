@@ -89,6 +89,7 @@ the attestation format (Nitro COSE doc) differ.
     accepts either form.
 - ✅ **Dispatcher-side adapter** (`AWSNitroConfidentialAdapter`): `dispatcher run`
   with `confidential.type: nitro` provisions the parent, installs nitro-cli, ships
-  the pinned EIF + proxy, runs the enclave, and drives the sealed exchange. The
-  orchestration reuses the shared verify-before-seal flow; the adapter path itself
-  awaits a live end-to-end run (the core loop is already hardware-validated).
+  the pinned EIF + proxy, runs the enclave, and drives the sealed exchange —
+  **live-validated end-to-end** (`TestGolden_NitroLiveAdapter`, us-east-1): sealed
+  .env + source reached the enclave, the workload ran, the sealed result came back,
+  and Cleanup reaped the parent. The AWS measured-agent path is complete.
