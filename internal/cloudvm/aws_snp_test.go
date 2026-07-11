@@ -1,0 +1,34 @@
+package cloudvm
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/d0cd/dispatcher/internal/types"
+)
+
+func TestAWSAttester_NotReadyAndNoFetch(t *testing.T) {
+	assert.False(t, (&awsAttester{}).ready(), "not ready until a fetch is wired")
+	_, err := (&awsAttester{isReady: true}).Verify(context.Background(), &VMInfo{}, "/k", "u",
+		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
+	require.Error(t, err, "no fetch wired must error, not panic")
+}
+
+func TestAWSAttester_PropagatesFetchFailure(t *testing.T) {
+	att := &awsAttester{isReady: true,
+		fetchChain: func(string) ([]byte, error) { return nil, nil },
+		fetch: func(_ context.Context, _ *VMInfo, _, _ string, _ []byte) (snpEvidence, error) {
+			return snpEvidence{}, assertErr("/dev/sev-guest unavailable")
+		}}
+	_, err := att.Verify(context.Background(), &VMInfo{}, "/k", "u",
+		types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{"x"}})
+	require.Error(t, err, "a fetch failure is an error, not an unverified verdict")
+}
+
+func TestVerifyAWSSNPReport_RejectsGarbage(t *testing.T) {
+	_, err := verifyAWSSNPReport([]byte("not a report"), func(string) ([]byte, error) { return nil, nil })
+	require.Error(t, err, "malformed report bytes must error, not panic")
+}

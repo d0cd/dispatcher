@@ -7,6 +7,7 @@ require (
 	github.com/edgelesssys/go-azguestattestation v0.0.0-20250408071817-8c4457b235ff
 	github.com/fatih/color v1.18.0
 	github.com/go-jose/go-jose/v4 v4.1.4
+	github.com/google/go-sev-guest v0.15.0
 	github.com/spf13/cobra v1.8.1
 	github.com/stretchr/testify v1.9.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -15,11 +16,9 @@ require (
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/go-jose/go-jose/v3 v3.0.3 // indirect
-	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/certificate-transparency-go v1.1.8 // indirect
 	github.com/google/go-attestation v0.5.1 // indirect
 	github.com/google/go-configfs-tsm v0.2.2 // indirect
-	github.com/google/go-sev-guest v0.11.1 // indirect
 	github.com/google/go-tdx-guest v0.3.1 // indirect
 	github.com/google/go-tpm v0.9.1-0.20240510201744-5c2f0887e003 // indirect
 	github.com/google/go-tpm-tools v0.4.4 // indirect
@@ -30,8 +29,6 @@ require (
 	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/pborman/uuid v1.2.1 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
