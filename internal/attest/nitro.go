@@ -50,9 +50,15 @@ type NitroPolicy struct {
 // pinned PCRs. On success it returns the PCR0 measurement (hex) and the bound
 // channel public key (the doc's public_key) to seal to.
 func verifyNitroDoc(coseBytes []byte, roots *x509.CertPool, p NitroPolicy) (measurement string, channelKey []byte, err error) {
+	// The Nitro Security Module emits an untagged COSE_Sign1 (a bare 4-element
+	// array, no CBOR tag 18); accept either form.
 	var msg cose.Sign1Message
 	if err := msg.UnmarshalCBOR(coseBytes); err != nil {
-		return "", nil, fmt.Errorf("parse COSE_Sign1: %w", err)
+		var untagged cose.UntaggedSign1Message
+		if uerr := untagged.UnmarshalCBOR(coseBytes); uerr != nil {
+			return "", nil, fmt.Errorf("parse COSE_Sign1: %w", err)
+		}
+		msg = cose.Sign1Message(untagged)
 	}
 	var doc nitroDoc
 	if err := cbor.Unmarshal(msg.Payload, &doc); err != nil {
