@@ -76,7 +76,7 @@ func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, e
 
 // azureEvidence assembles a full, valid Azure SNP+vTPM evidence bundle bound to
 // nonce+channelKey, returning it plus the AMD roots to trust. mutate can tamper.
-func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate func(*azureSNPEvidence)) (azureSNPEvidence, []*x509.Certificate) {
+func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate func(*agent.AzureSNPEvidence)) (agent.AzureSNPEvidence, []*x509.Certificate) {
 	t.Helper()
 	ch := newSNPChain(t)
 	akPriv, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -94,7 +94,7 @@ func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate 
 	pcrs := map[uint32][]byte{11: pcr11}
 	quote, sig := signedQuote(t, akPriv, pcrs, agent.MAABindingNonce(nonce, channelKey))
 
-	ev := azureSNPEvidence{
+	ev := agent.AzureSNPEvidence{
 		SNPReport:   report,
 		VCEK:        ch.vcek.Raw,
 		ASK:         ch.ask.Raw,
@@ -149,7 +149,7 @@ func TestVerifyAzureSNP_RejectsUnboundAK(t *testing.T) {
 	channelKey := []byte("azure-channel-public-key-32-byte")
 	pcr11 := make48(0xAB)[:32]
 
-	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, func(e *azureSNPEvidence) {
+	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, func(e *agent.AzureSNPEvidence) {
 		e.RuntimeData = append([]byte(nil), e.RuntimeData...)
 		e.RuntimeData[len(e.RuntimeData)-2] ^= 0xFF // tamper → SHA-256 no longer matches REPORT_DATA
 	})
@@ -182,7 +182,7 @@ func TestVerifyAzureSNP_RejectsForgedQuote(t *testing.T) {
 	channelKey := []byte("azure-channel-public-key-32-byte")
 	pcr11 := make48(0xAB)[:32]
 
-	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, func(e *azureSNPEvidence) {
+	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, func(e *agent.AzureSNPEvidence) {
 		other, _ := rsa.GenerateKey(rand.Reader, 2048)
 		signed := sha256.Sum256(e.Quote)
 		e.QuoteSig, _ = rsa.SignPKCS1v15(rand.Reader, other, crypto.SHA256, signed[:])

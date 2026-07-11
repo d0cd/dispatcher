@@ -2,7 +2,9 @@ package attest
 
 import (
 	"bytes"
+	"context"
 	"crypto"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -15,6 +17,7 @@ import (
 	legacytpm "github.com/google/go-tpm/legacy/tpm2"
 
 	"github.com/d0cd/dispatcher/internal/attest/agent"
+	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // Azure Confidential VM measured-boot attestation, verified directly the way
@@ -28,18 +31,6 @@ import (
 // so the vTPM's PCRs are trustworthy and PCR11 (the UKI carrying the agent) can be
 // pinned — closing the agent-not-measured caveat. See docs/confidential-azure-uki.md.
 
-// azureSNPEvidence is what the in-CVM agent returns for direct verification.
-type azureSNPEvidence struct {
-	SNPReport   []byte            `json:"snp_report"`   // raw 0x4a0 SEV-SNP report
-	VCEK        []byte            `json:"vcek"`         // VCEK leaf DER
-	ASK         []byte            `json:"ask"`          // ASK intermediate DER
-	RuntimeData []byte            `json:"runtime_data"` // HCL runtime data (carries HCLAkPub)
-	Quote       []byte            `json:"quote"`        // TPMS_ATTEST the AK signed
-	QuoteSig    []byte            `json:"quote_sig"`    // signature over Quote by the AK
-	PCRs        map[uint32][]byte `json:"pcrs"`         // PCR index → value
-	ChannelKey  []byte            `json:"channel_key"`  // agent's X25519 sealing pubkey
-}
-
 // AzureSNPPolicy is what a measured Azure run demands of the evidence.
 type AzureSNPPolicy struct {
 	Roots []*x509.Certificate // pinned AMD ARK roots
@@ -49,7 +40,7 @@ type AzureSNPPolicy struct {
 
 // verifyAzureSNP verifies the full chain and returns the PCR11 measurement + the
 // bound channel key to seal to.
-func verifyAzureSNP(ev azureSNPEvidence, p AzureSNPPolicy) (measurement string, channelKey []byte, err error) {
+func verifyAzureSNP(ev agent.AzureSNPEvidence, p AzureSNPPolicy) (measurement string, channelKey []byte, err error) {
 	// 1. Genuine SEV-SNP hardware: the report signature + cert chain to a pinned ARK.
 	rep, err := parseSNPReport(ev.SNPReport)
 	if err != nil {
@@ -124,6 +115,72 @@ func verifyAzureSNP(ev azureSNPEvidence, p AzureSNPPolicy) (measurement string, 
 		}
 	}
 	return hex.EncodeToString(ev.PCRs[11]), ev.ChannelKey, nil
+}
+
+// azureSNPFetch obtains the direct-verification evidence bundle from the in-CVM
+// agent, binding the verifier's per-run nonce. It needs a live vTPM, so it is the
+// one part not unit-testable offline.
+type azureSNPFetch func(ctx context.Context, nonce []byte) (agent.AzureSNPEvidence, error)
+
+// azureSNPAttester verifies Azure confidential VMs directly (SEV-SNP + vTPM quote,
+// no MAA). roots are the pinned AMD ARK roots; pcrs pins the measured-image PCRs.
+type azureSNPAttester struct {
+	roots []*x509.Certificate
+	pcrs  map[int]string
+	fetch azureSNPFetch
+}
+
+// NewAzureSNPAttester verifies an Azure confidential VM's measured boot directly
+// from the agent endpoint: the SEV-SNP report + AK-signed vTPM quote, chained to
+// the embedded AMD roots, pinning the known-good PCRs (PCR11 = the UKI + agent).
+func NewAzureSNPAttester(pcrs map[int]string, baseURL string) Attester {
+	return &azureSNPAttester{roots: amdRoots, pcrs: pcrs, fetch: endpointAzureSNPFetch(baseURL)}
+}
+
+func (a *azureSNPAttester) Verify(ctx context.Context, _ types.ConfidentialRequirement) (AttestationResult, error) {
+	if a.fetch == nil {
+		return AttestationResult{}, fmt.Errorf("azure snp attester has no evidence fetch wired")
+	}
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return AttestationResult{}, fmt.Errorf("generate attestation nonce: %w", err)
+	}
+	ev, err := a.fetch(ctx, nonce)
+	if err != nil {
+		return AttestationResult{}, fmt.Errorf("fetch azure snp evidence: %w", err)
+	}
+	measurement, channelKey, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: a.roots, Nonce: nonce, PCRs: a.pcrs})
+	if err != nil {
+		return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
+	}
+	return AttestationResult{
+		Verified:    true,
+		Type:        "sev-snp",
+		Measurement: measurement,
+		Nonce:       hex.EncodeToString(nonce),
+		Verdict:     "verified",
+		ChannelKey:  channelKey,
+	}, nil
+}
+
+// endpointAzureSNPFetch reads the evidence bundle (base64 JSON) from the in-CVM
+// agent's /attest endpoint over the untrusted channel.
+func endpointAzureSNPFetch(baseURL string) azureSNPFetch {
+	return func(ctx context.Context, nonce []byte) (agent.AzureSNPEvidence, error) {
+		token, _, err := agent.FetchAttestation(ctx, baseURL, nonce)
+		if err != nil {
+			return agent.AzureSNPEvidence{}, err
+		}
+		raw, err := base64.StdEncoding.DecodeString(token)
+		if err != nil {
+			return agent.AzureSNPEvidence{}, fmt.Errorf("decode evidence: %w", err)
+		}
+		var ev agent.AzureSNPEvidence
+		if err := json.Unmarshal(raw, &ev); err != nil {
+			return agent.AzureSNPEvidence{}, fmt.Errorf("parse evidence: %w", err)
+		}
+		return ev, nil
+	}
 }
 
 // hclAkPub extracts the vTPM Attestation Key (the "HCLAkPub" RSA JWK) from the HCL
