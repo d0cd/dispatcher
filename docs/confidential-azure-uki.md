@@ -48,10 +48,28 @@ MOK-enrolled key). Two ways to satisfy that:
    question:* whether the CVM security type permits Secure Boot off while keeping
    the SEV-SNP `azure-compliant-cvm` verdict — to confirm on the live build.
 
-For our threat model (verify-before-seal), **option 2 is the simpler, sufficient
-path**: PCR4 pinning alone anchors the agent, and the SEV-SNP launch measurement
-still proves genuine Azure CVM firmware. Option 1 is the belt-and-suspenders
-upgrade if Secure Boot must stay on.
+For our threat model (verify-before-seal), option 2 is the simpler path in
+principle: PCR4 pinning alone anchors the agent, and the SEV-SNP launch
+measurement still proves genuine Azure CVM firmware.
+
+### Live finding (2026-07): the default MAA policy blocks option 2
+
+A live test settled the open question. Azure **does** let you create a CVM with
+Secure Boot off (`--enable-secure-boot false`), the agent runs, and MAA egress
+works — but the **shared MAA instance's default policy denies attestation when
+`secureboot==false`**:
+
+```
+PolicyValidationFailure: [type=="secureboot", value==false] => deny();
+```
+
+So option 2 needs a **custom MAA instance** whose policy permits `secureboot==false`
+while still requiring a genuine SEV-SNP `azure-compliant-cvm` (and echoing the
+PCRs). The dispatcher verifier then pins that custom MAA as the issuer and pins
+PCR4. Option 1 (Secure Boot on, MS-signed shim) avoids the custom policy but needs
+the UKI signed by a `db`/MOK key, and MOK enrollment (`mokutil --import`) requires
+an interactive MokManager confirmation at the next boot — awkward to automate on
+Azure. **Neither path is a one-command build**; both are viable with more work.
 
 ## Build recipe
 
@@ -98,6 +116,8 @@ so re-capture and re-pin per image.
 
 - ✅ Verifier (`MAAMeasuredBoot`, PCR pinning) — done and unit-tested.
 - ✅ Build assets + recipe (this doc, `deploy/azure-uki/`).
-- ⏳ Live build on Azure: produce the image, resolve the Secure Boot fork against
-  the live CVM, capture PCR4, and validate a run pins it. Needs an Azure builder +
-  a CVM and some iteration on the boot-entry/Secure-Boot specifics.
+- ✅ Live-probed the fork: CVM Secure-Boot-off is accepted + the agent/MAA egress
+  work, but the shared MAA denies `secureboot==false` (finding above).
+- ⏳ Remaining live build: stand up a custom MAA instance with a policy that
+  permits `secureboot==false` (option 2), OR solve MOK-signed UKI under Secure
+  Boot on (option 1); then build the UKI image, capture PCR4, and validate.
