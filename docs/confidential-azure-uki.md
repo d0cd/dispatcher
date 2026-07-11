@@ -1,8 +1,20 @@
 # Azure measured boot: baking the agent into PCR4 (UKI)
 
-This closes the agent-not-measured caveat on Azure. The verifier half is already
-done (`MAAMeasuredBoot` / `DISPATCHER_AZURE_PCR*`, see `docs/confidential-azure-maa.md`);
-this doc is the **image build** that produces a known-good PCR4 to pin.
+This closes the agent-not-measured caveat on Azure.
+
+## Chosen approach: direct SNP+vTPM verification (no MAA)
+
+Live-probing (below) showed the shared MAA denies secure-boot-off, and MAA only
+attests PCRs 0–7. So we follow **Constellation**: verify the SEV-SNP report + a
+vTPM PCR **quote** directly, without MAA. That removes the MAA policy/secure-boot
+obstacle entirely and lets us pin **PCR11** — where a UKI's components land —
+instead of forcing the agent into PCR4. The verifier is built and TDD'd
+(`verifyAzureSNP`, `internal/attest/azure_snp.go`): SEV-SNP report (genuine AMD)
+→ `REPORT_DATA = SHA-256(runtime data)` → the vTPM AK (HCLAkPub) → an AK-signed
+TPM quote over the PCRs → pin PCR11. Remaining: the in-CVM agent that gathers this
+evidence (reuse `go-azguestattestation` + `go-tpm`), the mkosi UKI image, and live
+validation. The PCR4/MAA discussion below is retained as background on *why* we
+pivoted.
 
 ## Why PCR4, and why a UKI
 
