@@ -1,0 +1,17 @@
+[Unit]
+Description=dispatcher in-TEE attestation agent (Azure MAA)
+Documentation=https://github.com/d0cd/dispatcher/blob/main/docs/confidential-azure-uki.md
+# The agent serves the sealed exchange over TCP and needs the vTPM for MAA
+# attestation; bring it up once the network and TPM are ready.
+After=network-online.target dev-tpmrm0.device
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root for the vTPM (/dev/tpmrm0). The MAA URL can be overridden at build time.
+ExecStart=/usr/local/bin/dispatcher-attest-azure --addr=:8443
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
