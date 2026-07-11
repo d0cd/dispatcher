@@ -1,10 +1,18 @@
 # Making confidential attestation operational
 
-**Status:** GCP Confidential Space is operational and live-validated end-to-end
-(build → provision → attest → seal → run-in-TEE → sealed result → teardown); AWS
-and Azure confidential runs still fail closed or require `attestation: off`. This
-doc is the "how to close that gap" — the *what/why* (requirements R1–R13, the
-threat model) lives in [confidential-computing.md](confidential-computing.md).
+**Status:** all three major clouds are operational and live-validated end-to-end
+(build/provision → attest → seal → run-in-TEE → sealed result → teardown):
+- **GCP Confidential Space** — vendor CS token; container path.
+- **Azure MAA** — vendor MAA token (nested schema, client-payload binding);
+  SSH-VM path (`docs/confidential-azure-maa.md`).
+- **AWS SEV-SNP** — raw report verified with `go-sev-guest` + the VLEK/ASVK KDS
+  chain; SSH-VM path.
+
+All verification uses **vetted libraries** — go-jose (JWS), cloudflare/circl
+(HPKE), google/go-sev-guest (SEV-SNP), edgelesssys/go-azguestattestation (Azure
+vTPM/MAA) — no hand-rolled crypto in any operational path. This doc is the
+"how/why" — requirements R1–R13 + threat model live in
+[confidential-computing.md](confidential-computing.md).
 
 **Assurance (read before shipping):** this is an **MVP — the happy path is
 live-validated, not a security-audited production feature.** All cryptography
