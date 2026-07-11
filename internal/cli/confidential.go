@@ -21,6 +21,44 @@ func usesConfidentialSpace(p *types.Plan) bool {
 	return c.Required && c.Attestation != "off" && p.Recommendation != nil && p.Recommendation.Target == "gcp-vm"
 }
 
+// usesAzureConfidential reports whether a run should take the Azure confidential
+// (SEV-SNP CVM, MAA-attested + sealed) path: a confidential Azure run with
+// attestation on. `attestation: off` stays on the plain SSH path.
+func usesAzureConfidential(p *types.Plan) bool {
+	c := p.Workload.Requirements.Confidential
+	return c.Required && c.Attestation != "off" && p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
+}
+
+// newAzureConfidentialAdapter builds the Azure confidential adapter: the pinned
+// MAA instance's live signing keys + the cross-compiled agent binary + the Azure
+// provider. Fails closed with guidance when unconfigured.
+func newAzureConfidentialAdapter(ctx context.Context) (adapter.TargetAdapter, error) {
+	maaURL := os.Getenv("DISPATCHER_MAA_URL")
+	if maaURL == "" {
+		maaURL = "https://sharedeus.eus.attest.azure.net"
+	}
+	agentBin := os.Getenv("DISPATCHER_AZURE_AGENT_BIN")
+	if agentBin == "" {
+		return nil, fmt.Errorf("confidential Azure runs need the measured agent binary: set DISPATCHER_AZURE_AGENT_BIN " +
+			"to a cross-compiled dispatcher-attest-azure (GOOS=linux GOARCH=amd64)")
+	}
+	keys, err := cloudvm.LoadAzureMAAKeys(ctx, maaURL)
+	if err != nil {
+		return nil, fmt.Errorf("load MAA signing keys from %s/certs: %w", maaURL, err)
+	}
+	rg := os.Getenv("DISPATCHER_AZURE_RG")
+	if rg == "" {
+		rg = "dispatcher-rg"
+	}
+	location := os.Getenv("DISPATCHER_AZURE_LOCATION")
+	// The MAA issuer is the instance URL (the token's iss).
+	return cloudvm.NewAzureConfidentialAdapter(
+		cloudvm.NewAzureProvider(rg, location),
+		keys, maaURL, maaURL, agentBin,
+		cloudvm.Config{ProviderID: cloudvm.ProviderAzure, Region: location, SSHUser: "azureuser"},
+	), nil
+}
+
 // newConfidentialSpaceAdapter builds the Confidential Space adapter for a run:
 // Google's live signing keys + the measured agent image builder + the GCP
 // provider. Fails closed with actionable guidance when unconfigured.

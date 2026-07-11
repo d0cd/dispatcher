@@ -210,9 +210,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Select adapter — confidential GCP runs take the container (Confidential
 	// Space) path; everything else resolves by target ID.
 	var a adapter.TargetAdapter
-	if usesConfidentialSpace(p) {
+	switch {
+	case usesConfidentialSpace(p):
 		a, err = newConfidentialSpaceAdapter(cmd.Context())
-	} else {
+	case usesAzureConfidential(p):
+		a, err = newAzureConfidentialAdapter(cmd.Context())
+	default:
 		a, err = adapterForTarget(p.Recommendation.Target)
 	}
 	if err != nil {
@@ -409,6 +412,17 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 			cloudvm.NewGCPProvider(gcpProject(), ""),
 			nil, nil,
 			cloudvm.Config{ProviderID: cloudvm.ProviderGCP},
+		), nil
+	case "azure-confidential":
+		// Reconnect only needs VM lifecycle; keys/agent (Execute-only) are nil.
+		rg := os.Getenv("DISPATCHER_AZURE_RG")
+		if rg == "" {
+			rg = "dispatcher-rg"
+		}
+		return cloudvm.NewAzureConfidentialAdapter(
+			cloudvm.NewAzureProvider(rg, os.Getenv("DISPATCHER_AZURE_LOCATION")),
+			nil, "", "", "",
+			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "azureuser"},
 		), nil
 	case "firecracker-vm":
 		return cloudvm.NewCloudVMAdapter(
