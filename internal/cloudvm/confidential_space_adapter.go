@@ -60,10 +60,12 @@ type agentFirewaller interface {
 	deleteAgentFirewall(ctx context.Context, name string) error
 }
 
-// csRunState is the persisted handle state for a Confidential Space run. The run
-// is already finished by the time Execute returns, so this carries the captured
-// result plus what Cleanup needs to tear the VM down.
-type csRunState struct {
+// confidentialRunState is the persisted handle state for a confidential run,
+// shared by all three providers (GCP Confidential Space, Azure MAA, AWS SEV-SNP).
+// The run is already finished by the time Execute returns, so this carries the
+// captured result plus what Cleanup needs to tear the VM down. ImageRef is only
+// set on the GCP container path.
+type confidentialRunState struct {
 	Provider    ProviderID               `json:"provider"`
 	VMID        string                   `json:"vmId"`
 	Region      string                   `json:"region"`
@@ -74,7 +76,7 @@ type csRunState struct {
 	CreatedAt   time.Time                `json:"createdAt"`
 }
 
-func (s *csRunState) MarshalHandleState() (json.RawMessage, error) { return json.Marshal(s) }
+func (s *confidentialRunState) MarshalHandleState() (json.RawMessage, error) { return json.Marshal(s) }
 
 // NewConfidentialSpaceAdapter builds an adapter for GCP Confidential Space.
 // buildImage is injected because packaging the measured image is provider- and
@@ -100,7 +102,7 @@ func (a *ConfidentialSpaceAdapter) ID() string { return a.targetID }
 // provision the CS VM pinned to its digest, verify attestation over the untrusted
 // endpoint, and only then seal the source/.env and run the exchange. Any failure
 // before a verified verdict tears the VM down and never ships a secret.
-func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*csRunState, error) {
+func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*confidentialRunState, error) {
 	w := p.Workload
 
 	payload, err := buildConfidentialPayload(w)
@@ -174,7 +176,7 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*cs
 	}
 
 	destroyOnErr = false // the run completed; the VM is owned by the run until Cleanup
-	return &csRunState{
+	return &confidentialRunState{
 		Provider:    a2provider(d.provider),
 		VMID:        vm.ID,
 		Region:      region,
@@ -301,7 +303,7 @@ func (a *ConfidentialSpaceAdapter) Prepare(context.Context, *types.Plan) error {
 // Status reports the terminal state captured during Execute — the sealed
 // exchange runs synchronously, so a returned handle is always finished.
 func (a *ConfidentialSpaceAdapter) Status(_ context.Context, h *adapter.RunHandle) (types.RunState, error) {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if state.Result.ExitCode != 0 {
 		return types.RunStateExecutionFailed, nil
 	}
@@ -309,7 +311,7 @@ func (a *ConfidentialSpaceAdapter) Status(_ context.Context, h *adapter.RunHandl
 }
 
 func (a *ConfidentialSpaceAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails {
-	state, ok := h.State.(*csRunState)
+	state, ok := h.State.(*confidentialRunState)
 	if !ok {
 		return adapter.FailureDetails{Message: "no confidential space state"}
 	}
@@ -322,7 +324,7 @@ func (a *ConfidentialSpaceAdapter) FailureDetails(h *adapter.RunHandle) adapter.
 
 // Logs writes the captured (sealed-then-opened) workload output.
 func (a *ConfidentialSpaceAdapter) Logs(_ context.Context, h *adapter.RunHandle, w io.Writer) error {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if len(state.Result.Stdout) > 0 {
 		_, _ = w.Write(state.Result.Stdout)
 	}
@@ -334,7 +336,7 @@ func (a *ConfidentialSpaceAdapter) Logs(_ context.Context, h *adapter.RunHandle,
 
 // Artifacts extracts the sealed outputs tarball into runs/<id>/artifacts/.
 func (a *ConfidentialSpaceAdapter) Artifacts(_ context.Context, h *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if len(state.Result.OutputsTarGz) == 0 {
 		return nil, nil
 	}
@@ -363,7 +365,7 @@ func (a *ConfidentialSpaceAdapter) Artifacts(_ context.Context, h *adapter.RunHa
 func (a *ConfidentialSpaceAdapter) Terminate(context.Context, *adapter.RunHandle) error { return nil }
 
 func (a *ConfidentialSpaceAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if err := a.deps.provider.DestroyVM(ctx, state.VMID); err != nil {
 		return &adapter.CleanupResult{Success: false, Errors: []string{err.Error()}}, nil
 	}

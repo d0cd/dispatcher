@@ -156,7 +156,7 @@ func (f *firewallMockProvider) deleteAgentFirewall(_ context.Context, name strin
 func TestConfidentialSpaceAdapter_CleanupReapsFirewall(t *testing.T) {
 	provider := &firewallMockProvider{MockProvider: NewMockProvider(ProviderGCP)}
 	a := NewConfidentialSpaceAdapter(provider, nil, nil, Config{ProviderID: ProviderGCP})
-	h := &adapter.RunHandle{ID: "vm-1", State: &csRunState{Provider: ProviderGCP, VMID: "vm-1"}}
+	h := &adapter.RunHandle{ID: "vm-1", State: &confidentialRunState{Provider: ProviderGCP, VMID: "vm-1"}}
 
 	res, err := a.Cleanup(context.Background(), h)
 	require.NoError(t, err)

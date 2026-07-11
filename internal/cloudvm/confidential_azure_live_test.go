@@ -103,7 +103,7 @@ func TestGolden_AzureLiveAdapter(t *testing.T) {
 	require.NoError(t, err, "integrated Azure confidential run must succeed")
 	t.Cleanup(func() { _, _ = a.Cleanup(context.Background(), h) })
 
-	st := h.State.(*csRunState)
+	st := h.State.(*confidentialRunState)
 	assert.True(t, st.Attestation.Verified)
 	assert.Equal(t, 0, st.Result.ExitCode)
 	assert.Contains(t, string(st.Result.Stdout), "integrated=integrated", "the sealed .env reached the TEE")

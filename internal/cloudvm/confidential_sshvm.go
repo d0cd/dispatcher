@@ -36,7 +36,7 @@ type sshConfidentialDeps struct {
 // provision the VM, start the in-TEE agent, verify attestation over the untrusted
 // endpoint, and only then seal source/.env and run the sealed exchange. Any
 // failure before a verified verdict tears the VM down and never ships a secret.
-func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types.Plan, vmName string) (*csRunState, error) {
+func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types.Plan, vmName string) (*confidentialRunState, error) {
 	w := p.Workload
 
 	payload, err := buildConfidentialPayload(w)
@@ -97,7 +97,7 @@ func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types
 	}
 
 	destroyOnErr = false
-	return &csRunState{
+	return &confidentialRunState{
 		Provider:    d.provider.Name(),
 		VMID:        vm.ID,
 		Region:      region,

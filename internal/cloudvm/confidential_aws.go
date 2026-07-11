@@ -29,7 +29,7 @@ type awsDeps struct {
 
 // executeAWSConfidential is the AWS orchestration: the shared SSH-VM flow with
 // raw SEV-SNP verification (go-sev-guest + VLEK chain) over the agent endpoint.
-func executeAWSConfidential(ctx context.Context, d awsDeps, p *types.Plan) (*csRunState, error) {
+func executeAWSConfidential(ctx context.Context, d awsDeps, p *types.Plan) (*confidentialRunState, error) {
 	deps := sshConfidentialDeps{
 		provider: d.provider, image: d.image, sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
@@ -214,14 +214,14 @@ func (a *AWSConfidentialAdapter) EstimateCost(_ context.Context, w types.Workloa
 func (a *AWSConfidentialAdapter) Prepare(context.Context, *types.Plan) error { return nil }
 
 func (a *AWSConfidentialAdapter) Status(_ context.Context, h *adapter.RunHandle) (types.RunState, error) {
-	if h.State.(*csRunState).Result.ExitCode != 0 {
+	if h.State.(*confidentialRunState).Result.ExitCode != 0 {
 		return types.RunStateExecutionFailed, nil
 	}
 	return types.RunStateCompleted, nil
 }
 
 func (a *AWSConfidentialAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails {
-	state, ok := h.State.(*csRunState)
+	state, ok := h.State.(*confidentialRunState)
 	if !ok {
 		return adapter.FailureDetails{Message: "no confidential run state"}
 	}
@@ -233,7 +233,7 @@ func (a *AWSConfidentialAdapter) FailureDetails(h *adapter.RunHandle) adapter.Fa
 }
 
 func (a *AWSConfidentialAdapter) Logs(_ context.Context, h *adapter.RunHandle, w io.Writer) error {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if len(state.Result.Stdout) > 0 {
 		_, _ = w.Write(state.Result.Stdout)
 	}
@@ -244,7 +244,7 @@ func (a *AWSConfidentialAdapter) Logs(_ context.Context, h *adapter.RunHandle, w
 }
 
 func (a *AWSConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if len(state.Result.OutputsTarGz) == 0 {
 		return nil, nil
 	}
@@ -273,7 +273,7 @@ func (a *AWSConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHand
 func (a *AWSConfidentialAdapter) Terminate(context.Context, *adapter.RunHandle) error { return nil }
 
 func (a *AWSConfidentialAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if err := a.provider.DestroyVM(ctx, state.VMID); err != nil {
 		return &adapter.CleanupResult{Success: false, Errors: []string{err.Error()}}, nil
 	}

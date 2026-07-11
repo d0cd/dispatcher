@@ -38,7 +38,7 @@ type azureDeps struct {
 // confidential flow with MAA verification over the agent endpoint. The
 // measurement allowlist comes from the workload's confidential.measurements
 // (operator-pinned, since Azure's launch measurement is set by the CVM image).
-func executeAzureConfidential(ctx context.Context, d azureDeps, p *types.Plan) (*csRunState, error) {
+func executeAzureConfidential(ctx context.Context, d azureDeps, p *types.Plan) (*confidentialRunState, error) {
 	deps := sshConfidentialDeps{
 		provider: d.provider, sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
@@ -215,14 +215,14 @@ func (a *AzureConfidentialAdapter) EstimateCost(_ context.Context, w types.Workl
 func (a *AzureConfidentialAdapter) Prepare(context.Context, *types.Plan) error { return nil }
 
 func (a *AzureConfidentialAdapter) Status(_ context.Context, h *adapter.RunHandle) (types.RunState, error) {
-	if h.State.(*csRunState).Result.ExitCode != 0 {
+	if h.State.(*confidentialRunState).Result.ExitCode != 0 {
 		return types.RunStateExecutionFailed, nil
 	}
 	return types.RunStateCompleted, nil
 }
 
 func (a *AzureConfidentialAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails {
-	state, ok := h.State.(*csRunState)
+	state, ok := h.State.(*confidentialRunState)
 	if !ok {
 		return adapter.FailureDetails{Message: "no confidential run state"}
 	}
@@ -234,7 +234,7 @@ func (a *AzureConfidentialAdapter) FailureDetails(h *adapter.RunHandle) adapter.
 }
 
 func (a *AzureConfidentialAdapter) Logs(_ context.Context, h *adapter.RunHandle, w io.Writer) error {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if len(state.Result.Stdout) > 0 {
 		_, _ = w.Write(state.Result.Stdout)
 	}
@@ -245,7 +245,7 @@ func (a *AzureConfidentialAdapter) Logs(_ context.Context, h *adapter.RunHandle,
 }
 
 func (a *AzureConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	if len(state.Result.OutputsTarGz) == 0 {
 		return nil, nil
 	}
@@ -274,7 +274,7 @@ func (a *AzureConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHa
 func (a *AzureConfidentialAdapter) Terminate(context.Context, *adapter.RunHandle) error { return nil }
 
 func (a *AzureConfidentialAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
-	state := h.State.(*csRunState)
+	state := h.State.(*confidentialRunState)
 	// DestroyVM cascades the CVM's disk/NIC/IP/NSG (the agent NSG rule with it).
 	if err := a.provider.DestroyVM(ctx, state.VMID); err != nil {
 		return &adapter.CleanupResult{Success: false, Errors: []string{err.Error()}}, nil
