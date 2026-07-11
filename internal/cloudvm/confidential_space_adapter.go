@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/dlog"
 	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
@@ -62,14 +63,14 @@ type agentFirewaller interface {
 // is already finished by the time Execute returns, so this carries the captured
 // result plus what Cleanup needs to tear the VM down.
 type csRunState struct {
-	Provider    ProviderID        `json:"provider"`
-	VMID        string            `json:"vmId"`
-	Region      string            `json:"region"`
-	ImageRef    string            `json:"imageRef"`
-	Outputs     []string          `json:"outputs,omitempty"`
-	Result      runResult         `json:"result"`
-	Attestation AttestationResult `json:"attestation"`
-	CreatedAt   time.Time         `json:"createdAt"`
+	Provider    ProviderID               `json:"provider"`
+	VMID        string                   `json:"vmId"`
+	Region      string                   `json:"region"`
+	ImageRef    string                   `json:"imageRef"`
+	Outputs     []string                 `json:"outputs,omitempty"`
+	Result      attest.Result            `json:"result"`
+	Attestation attest.AttestationResult `json:"attestation"`
+	CreatedAt   time.Time                `json:"createdAt"`
 }
 
 func (s *csRunState) MarshalHandleState() (json.RawMessage, error) { return json.Marshal(s) }
@@ -155,8 +156,7 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*cs
 	// this run's nonce, and commit to the agent's channel key.
 	req := w.Requirements.Confidential
 	req.Measurements = []string{imageDigest}
-	att := &csAttester{keys: d.keys, isReady: true, fetch: csEndpointFetch(baseURL)}
-	result, err := att.Verify(ctx, vm, "", "", req)
+	result, err := csVerify(ctx, d.keys, baseURL, req)
 	if err != nil {
 		return nil, fmt.Errorf("attestation verification failed: %w", err)
 	}
@@ -185,20 +185,26 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*cs
 	}, nil
 }
 
+// csVerify is a seam over the CS attester so adapter tests drive the flow
+// without a live agent (agent+verify are tested in the attest package).
+var csVerify = func(ctx context.Context, keys map[string]crypto.PublicKey, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
+	return attest.NewCSAttester(keys, baseURL).Verify(ctx, req)
+}
+
 func a2provider(p Provider) ProviderID { return p.Name() }
 
 // buildConfidentialPayload assembles what dispatcher seals to the TEE: the
 // workload command, its source (tarred, minus the usual heavy dirs), the .env,
 // and the output paths to bring back.
-func buildConfidentialPayload(w types.WorkloadSpec) (runPayload, error) {
+func buildConfidentialPayload(w types.WorkloadSpec) (attest.Payload, error) {
 	command, err := csCommand(w)
 	if err != nil {
-		return runPayload{}, err
+		return attest.Payload{}, err
 	}
 
 	entries, err := os.ReadDir(w.Source.Path)
 	if err != nil {
-		return runPayload{}, fmt.Errorf("read source dir: %w", err)
+		return attest.Payload{}, fmt.Errorf("read source dir: %w", err)
 	}
 	skip := map[string]bool{".git": true, "node_modules": true, ".venv": true, "venv": true, "__pycache__": true, ".dispatcher": true}
 	var paths []string
@@ -208,18 +214,18 @@ func buildConfidentialPayload(w types.WorkloadSpec) (runPayload, error) {
 		}
 		paths = append(paths, e.Name())
 	}
-	sourceTar, err := tarGz(w.Source.Path, paths)
+	sourceTar, err := attest.TarGz(w.Source.Path, paths)
 	if err != nil {
-		return runPayload{}, fmt.Errorf("tar source: %w", err)
+		return attest.Payload{}, fmt.Errorf("tar source: %w", err)
 	}
 
 	// .env is optional; delivered sealed, never over the untrusted channel clear.
 	dotenv, err := os.ReadFile(filepath.Join(w.Source.Path, ".env"))
 	if err != nil && !os.IsNotExist(err) {
-		return runPayload{}, fmt.Errorf("read .env: %w", err)
+		return attest.Payload{}, fmt.Errorf("read .env: %w", err)
 	}
 
-	return runPayload{Command: command, SourceTarGz: sourceTar, DotEnv: dotenv, Outputs: w.Outputs}, nil
+	return attest.Payload{Command: command, SourceTarGz: sourceTar, DotEnv: dotenv, Outputs: w.Outputs}, nil
 }
 
 func csCommand(w types.WorkloadSpec) ([]string, error) {
@@ -339,7 +345,7 @@ func (a *ConfidentialSpaceAdapter) Artifacts(_ context.Context, h *adapter.RunHa
 	if err != nil {
 		return nil, fmt.Errorf("create artifacts dir: %w", err)
 	}
-	if err := unTarGz(state.Result.OutputsTarGz, dest); err != nil {
+	if err := attest.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
 		return nil, fmt.Errorf("extract outputs: %w", err)
 	}
 	var refs []adapter.ArtifactRef

@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/cost"
 	"github.com/d0cd/dispatcher/internal/policy"
@@ -369,7 +370,7 @@ type RunInspection struct {
 	// Attestation surfaces a confidential run's TEE verdict (R13) so the
 	// diagnostician sees whether the run was actually proven. Nil for
 	// non-confidential runs.
-	Attestation *cloudvm.AttestationResult `json:"attestation,omitempty"`
+	Attestation *attest.AttestationResult `json:"attestation,omitempty"`
 }
 
 const (
@@ -418,7 +419,7 @@ func (tr *ToolRegistry) execInspectRun(input json.RawMessage) ToolResult {
 		Signal:       rec.Failure.Signal,
 		OOMKilled:    rec.Failure.OOMKilled,
 		RetryCount:   rec.RetryCount,
-		Attestation:  cloudvm.AttestationFromHandleState(rec.HandleState),
+		Attestation:  attest.AttestationFromHandleState(rec.HandleState),
 	}
 	if rec.State == types.RunStateExecutionFailed {
 		// Only classify when there's actually a failure to classify.

@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/d0cd/dispatcher/internal/cloudvm"
+	"github.com/d0cd/dispatcher/internal/attest"
 )
 
 func main() {
@@ -17,7 +17,7 @@ func main() {
 	flag.Parse()
 
 	log.Printf("dispatcher-attest-aws listening on %s", *addr)
-	if err := cloudvm.RunAWSAgent(*addr); err != nil {
+	if err := attest.RunAWSAgent(*addr); err != nil {
 		log.Fatal(err)
 	}
 }

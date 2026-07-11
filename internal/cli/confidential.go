@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -66,7 +67,7 @@ func newAzureConfidentialAdapter(ctx context.Context) (adapter.TargetAdapter, er
 		return nil, fmt.Errorf("confidential Azure runs need the measured agent binary: set DISPATCHER_AZURE_AGENT_BIN " +
 			"to a cross-compiled dispatcher-attest-azure (GOOS=linux GOARCH=amd64)")
 	}
-	keys, err := cloudvm.LoadAzureMAAKeys(ctx, maaURL)
+	keys, err := attest.LoadAzureMAAKeys(ctx, maaURL)
 	if err != nil {
 		return nil, fmt.Errorf("load MAA signing keys from %s/certs: %w", maaURL, err)
 	}
@@ -91,7 +92,7 @@ func newConfidentialSpaceAdapter(ctx context.Context) (adapter.TargetAdapter, er
 	if project == "" {
 		return nil, fmt.Errorf("confidential GCP runs need a project; set DISPATCHER_GCP_PROJECT or run `gcloud config set project <id>`")
 	}
-	keys, err := cloudvm.LoadGoogleCSKeys(ctx)
+	keys, err := attest.LoadGoogleCSKeys(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("load Google Confidential Space signing keys: %w", err)
 	}

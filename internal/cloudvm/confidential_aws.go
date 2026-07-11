@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/attest"
 	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -18,7 +19,6 @@ import (
 // awsDeps are the AWS confidential run's collaborators (see sshConfidentialDeps).
 type awsDeps struct {
 	provider   Provider
-	fetchChain awsVLEKChainFetcher
 	image      string
 	sshPubKey  string
 	sshUser    string
@@ -32,9 +32,8 @@ func executeAWSConfidential(ctx context.Context, d awsDeps, p *types.Plan) (*csR
 	deps := sshConfidentialDeps{
 		provider: d.provider, image: d.image, sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
-		verify: func(ctx context.Context, vm *VMInfo, baseURL string, req types.ConfidentialRequirement) (AttestationResult, error) {
-			att := &awsAttester{fetchChain: d.fetchChain, isReady: true, fetch: endpointSNPFetch(baseURL)}
-			return att.Verify(ctx, vm, "", "", req)
+		verify: func(ctx context.Context, _ *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
+			return attest.NewAWSAttester(baseURL).Verify(ctx, req)
 		},
 	}
 	return executeSSHConfidential(ctx, deps, p, fmt.Sprintf("dispatcher-snp-%s", adapter.SanitizeName(p.Workload.Name)))
@@ -171,7 +170,6 @@ func (a *AWSConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (*a
 
 	deps := awsDeps{
 		provider:   a.provider,
-		fetchChain: fetchVLEKChainFromKDS,
 		image:      ami,
 		sshPubKey:  keyPath + ".pub",
 		sshUser:    a.config.SSHUser,
@@ -257,7 +255,7 @@ func (a *AWSConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHand
 	if err != nil {
 		return nil, fmt.Errorf("create artifacts dir: %w", err)
 	}
-	if err := unTarGz(state.Result.OutputsTarGz, dest); err != nil {
+	if err := attest.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
 		return nil, fmt.Errorf("extract outputs: %w", err)
 	}
 	var refs []adapter.ArtifactRef

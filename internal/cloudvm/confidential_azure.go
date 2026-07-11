@@ -12,23 +12,10 @@ import (
 	"strings"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/attest"
 	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
-
-// endpointMAAFetch is a maaFetch that reads MAA evidence from the in-TEE agent's
-// /attest endpoint — the same untrusted-channel transport GCP Confidential Space
-// uses (csEndpointFetch), except the returned token is an Azure MAA token. Wired
-// into azureAttester once the CVM's agent is reachable.
-func endpointMAAFetch(baseURL string) maaFetch {
-	return func(ctx context.Context, vm *VMInfo, sshKeyPath, sshUser string, nonce []byte) (maaEvidence, error) {
-		ev, err := csEndpointFetch(baseURL)(ctx, vm, sshKeyPath, sshUser, nonce)
-		if err != nil {
-			return maaEvidence{}, err
-		}
-		return maaEvidence{token: ev.token, channelKey: ev.channelKey}, nil
-	}
-}
 
 // azureDeps are the Azure confidential run's collaborators. The live operations
 // (provision, start the agent on the CVM, endpoint reachability) are seams so the
@@ -54,9 +41,8 @@ func executeAzureConfidential(ctx context.Context, d azureDeps, p *types.Plan) (
 	deps := sshConfidentialDeps{
 		provider: d.provider, sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
-		verify: func(ctx context.Context, vm *VMInfo, baseURL string, req types.ConfidentialRequirement) (AttestationResult, error) {
-			att := &azureAttester{keys: d.keys, issuer: d.issuer, isReady: true, fetch: endpointMAAFetch(baseURL)}
-			return att.Verify(ctx, vm, "", "", req)
+		verify: func(ctx context.Context, _ *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
+			return attest.NewAzureAttester(d.keys, d.issuer, baseURL).Verify(ctx, req)
 		},
 	}
 	return executeSSHConfidential(ctx, deps, p, fmt.Sprintf("dispatcher-cvm-%s", adapter.SanitizeName(p.Workload.Name)))
@@ -270,7 +256,7 @@ func (a *AzureConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHa
 	if err != nil {
 		return nil, fmt.Errorf("create artifacts dir: %w", err)
 	}
-	if err := unTarGz(state.Result.OutputsTarGz, dest); err != nil {
+	if err := attest.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
 		return nil, fmt.Errorf("extract outputs: %w", err)
 	}
 	var refs []adapter.ArtifactRef

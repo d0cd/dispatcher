@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -34,19 +35,19 @@ func TestGolden_AzureLiveExchange(t *testing.T) {
 	require.NotEmpty(t, measurement)
 
 	ctx := context.Background()
-	keys, err := LoadAzureMAAKeys(ctx, maaURL)
+	keys, err := attest.LoadAzureMAAKeys(ctx, maaURL)
 	require.NoError(t, err, "the pinned MAA /certs JWKS must load")
 
 	// Attest (a fresh nonce) + verify the live token, binding this run + channel key.
-	att := &azureAttester{keys: keys, issuer: maaURL, isReady: true, fetch: endpointMAAFetch(endpoint)}
-	res, err := att.Verify(ctx, &VMInfo{}, "", "",
+	att := attest.NewAzureAttester(keys, maaURL, endpoint)
+	res, err := att.Verify(ctx,
 		types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{measurement}})
 	require.NoError(t, err)
 	require.True(t, res.Verified, res.Verdict)
 	require.NotEmpty(t, res.ChannelKey)
 
 	// Seal a payload to the attested key, run inside the TEE, open the sealed result.
-	result, err := runSealedExchange(ctx, endpoint, res.ChannelKey, runPayload{
+	result, err := attest.RunSealedExchange(ctx, endpoint, res.ChannelKey, attest.Payload{
 		Command: []string{"sh", "-c", "echo hi from TEE; echo secret=$SECRET"},
 		DotEnv:  []byte("SECRET=azure-sealed\n"),
 	})
@@ -79,7 +80,7 @@ func TestGolden_AzureLiveAdapter(t *testing.T) {
 	require.NotEmpty(t, measurement)
 
 	ctx := context.Background()
-	keys, err := LoadAzureMAAKeys(ctx, maaURL)
+	keys, err := attest.LoadAzureMAAKeys(ctx, maaURL)
 	require.NoError(t, err)
 
 	a := NewAzureConfidentialAdapter(NewAzureProvider(rg, location), keys, maaURL, maaURL, agentBin,

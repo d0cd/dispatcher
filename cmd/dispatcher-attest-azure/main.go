@@ -10,7 +10,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/d0cd/dispatcher/internal/cloudvm"
+	"github.com/d0cd/dispatcher/internal/attest"
 )
 
 func main() {
@@ -19,7 +19,7 @@ func main() {
 	flag.Parse()
 
 	log.Printf("dispatcher-attest-azure listening on %s (maa=%s)", *addr, *maaURL)
-	if err := cloudvm.RunAzureAgent(*addr, *maaURL); err != nil {
+	if err := attest.RunAzureAgent(*addr, *maaURL); err != nil {
 		log.Fatal(err)
 	}
 }

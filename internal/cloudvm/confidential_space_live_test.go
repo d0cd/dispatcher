@@ -2,11 +2,6 @@ package cloudvm
 
 import (
 	"context"
-	"crypto"
-	"crypto/rand"
-	"encoding/json"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,29 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/types"
 )
-
-// fetchCSJWKS discovers and fetches Google's Confidential Space signing keys via
-// the issuer's OpenID configuration.
-func fetchCSJWKS(t *testing.T) map[string]crypto.PublicKey {
-	t.Helper()
-	cfgResp, err := http.Get(csIssuer + "/.well-known/openid-configuration")
-	require.NoError(t, err)
-	defer cfgResp.Body.Close()
-	var cfg struct {
-		JWKSURI string `json:"jwks_uri"`
-	}
-	require.NoError(t, json.NewDecoder(cfgResp.Body).Decode(&cfg))
-	require.NotEmpty(t, cfg.JWKSURI)
-
-	jwksResp, err := http.Get(cfg.JWKSURI)
-	require.NoError(t, err)
-	defer jwksResp.Body.Close()
-	raw, err := io.ReadAll(jwksResp.Body)
-	require.NoError(t, err)
-	return jwkRSAKeys(t, raw)
-}
 
 // TestGolden_CSLiveExchange drives the FULL Phase 2 execution model against a
 // live Confidential Space VM running dispatcher-attest: attest over the untrusted
@@ -57,27 +32,22 @@ func TestGolden_CSLiveExchange(t *testing.T) {
 	digest := strings.TrimSpace(os.Getenv("DISPATCHER_CS_LIVE_DIGEST"))
 	require.NotEmpty(t, digest, "DISPATCHER_CS_LIVE_DIGEST is required")
 
-	keys := fetchCSJWKS(t)
 	ctx := context.Background()
+	keys, err := attest.LoadGoogleCSKeys(ctx)
+	require.NoError(t, err, "the live Google Confidential Space JWKS must load")
 
-	// 1. Attest over the untrusted TCP endpoint.
-	nonce := make([]byte, 32)
-	_, err := rand.Read(nonce)
-	require.NoError(t, err)
-	ev, err := csEndpointFetch(endpoint)(ctx, &VMInfo{}, "", "", nonce)
-	require.NoError(t, err)
-	require.NotEmpty(t, ev.channelKey)
-
-	// 2. Verify the real token: signature (live JWKS) + nonce + channel-key
-	// binding + the attested image digest on the allowlist.
-	gotDigest, err := verifyCSToken(ev.token, keys, CSPolicy{
-		Nonce: nonce, ImageDigests: []string{digest}, ChannelKey: ev.channelKey,
-	})
+	// Attest over the untrusted endpoint + verify the real token: signature (live
+	// JWKS) + nonce + channel-key binding + the attested image digest on the allowlist.
+	att := attest.NewCSAttester(keys, endpoint)
+	res, err := att.Verify(ctx,
+		types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{digest}})
 	require.NoError(t, err, "the live token must verify with the channel-key binding")
-	assert.Equal(t, digest, gotDigest)
+	require.True(t, res.Verified, res.Verdict)
+	assert.Equal(t, digest, res.Measurement)
+	require.NotEmpty(t, res.ChannelKey)
 
-	// 3. Seal a payload to the attested key, run it inside the TEE, open the result.
-	result, err := runSealedExchange(ctx, endpoint, ev.channelKey, runPayload{
+	// Seal a payload to the attested key, run it inside the TEE, open the result.
+	result, err := attest.RunSealedExchange(ctx, endpoint, res.ChannelKey, attest.Payload{
 		Command: []string{"sh", "-c", "echo hello from TEE; echo secret=$SECRET"},
 		DotEnv:  []byte("SECRET=live-sealed\n"),
 	})
@@ -109,7 +79,7 @@ func TestGolden_CSLiveAdapter(t *testing.T) {
 	require.NotEmpty(t, repoRoot, "DISPATCHER_CS_REPO_ROOT required (dispatcher source tree)")
 
 	ctx := context.Background()
-	keys, err := LoadGoogleCSKeys(ctx)
+	keys, err := attest.LoadGoogleCSKeys(ctx)
 	require.NoError(t, err)
 	build := NewAgentImageBuilder(ImageBuildConfig{
 		Registry: "us-east1-docker.pkg.dev", Project: project, Repo: "dispatcher-cs", RepoRoot: repoRoot,

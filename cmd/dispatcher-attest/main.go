@@ -10,7 +10,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/d0cd/dispatcher/internal/cloudvm"
+	"github.com/d0cd/dispatcher/internal/attest"
 )
 
 func main() {
@@ -19,7 +19,7 @@ func main() {
 	flag.Parse()
 
 	log.Printf("dispatcher-attest listening on %s (audience=%s)", *addr, *audience)
-	if err := cloudvm.RunAgent(*addr, *audience); err != nil {
+	if err := attest.RunAgent(*addr, *audience); err != nil {
 		log.Fatal(err)
 	}
 }

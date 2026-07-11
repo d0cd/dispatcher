@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
-	"github.com/d0cd/dispatcher/internal/cloudvm"
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/types"
@@ -129,7 +129,7 @@ func runStatusByID(id string) error {
 	if record.HandleID != "" {
 		fmt.Fprintf(os.Stdout, "Handle:     %s\n", record.HandleID)
 	}
-	if att := cloudvm.AttestationFromHandleState(record.HandleState); att != nil {
+	if att := attest.AttestationFromHandleState(record.HandleState); att != nil {
 		printAttestation(att)
 	}
 	if record.Error != "" {
@@ -146,7 +146,7 @@ func runStatusByID(id string) error {
 // printAttestation renders a confidential run's TEE attestation verdict (R13):
 // green "verified" with the proven type/measurement, or yellow "UNVERIFIED"
 // with the reason (e.g. attestation: off).
-func printAttestation(att *cloudvm.AttestationResult) {
+func printAttestation(att *attest.AttestationResult) {
 	head, c := "verified", color.New(color.FgGreen)
 	if !att.Verified {
 		head, c = "UNVERIFIED", color.New(color.FgYellow)

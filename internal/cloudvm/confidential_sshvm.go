@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// runSealedExchange is a seam over attest.RunSealedExchange so adapter
+// orchestration tests can drive the flow without a live in-TEE agent (the agent
+// + exchange are tested end-to-end in the attest package).
+var runSealedExchange = attest.RunSealedExchange
 
 // sshConfidentialDeps are the collaborators for an SSH-VM confidential run (Azure
 // MAA, AWS SEV-SNP). The provider-specific verification is a closure so the same
@@ -22,7 +28,7 @@ type sshConfidentialDeps struct {
 	waitReady  func(ctx context.Context, baseURL string) error
 	// verify runs the provider's attester over the agent endpoint (MAA for Azure,
 	// raw SEV-SNP for AWS) and returns the verdict + the channel key to seal to.
-	verify func(ctx context.Context, vm *VMInfo, baseURL string, req types.ConfidentialRequirement) (AttestationResult, error)
+	verify func(ctx context.Context, vm *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error)
 }
 
 // executeSSHConfidential is the shared SSH-VM confidential orchestration:

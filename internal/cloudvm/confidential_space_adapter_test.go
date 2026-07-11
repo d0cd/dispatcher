@@ -2,7 +2,7 @@ package cloudvm
 
 import (
 	"context"
-	"net/http/httptest"
+	"crypto"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -32,31 +33,49 @@ func csTestPlan(t *testing.T, id string, command []string) *types.Plan {
 	}
 }
 
+const csTestDigest = "sha256:cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
+
+// stubCSVerify replaces the CS attester seam with a canned verdict and restores
+// it after the test. The agent + real attestation are covered end-to-end in the
+// attest package; here we drive only the dispatcher-side orchestration.
+func stubCSVerify(t *testing.T, res attest.AttestationResult, err error) {
+	t.Helper()
+	prev := csVerify
+	csVerify = func(context.Context, map[string]crypto.PublicKey, string, types.ConfidentialRequirement) (attest.AttestationResult, error) {
+		return res, err
+	}
+	t.Cleanup(func() { csVerify = prev })
+}
+
+// stubExchange replaces the sealed-exchange seam and records the payload it was
+// handed, so tests can assert what dispatcher sealed and shipped.
+func stubExchange(t *testing.T, got *attest.Payload, res attest.Result, err error) {
+	t.Helper()
+	prev := runSealedExchange
+	runSealedExchange = func(_ context.Context, _ string, _ []byte, p attest.Payload) (attest.Result, error) {
+		if got != nil {
+			*got = p
+		}
+		return res, err
+	}
+	t.Cleanup(func() { runSealedExchange = prev })
+}
+
 // TestExecuteConfidentialSpace_HappyPath drives the whole dispatcher-side
-// orchestration against a real in-TEE agent (fake runner): build image → provision
-// → attest+verify → seal source/.env → run → sealed result.
+// orchestration: build image → provision → attest+verify → seal source/.env →
+// run → sealed result.
 func TestExecuteConfidentialSpace_HappyPath(t *testing.T) {
-	signKey, keys := maaSigningKey(t)
-	var got runPayload
-	agent, err := newConfidentialAgent(agentConfig{
-		attest: tokenMinter(t, signKey),
-		runner: func(_ context.Context, p runPayload) runResult {
-			got = p
-			return runResult{ExitCode: 0, Stdout: []byte("trained")}
-		},
-	})
-	require.NoError(t, err)
-	srv := httptest.NewServer(agent.handler())
-	t.Cleanup(srv.Close)
+	stubCSVerify(t, attest.AttestationResult{Verified: true, Measurement: csTestDigest, ChannelKey: []byte("channel-key")}, nil)
+	var got attest.Payload
+	stubExchange(t, &got, attest.Result{ExitCode: 0, Stdout: []byte("trained")}, nil)
 
 	provider := NewMockProvider(ProviderGCP)
 	deps := csDeps{
 		provider: provider,
-		keys:     keys,
 		buildImage: func(context.Context, types.WorkloadSpec) (string, string, error) {
-			return "us-docker.pkg.dev/p/r@" + csDigest, csDigest, nil
+			return "us-docker.pkg.dev/p/r@" + csTestDigest, csTestDigest, nil
 		},
-		baseURL:   func(*VMInfo) string { return srv.URL },
+		baseURL:   func(*VMInfo) string { return "http://10.0.0.1:8443" },
 		waitReady: func(context.Context, string) error { return nil },
 	}
 
@@ -64,7 +83,7 @@ func TestExecuteConfidentialSpace_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.True(t, state.Attestation.Verified)
-	assert.Equal(t, csDigest, state.Attestation.Measurement, "the attested identity is the built image digest")
+	assert.Equal(t, csTestDigest, state.Attestation.Measurement, "the attested identity is the built image digest")
 	assert.Equal(t, 0, state.Result.ExitCode)
 	assert.Equal(t, []string{"python", "main.py"}, got.Command)
 	assert.Equal(t, []byte("SECRET=42\n"), got.DotEnv, "the .env is delivered sealed")
@@ -73,31 +92,28 @@ func TestExecuteConfidentialSpace_HappyPath(t *testing.T) {
 }
 
 // TestExecuteConfidentialSpace_UnverifiedTearsDown is the security gate: when
-// attestation does not verify (here the built image digest isn't what the token
-// attests), nothing is sealed or run and the VM is torn down.
+// attestation does not verify, nothing is sealed or run and the VM is torn down.
 func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
-	signKey, keys := maaSigningKey(t)
+	stubCSVerify(t, attest.AttestationResult{Verified: false, Verdict: "digest mismatch"}, nil)
 	ran := false
-	agent, err := newConfidentialAgent(agentConfig{
-		attest: tokenMinter(t, signKey),
-		runner: func(context.Context, runPayload) runResult { ran = true; return runResult{} },
-	})
-	require.NoError(t, err)
-	srv := httptest.NewServer(agent.handler())
-	t.Cleanup(srv.Close)
+	prevExchange := runSealedExchange
+	runSealedExchange = func(context.Context, string, []byte, attest.Payload) (attest.Result, error) {
+		ran = true
+		return attest.Result{}, nil
+	}
+	t.Cleanup(func() { runSealedExchange = prevExchange })
 
 	provider := NewMockProvider(ProviderGCP)
 	deps := csDeps{
 		provider: provider,
-		keys:     keys,
 		buildImage: func(context.Context, types.WorkloadSpec) (string, string, error) {
-			return "ref@sha256:deadbeef", "sha256:deadbeef", nil // not what the token attests
+			return "ref@" + csTestDigest, csTestDigest, nil
 		},
-		baseURL:   func(*VMInfo) string { return srv.URL },
+		baseURL:   func(*VMInfo) string { return "http://10.0.0.1:8443" },
 		waitReady: func(context.Context, string) error { return nil },
 	}
 
-	_, err = executeConfidentialSpace(context.Background(), deps, csTestPlan(t, "run-2", []string{"true"}))
+	_, err := executeConfidentialSpace(context.Background(), deps, csTestPlan(t, "run-2", []string{"true"}))
 	require.Error(t, err)
 	assert.False(t, ran, "a workload must never run on an unverified TEE")
 	assert.Equal(t, 0, provider.VMCount(), "the VM must be torn down on attestation rejection")
@@ -106,11 +122,9 @@ func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
 // TestExecuteConfidentialSpace_BuildFailureNoVM: a failed image build must not
 // provision anything.
 func TestExecuteConfidentialSpace_BuildFailureNoVM(t *testing.T) {
-	_, keys := maaSigningKey(t)
 	provider := NewMockProvider(ProviderGCP)
 	deps := csDeps{
 		provider: provider,
-		keys:     keys,
 		buildImage: func(context.Context, types.WorkloadSpec) (string, string, error) {
 			return "", "", assertErr("build failed")
 		},
