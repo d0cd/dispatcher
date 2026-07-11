@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 )
@@ -76,14 +77,25 @@ func NewAgent(attest AttestFunc, runner func(ctx context.Context, p Payload) Res
 }
 
 // RunServer builds an agent with the default exec runner and serves the sealed-
-// exchange HTTP API on addr until the process exits. It is the shared entrypoint
-// each per-cloud agent binary calls with its own attestation function.
+// exchange HTTP API on a TCP addr until the process exits. It is the shared
+// entrypoint the GCP/Azure/AWS-SEV-SNP agent binaries call.
 func RunServer(addr string, attest AttestFunc) error {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return Serve(l, attest)
+}
+
+// Serve runs the sealed-exchange HTTP API on an arbitrary listener until it
+// closes. A Nitro enclave agent uses this to serve over vsock (no TCP stack), so
+// the transport is a seam and the sealed exchange itself stays transport-agnostic.
+func Serve(l net.Listener, attest AttestFunc) error {
 	a, err := NewAgent(attest, defaultRunner)
 	if err != nil {
 		return err
 	}
-	return (&http.Server{Addr: addr, Handler: a.Handler()}).ListenAndServe()
+	return (&http.Server{Handler: a.Handler()}).Serve(l)
 }
 
 func (a *Agent) Handler() http.Handler {
