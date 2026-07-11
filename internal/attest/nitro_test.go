@@ -5,9 +5,11 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/pem"
 	"math/big"
 	"testing"
 	"time"
@@ -93,6 +95,20 @@ func nitroPCR(b byte) []byte {
 		p[i] = b
 	}
 	return p
+}
+
+// TestAWSNitroRoot_PinnedFingerprint guards the embedded trust anchor: the bytes
+// compiled in must be AWS's published Nitro Enclaves Root-G1 (a supply-chain check
+// — a swapped root would silently trust an attacker's PKI).
+func TestAWSNitroRoot_PinnedFingerprint(t *testing.T) {
+	block, _ := pem.Decode(awsNitroRootPEM)
+	require.NotNil(t, block, "embedded AWS Nitro root must be PEM")
+	cert, err := x509.ParseCertificate(block.Bytes)
+	require.NoError(t, err)
+	sum := sha256.Sum256(cert.Raw)
+	assert.Equal(t, "641a0321a3e244efe456463195d606317ed7cdcc3c1756e09893f3c68f79bb5b",
+		hex.EncodeToString(sum[:]), "embedded root must match AWS's published Root-G1 fingerprint")
+	assert.Equal(t, "aws.nitro-enclaves", cert.Subject.CommonName)
 }
 
 // TestVerifyNitroDoc_Accepts: a well-formed document — leaf chaining to the pinned

@@ -132,10 +132,10 @@ type nitroAttester struct {
 }
 
 // NewAWSNitroAttester verifies AWS Nitro Enclaves attestation documents from the
-// in-enclave agent endpoint, chaining to the pinned Nitro root and pinning the
-// known-good enclave PCRs (PCR0 = the enclave image carrying the agent).
-func NewAWSNitroAttester(roots *x509.CertPool, pcrs map[int]string, baseURL string) Attester {
-	return &nitroAttester{roots: roots, pcrs: pcrs, fetch: endpointNitroFetch(baseURL)}
+// in-enclave agent endpoint, chaining to the embedded, pinned AWS Nitro root and
+// pinning the known-good enclave PCRs (PCR0 = the enclave image carrying the agent).
+func NewAWSNitroAttester(pcrs map[int]string, baseURL string) Attester {
+	return &nitroAttester{roots: awsNitroRoots, pcrs: pcrs, fetch: endpointNitroFetch(baseURL)}
 }
 
 func (a *nitroAttester) Verify(ctx context.Context, _ types.ConfidentialRequirement) (AttestationResult, error) {
