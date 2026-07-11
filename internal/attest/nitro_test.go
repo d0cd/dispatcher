@@ -1,0 +1,206 @@
+package attest
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/hex"
+	"math/big"
+	"testing"
+	"time"
+
+	"github.com/fxamacker/cbor/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	cose "github.com/veraison/go-cose"
+
+	"github.com/d0cd/dispatcher/internal/types"
+)
+
+// nitroTestPKI builds a synthetic Nitro attestation PKI: a self-signed P-384 root
+// (standing in for the AWS Nitro Enclaves Root) and returns it with its key.
+func nitroTestPKI(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-nitro-root"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+	root, err := x509.ParseCertificate(der)
+	require.NoError(t, err)
+	return root, key
+}
+
+// signedNitroDoc builds a COSE_Sign1 Nitro attestation document: a leaf cert
+// signed by root, and a CBOR payload (PCRs, channel key, nonce) signed with the
+// leaf's key (ES384) — the exact shape the Nitro Security Module produces. mutate
+// can tamper with the document before signing.
+func signedNitroDoc(t *testing.T, root *x509.Certificate, rootKey *ecdsa.PrivateKey, mutate func(*nitroDoc)) []byte {
+	t.Helper()
+	leafKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	leafTmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "nsm-leaf"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTmpl, root, &leafKey.PublicKey, rootKey)
+	require.NoError(t, err)
+
+	doc := nitroDoc{
+		ModuleID:    "i-0abc-enc0",
+		Digest:      "SHA384",
+		Timestamp:   1_700_000_000_000,
+		PCRs:        map[uint][]byte{0: nitroPCR(0x0A), 1: nitroPCR(0x0B), 2: nitroPCR(0x0C)},
+		Certificate: leafDER,
+		CABundle:    [][]byte{root.Raw},
+		PublicKey:   []byte("channel-public-key-bytes-32-xxxx"),
+		Nonce:       []byte("nonce-from-verifier-32-bytes-xxx"),
+	}
+	if mutate != nil {
+		mutate(&doc)
+	}
+	payload, err := cbor.Marshal(doc)
+	require.NoError(t, err)
+
+	signer, err := cose.NewSigner(cose.AlgorithmES384, leafKey)
+	require.NoError(t, err)
+	msg := cose.NewSign1Message()
+	msg.Payload = payload
+	msg.Headers.Protected.SetAlgorithm(cose.AlgorithmES384)
+	require.NoError(t, msg.Sign(rand.Reader, nil, signer))
+	raw, err := msg.MarshalCBOR()
+	require.NoError(t, err)
+	return raw
+}
+
+func nitroPCR(b byte) []byte {
+	p := make([]byte, 48) // SHA-384
+	for i := range p {
+		p[i] = b
+	}
+	return p
+}
+
+// TestVerifyNitroDoc_Accepts: a well-formed document — leaf chaining to the pinned
+// root, valid COSE signature, matching PCRs and nonce — verifies and returns the
+// PCR0 measurement and the bound channel key.
+func TestVerifyNitroDoc_Accepts(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	nonce := []byte("nonce-from-verifier-32-bytes-xxx")
+
+	doc := signedNitroDoc(t, root, rootKey, nil)
+	measurement, channelKey, err := verifyNitroDoc(doc, pool, NitroPolicy{
+		Nonce: nonce,
+		PCRs:  map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, hex.EncodeToString(nitroPCR(0x0A)), measurement, "measurement is PCR0")
+	assert.Equal(t, []byte("channel-public-key-bytes-32-xxxx"), channelKey, "the bound channel key is returned to seal to")
+}
+
+// TestVerifyNitroDoc_RejectsUntrustedRoot: a document whose leaf does not chain to
+// the pinned root must fail (an attacker's self-signed NSM).
+func TestVerifyNitroDoc_RejectsUntrustedRoot(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	otherRoot, _ := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(otherRoot) // trust a DIFFERENT root
+
+	doc := signedNitroDoc(t, root, rootKey, nil)
+	_, _, err := verifyNitroDoc(doc, pool, NitroPolicy{
+		Nonce: []byte("nonce-from-verifier-32-bytes-xxx"),
+		PCRs:  map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "chain")
+}
+
+// TestVerifyNitroDoc_RejectsPCRMismatch: a document whose PCR0 (the enclave image
+// measurement) is not the pinned value must fail — a different enclave image.
+func TestVerifyNitroDoc_RejectsPCRMismatch(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+
+	doc := signedNitroDoc(t, root, rootKey, nil)
+	_, _, err := verifyNitroDoc(doc, pool, NitroPolicy{
+		Nonce: []byte("nonce-from-verifier-32-bytes-xxx"),
+		PCRs:  map[int]string{0: hex.EncodeToString(nitroPCR(0xFF))}, // not what the doc attests
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pcr0")
+}
+
+// TestVerifyNitroDoc_RejectsNonceMismatch: a stale/replayed document (nonce not
+// this run's challenge) must fail.
+func TestVerifyNitroDoc_RejectsNonceMismatch(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+
+	doc := signedNitroDoc(t, root, rootKey, nil)
+	_, _, err := verifyNitroDoc(doc, pool, NitroPolicy{
+		Nonce: []byte("a-completely-different-nonce-val"),
+		PCRs:  map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonce")
+}
+
+// TestNitroAttester_VerifyBindsFreshNonce drives the full attester path: it
+// generates its own nonce, the (stubbed) enclave returns a document echoing that
+// nonce, and Verify returns a verified verdict carrying the bound channel key.
+func TestNitroAttester_VerifyBindsFreshNonce(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+
+	att := &nitroAttester{
+		roots: pool,
+		pcrs:  map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))},
+		// The enclave stub binds whatever nonce the attester challenges with.
+		fetch: func(_ context.Context, nonce []byte) ([]byte, error) {
+			return signedNitroDoc(t, root, rootKey, func(d *nitroDoc) { d.Nonce = nonce }), nil
+		},
+	}
+	res, err := att.Verify(context.Background(), types.ConfidentialRequirement{Required: true})
+	require.NoError(t, err)
+	require.True(t, res.Verified, res.Verdict)
+	assert.Equal(t, "nitro", res.Type)
+	assert.Equal(t, []byte("channel-public-key-bytes-32-xxxx"), res.ChannelKey)
+}
+
+// TestVerifyNitroDoc_RejectsTamperedPayload: flipping a PCR after signing breaks
+// the COSE signature (the signature covers the CBOR payload).
+func TestVerifyNitroDoc_RejectsTamperedPayload(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+
+	// Re-sign with a leaf NOT chaining to root would be caught by the chain check;
+	// here we tamper the signed bytes to break signature verification instead.
+	doc := signedNitroDoc(t, root, rootKey, nil)
+	doc[len(doc)-1] ^= 0xFF // corrupt the trailing signature byte
+
+	_, _, err := verifyNitroDoc(doc, pool, NitroPolicy{
+		Nonce: []byte("nonce-from-verifier-32-bytes-xxx"),
+		PCRs:  map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))},
+	})
+	require.Error(t, err)
+}
