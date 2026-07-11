@@ -422,7 +422,7 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 		return cloudvm.NewAzureConfidentialAdapter(
 			cloudvm.NewAzureProvider(rg, os.Getenv("DISPATCHER_AZURE_LOCATION")),
 			nil, "", "", "",
-			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "azureuser"},
+			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "dispatcher"},
 		), nil
 	case "firecracker-vm":
 		return cloudvm.NewCloudVMAdapter(

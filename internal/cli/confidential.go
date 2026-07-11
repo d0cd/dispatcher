@@ -55,7 +55,7 @@ func newAzureConfidentialAdapter(ctx context.Context) (adapter.TargetAdapter, er
 	return cloudvm.NewAzureConfidentialAdapter(
 		cloudvm.NewAzureProvider(rg, location),
 		keys, maaURL, maaURL, agentBin,
-		cloudvm.Config{ProviderID: cloudvm.ProviderAzure, Region: location, SSHUser: "azureuser"},
+		cloudvm.Config{ProviderID: cloudvm.ProviderAzure, Region: location, SSHUser: "dispatcher"},
 	), nil
 }
 

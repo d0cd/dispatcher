@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -53,4 +54,60 @@ func TestGolden_AzureLiveExchange(t *testing.T) {
 	assert.Equal(t, 0, result.ExitCode)
 	assert.Contains(t, string(result.Stdout), "hi from TEE")
 	assert.Contains(t, string(result.Stdout), "secret=azure-sealed", "the sealed .env reached the workload inside the TEE")
+}
+
+// TestGolden_AzureLiveAdapter exercises the FULLY INTEGRATED AzureConfidential
+// Adapter against real Azure: provision a SEV-SNP CVM, scp+start the agent, open
+// the NSG, MAA-attest, seal source/.env, run inside the TEE, retrieve the sealed
+// result, and tear down. Gated on DISPATCHER_AZURE_LIVE_BUILD.
+//
+//	DISPATCHER_AZURE_LIVE_BUILD=1 DISPATCHER_AZURE_AGENT_BIN=<linux/amd64 binary> \
+//	DISPATCHER_AZURE_RG=dispatcher-rg DISPATCHER_AZURE_LOCATION=eastus \
+//	DISPATCHER_MAA_URL=https://sharedeus.eus.attest.azure.net \
+//	DISPATCHER_AZURE_LIVE_MEASUREMENT=<hex> \
+//	go test ./internal/cloudvm -run TestGolden_AzureLiveAdapter -v -timeout 20m
+func TestGolden_AzureLiveAdapter(t *testing.T) {
+	if os.Getenv("DISPATCHER_AZURE_LIVE_BUILD") == "" {
+		t.Skip("set DISPATCHER_AZURE_LIVE_BUILD=1 (+ agent bin/rg/location/maa/measurement) to run the integrated live path")
+	}
+	agentBin := os.Getenv("DISPATCHER_AZURE_AGENT_BIN")
+	maaURL := os.Getenv("DISPATCHER_MAA_URL")
+	rg := os.Getenv("DISPATCHER_AZURE_RG")
+	location := os.Getenv("DISPATCHER_AZURE_LOCATION")
+	measurement := strings.TrimSpace(os.Getenv("DISPATCHER_AZURE_LIVE_MEASUREMENT"))
+	require.NotEmpty(t, agentBin)
+	require.NotEmpty(t, measurement)
+
+	ctx := context.Background()
+	keys, err := LoadAzureMAAKeys(ctx, maaURL)
+	require.NoError(t, err)
+
+	a := NewAzureConfidentialAdapter(NewAzureProvider(rg, location), keys, maaURL, maaURL, agentBin,
+		Config{ProviderID: ProviderAzure, Region: location, SSHUser: "dispatcher"})
+
+	src := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(src, ".env"), []byte("SECRET=integrated\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "hello.txt"), []byte("from-source\n"), 0o644))
+	p := &types.Plan{
+		Metadata: types.PlanMetadata{ID: "azlive"},
+		Workload: types.WorkloadSpec{
+			Name: "azlive", Source: types.WorkloadSource{Path: src},
+			Command:      []string{"sh", "-c", "echo integrated=$SECRET; cat hello.txt"},
+			Requirements: types.ResourceRequirements{Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{measurement}}},
+		},
+	}
+
+	h, err := a.Execute(ctx, p)
+	require.NoError(t, err, "integrated Azure confidential run must succeed")
+	t.Cleanup(func() { _, _ = a.Cleanup(context.Background(), h) })
+
+	st := h.State.(*csRunState)
+	assert.True(t, st.Attestation.Verified)
+	assert.Equal(t, 0, st.Result.ExitCode)
+	assert.Contains(t, string(st.Result.Stdout), "integrated=integrated", "the sealed .env reached the TEE")
+	assert.Contains(t, string(st.Result.Stdout), "from-source", "the sealed source reached the TEE")
+
+	status, err := a.Status(ctx, h)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateCompleted, status)
 }
