@@ -55,18 +55,27 @@ the attestation format (Nitro COSE doc) differ.
    sudo ./deploy/nitro/run-enclave.sh   # runs the enclave, bridges :8443 -> vsock
    ```
 
-5. **Attest + run from dispatcher**, pinning the captured PCR0:
+5. **Run via dispatcher** — the adapter automates provisioning the parent, the
+   nitro-cli install, shipping the EIF + proxy, running the enclave, and the
+   attest → seal → run exchange. Select it with `confidential.type: nitro` in the
+   workload and pin the pre-built enclave image:
 
    ```
+   DISPATCHER_AWS_NITRO_EIF=<path to dispatcher-attest-nitro.eif from step 2> \
    DISPATCHER_AWS_NITRO_PCR0=<pcr0 from step 2> \
-   ./dispatcher run .   # targets aws-nitro (once the adapter lands)
+   DISPATCHER_AWS_NITRO_PROXY_BIN=<linux/amd64 dispatcher-nitro-proxy> \
+   DISPATCHER_AWS_REGION=us-east-1 \
+   ./dispatcher run .
    ```
 
-   The verifier fetches the Nitro doc over the proxy, checks it chains to the
-   pinned AWS Nitro Root-G1, verifies the COSE signature + nonce + PCR0, then seals
-   source/.env to the doc's `public_key` and runs the workload inside the enclave.
+   The adapter fails closed if the EIF / PCR0 / proxy aren't set. Optional:
+   `DISPATCHER_AWS_NITRO_INSTANCE_TYPE` (default `c6a.xlarge`),
+   `DISPATCHER_AWS_NITRO_AMI`. Steps 1–4 above are the *manual* equivalent, useful
+   for capturing PCR0 and validating a new image before pinning it.
 
-6. **Reap**: `nitro-cli terminate-enclave --all` and terminate the parent instance.
+6. **Reap**: dispatcher's `stop`/cleanup terminates the parent (which tears down
+   the enclave). For the manual path: `nitro-cli terminate-enclave --all` and
+   terminate the instance.
 
 ## Status
 
@@ -78,6 +87,8 @@ the attestation format (Nitro COSE doc) differ.
   parent proxy, and EIF packaging all confirmed against hardware.
   - Finding: the NSM emits an *untagged* COSE_Sign1 (no CBOR tag 18); the verifier
     accepts either form.
-- ⏳ Pending: the dispatcher-side Nitro adapter that automates the runbook
-  (provision the parent, ship the EIF, run the enclave + proxy, attest+seal+run)
-  so `dispatcher run` targets `aws-nitro` directly instead of the manual steps.
+- ✅ **Dispatcher-side adapter** (`AWSNitroConfidentialAdapter`): `dispatcher run`
+  with `confidential.type: nitro` provisions the parent, installs nitro-cli, ships
+  the pinned EIF + proxy, runs the enclave, and drives the sealed exchange. The
+  orchestration reuses the shared verify-before-seal flow; the adapter path itself
+  awaits a live end-to-end run (the core loop is already hardware-validated).
