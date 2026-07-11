@@ -40,7 +40,7 @@ func TestGolden_AzureLiveExchange(t *testing.T) {
 	require.NoError(t, err, "the pinned MAA /certs JWKS must load")
 
 	// Attest (a fresh nonce) + verify the live token, binding this run + channel key.
-	att := attest.NewAzureAttester(keys, maaURL, endpoint)
+	att := attest.NewAzureAttester(keys, maaURL, endpoint, attest.MAAMeasuredBoot{})
 	res, err := att.Verify(ctx,
 		types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{measurement}})
 	require.NoError(t, err)
@@ -84,7 +84,7 @@ func TestGolden_AzureLiveAdapter(t *testing.T) {
 	keys, err := attest.LoadAzureMAAKeys(ctx, maaURL)
 	require.NoError(t, err)
 
-	a := NewAzureConfidentialAdapter(NewAzureProvider(rg, location), keys, maaURL, maaURL, agentBin,
+	a := NewAzureConfidentialAdapter(NewAzureProvider(rg, location), keys, maaURL, maaURL, agentBin, attest.MAAMeasuredBoot{},
 		Config{ProviderID: ProviderAzure, Region: location, SSHUser: "dispatcher"})
 
 	src := t.TempDir()

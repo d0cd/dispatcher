@@ -17,9 +17,10 @@ func NewCSAttester(keys map[string]crypto.PublicKey, baseURL string) Attester {
 }
 
 // NewAzureAttester verifies Azure MAA tokens from the agent endpoint (issuer is
-// the pinned MAA instance URL).
-func NewAzureAttester(keys map[string]crypto.PublicKey, issuer, baseURL string) Attester {
-	return &azureAttester{keys: keys, issuer: issuer, isReady: true, fetch: endpointMAAFetch(baseURL)}
+// the pinned MAA instance URL). mb optionally pins measured-boot PCRs; its zero
+// value keeps the firmware-only behavior (no measured-agent enforcement).
+func NewAzureAttester(keys map[string]crypto.PublicKey, issuer, baseURL string, mb MAAMeasuredBoot) Attester {
+	return &azureAttester{keys: keys, issuer: issuer, mb: mb, isReady: true, fetch: endpointMAAFetch(baseURL)}
 }
 
 // NewAWSAttester verifies raw AWS SEV-SNP reports (go-sev-guest + the VLEK chain

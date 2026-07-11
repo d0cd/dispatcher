@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/cost"
 	"github.com/d0cd/dispatcher/internal/plan"
@@ -423,7 +424,7 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 		}
 		return cloudvm.NewAzureConfidentialAdapter(
 			cloudvm.NewAzureProvider(rg, os.Getenv("DISPATCHER_AZURE_LOCATION")),
-			nil, "", "", "",
+			nil, "", "", "", attest.MAAMeasuredBoot{},
 			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "dispatcher"},
 		), nil
 	case "aws-confidential":

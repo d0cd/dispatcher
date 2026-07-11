@@ -38,6 +38,11 @@ type maaToken struct {
 		LaunchMeasurement string `json:"x-ms-sevsnpvm-launchmeasurement"`
 		IsDebuggable      bool   `json:"x-ms-sevsnpvm-is-debuggable"`
 	} `json:"x-ms-isolation-tee"`
+	// Measured-boot facts from the vTPM (the AMD SEV-SNP launch measurement above
+	// covers only the CVM firmware, not the OS/agent). MAA attests PCRs 0–7; PCR4
+	// (the boot application / UKI) is where a custom image's agent measurement lands.
+	SecureBoot   bool              `json:"secureboot"`
+	AttestedPCRs map[string]string `json:"x-ms-azurevm-attested-pcr-values"`
 }
 
 // MAAPolicy is what an Azure confidential run demands of an MAA token.
@@ -45,6 +50,12 @@ type MAAPolicy struct {
 	Issuer       string   // pinned MAA instance issuer (required)
 	Nonce        []byte   // expected client-payload nonce (= agent.MAABindingNonce)
 	Measurements []string // exact allowlist of accepted launch measurements (hex)
+	// PCRs pins expected vTPM PCR values (index → base64 SHA-256) that MAA must
+	// attest. Pinning PCR4 (the boot application / UKI carrying the agent) is what
+	// closes the agent-not-measured caveat; empty skips measured-boot enforcement.
+	PCRs map[int]string
+	// RequireSecureBoot rejects a token unless the vTPM reports secure boot on.
+	RequireSecureBoot bool
 }
 
 // verifyMAAToken verifies an Azure MAA CVM token against the pinned MAA signing
@@ -103,6 +114,24 @@ func verifyMAAToken(token string, keys map[string]crypto.PublicKey, p MAAPolicy)
 	if !measurementAllowed(tee.LaunchMeasurement, p.Measurements) {
 		return "", fmt.Errorf("maa launch measurement %q is not on the allowlist", tee.LaunchMeasurement)
 	}
+
+	// Measured-boot enforcement (closes the agent-not-measured caveat): the SEV-SNP
+	// launch measurement above proves genuine Azure CVM firmware but not the OS or
+	// agent. The pinned PCRs — chiefly PCR4, the boot application (UKI) carrying the
+	// agent — must match what the vTPM attested, with secure boot on when required.
+	if p.RequireSecureBoot && !t.SecureBoot {
+		return "", fmt.Errorf("maa token reports secure boot off (a measured image requires it on)")
+	}
+	for idx, want := range p.PCRs {
+		key := fmt.Sprintf("pcr%d", idx)
+		got, ok := t.AttestedPCRs[key]
+		if !ok {
+			return "", fmt.Errorf("maa token does not attest %s (needed to pin the measured agent)", key)
+		}
+		if got != want {
+			return "", fmt.Errorf("maa %s does not match the pinned measured-image value", key)
+		}
+	}
 	return tee.LaunchMeasurement, nil
 }
 
@@ -120,13 +149,24 @@ type maaEvidence struct {
 // vTPM, so it is the one part not unit-testable offline.
 type maaFetch func(ctx context.Context, nonce []byte) (maaEvidence, error)
 
+// MAAMeasuredBoot pins the vTPM measured-boot state a custom measured image must
+// present: PCR values (index → base64 SHA-256) MAA must attest, and whether secure
+// boot must be on. Pinning PCR4 (the boot application / UKI carrying the agent) is
+// what closes the agent-not-measured caveat. The zero value disables measured-boot
+// enforcement — the pre-measured-image behavior (firmware-only attestation).
+type MAAMeasuredBoot struct {
+	PCRs              map[int]string
+	RequireSecureBoot bool
+}
+
 // azureAttester verifies Azure confidential VMs via MAA. keys are the trusted MAA
 // signing keys (the instance's /certs JWKS); issuer is the pinned MAA instance;
-// isReady is false until a real fetch is wired, so the preflight fails closed
-// before provisioning.
+// mb optionally pins measured-boot PCRs; isReady is false until a real fetch is
+// wired, so the preflight fails closed before provisioning.
 type azureAttester struct {
 	keys    map[string]crypto.PublicKey
 	issuer  string
+	mb      MAAMeasuredBoot
 	fetch   maaFetch
 	isReady bool
 }
@@ -148,9 +188,11 @@ func (a *azureAttester) Verify(ctx context.Context, req types.ConfidentialRequir
 	}
 
 	measurement, err := verifyMAAToken(ev.token, a.keys, MAAPolicy{
-		Issuer:       a.issuer,
-		Nonce:        agent.MAABindingNonce(nonce, ev.channelKey),
-		Measurements: req.Measurements,
+		Issuer:            a.issuer,
+		Nonce:             agent.MAABindingNonce(nonce, ev.channelKey),
+		Measurements:      req.Measurements,
+		PCRs:              a.mb.PCRs,
+		RequireSecureBoot: a.mb.RequireSecureBoot,
 	})
 	if err != nil {
 		// A token that fails verification is a verdict (abort the run), not a

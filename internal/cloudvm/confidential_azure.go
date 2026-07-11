@@ -26,6 +26,7 @@ type azureDeps struct {
 	provider  Provider
 	keys      map[string]crypto.PublicKey // pinned MAA /certs keys
 	issuer    string                      // pinned MAA instance issuer
+	mb        attest.MAAMeasuredBoot      // optional measured-boot PCR pin (custom image)
 	sshPubKey string                      // public key path to authorize on the CVM
 	sshUser   string
 	// startAgent provisions the agent on a booted CVM (scp the binary, start it,
@@ -43,7 +44,7 @@ func executeAzureConfidential(ctx context.Context, d azureDeps, p *types.Plan) (
 		provider: d.provider, sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
 		verify: func(ctx context.Context, _ *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
-			return attest.NewAzureAttester(d.keys, d.issuer, baseURL).Verify(ctx, req)
+			return attest.NewAzureAttester(d.keys, d.issuer, baseURL, d.mb).Verify(ctx, req)
 		},
 	}
 	return executeSSHConfidential(ctx, deps, p, fmt.Sprintf("dispatcher-cvm-%s", adapter.SanitizeName(p.Workload.Name)))
@@ -127,22 +128,25 @@ func azureStartAgent(agentBin, maaURL, keyPath, sshUser, egressCIDR string, prov
 // VM, but the workload arrives sealed and runs inside the TEE via the agent's
 // sealed exchange — not rsync-in-the-clear.
 type AzureConfidentialAdapter struct {
-	targetID string
-	provider Provider
-	keys     map[string]crypto.PublicKey
-	issuer   string
-	maaURL   string
-	agentBin string
-	config   Config
+	targetID     string
+	provider     Provider
+	keys         map[string]crypto.PublicKey
+	issuer       string
+	maaURL       string
+	agentBin     string
+	measuredBoot attest.MAAMeasuredBoot
+	config       Config
 }
 
 // NewAzureConfidentialAdapter builds the adapter. keys/issuer are the pinned MAA
 // instance's signing keys and issuer; agentBin is the cross-compiled
-// dispatcher-attest-azure binary dispatcher scps onto the CVM.
-func NewAzureConfidentialAdapter(provider Provider, keys map[string]crypto.PublicKey, issuer, maaURL, agentBin string, cfg Config) *AzureConfidentialAdapter {
+// dispatcher-attest-azure binary dispatcher scps onto the CVM. mb optionally pins
+// measured-boot PCRs (a custom measured image); its zero value keeps the
+// firmware-only attestation (the scp'd agent is not measured).
+func NewAzureConfidentialAdapter(provider Provider, keys map[string]crypto.PublicKey, issuer, maaURL, agentBin string, mb attest.MAAMeasuredBoot, cfg Config) *AzureConfidentialAdapter {
 	return &AzureConfidentialAdapter{
 		targetID: string(cfg.ProviderID) + "-confidential",
-		provider: provider, keys: keys, issuer: issuer, maaURL: maaURL, agentBin: agentBin, config: cfg,
+		provider: provider, keys: keys, issuer: issuer, maaURL: maaURL, agentBin: agentBin, measuredBoot: mb, config: cfg,
 	}
 }
 
@@ -173,6 +177,7 @@ func (a *AzureConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (
 		provider:   a.provider,
 		keys:       a.keys,
 		issuer:     a.issuer,
+		mb:         a.measuredBoot,
 		sshPubKey:  keyPath + ".pub",
 		sshUser:    a.config.SSHUser,
 		startAgent: azureStartAgent(a.agentBin, a.maaURL, keyPath, a.config.SSHUser, detectEgressCIDR(ctx), a.provider),

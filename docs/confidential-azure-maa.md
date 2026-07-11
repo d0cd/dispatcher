@@ -92,9 +92,30 @@ The assumed schema was wrong; a live capture corrected it:
 ## Trust caveat (important)
 
 Unlike GCP Confidential Space — where the **container image digest is the attested
-measurement**, so attestation proves the agent — Azure's launch measurement covers
-the **CVM/OS image, not the scp'd agent**. The current path therefore assumes the
-SSH delivery channel and the host do not substitute a different agent. Closing
-this requires baking `dispatcher-attest-azure` into a **measured custom CVM image**
-(so its identity is in the launch measurement) — deferred hardening, flagged in
-`azureStartAgent`.
+measurement**, so attestation proves the agent — the AMD SEV-SNP **launch
+measurement covers only the CVM firmware, not the OS or the scp'd agent**. Absent
+measured boot, the path assumes the SSH delivery channel and the host do not
+substitute a different agent.
+
+### Closing it: measured boot via the vTPM (PCR pinning)
+
+Azure CVMs have a vTPM whose boot-chain measurements MAA attests in
+`x-ms-azurevm-attested-pcr-values` (PCRs 0–7). **PCR4** is the boot application
+measurement: bake `dispatcher-attest-azure` into a **Unified Kernel Image** (kernel
++ initrd-with-agent + cmdline as one signed EFI binary) in a custom CVM image, and
+the agent's identity is anchored in PCR4 — which MAA reports.
+
+The **verifier half is implemented**: `MAAPolicy` pins PCR values and requires
+secure boot (`verifyMAAToken` enforces them; see `MAAMeasuredBoot`). Configure the
+pin per run:
+
+```
+DISPATCHER_AZURE_PCR4=<base64 sha256 from a known-good measured image>
+DISPATCHER_AZURE_PCR0=<...>   # optional: firmware
+DISPATCHER_AZURE_PCR7=<...>   # optional: secure-boot state
+DISPATCHER_AZURE_REQUIRE_SECUREBOOT=1
+```
+
+With no pin set, behavior is unchanged (firmware-only attestation — the caveat
+stands). The **remaining, infra-gated half** is building the custom UKI CVM image
+and capturing its known-good PCR4 to pin — flagged in `azureStartAgent`.

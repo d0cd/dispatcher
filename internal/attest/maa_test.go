@@ -59,6 +59,56 @@ func maaPolicy() MAAPolicy {
 	return MAAPolicy{Issuer: maaIssuer, Nonce: maaNonce, Measurements: []string{maaMeasurement}}
 }
 
+// pcr4Good stands in for the boot-application (UKI) measurement that anchors the
+// in-TEE agent on a custom measured CVM image; pcr7Good is the secure-boot state.
+const (
+	pcr4Good = "hCdbL0MSzU/Gy+axUq08NoPlE9nx4jw0/KFgyMynpqc="
+	pcr7Good = "UaUuxQtNYIelndWuaShO9pstZqPUJUGrGROSE8JiEbQ="
+)
+
+// TestVerifyMAAToken_EnforcesPinnedPCRs is the measured-boot gate for Azure: the
+// pinned PCRs (esp. PCR4, the UKI carrying the agent) attested in
+// x-ms-azurevm-attested-pcr-values must match, and secure boot must be on. This
+// is what closes the agent-not-measured caveat once a measured image is pinned.
+func TestVerifyMAAToken_EnforcesPinnedPCRs(t *testing.T) {
+	key, keys := maaSigningKey(t)
+	withPCRs := func(sb bool) map[string]any {
+		c := validMAAClaims()
+		c["secureboot"] = sb
+		c["x-ms-azurevm-attested-pcr-values"] = map[string]any{"pcr4": pcr4Good, "pcr7": pcr7Good}
+		return c
+	}
+
+	// Pinned PCR4 matches the attested value + secure boot on → accepted.
+	p := maaPolicy()
+	p.PCRs = map[int]string{4: pcr4Good, 7: pcr7Good}
+	p.RequireSecureBoot = true
+	_, err := verifyMAAToken(mintJWT(t, "maa1", "RS256", key, withPCRs(true)), keys, p)
+	require.NoError(t, err, "a token whose attested PCRs match the pin must verify")
+
+	// A different pinned PCR4 (a tampered/other agent image) → rejected.
+	bad := maaPolicy()
+	bad.PCRs = map[int]string{4: "d3JvbmctcGNyLXZhbHVlLWZvci10ZXN0aW5nMDAwMDA9"}
+	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, withPCRs(true)), keys, bad)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pcr4", "a PCR4 mismatch must name the failing PCR")
+
+	// Secure boot required but the token reports it off → rejected.
+	sbOff := maaPolicy()
+	sbOff.PCRs = map[int]string{4: pcr4Good}
+	sbOff.RequireSecureBoot = true
+	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, withPCRs(false)), keys, sbOff)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "secure boot")
+
+	// A pinned PCR the token doesn't attest at all → rejected (fail closed).
+	missing := maaPolicy()
+	missing.PCRs = map[int]string{11: pcr4Good}
+	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, withPCRs(true)), keys, missing)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pcr11")
+}
+
 func TestVerifyMAAToken_Accepts(t *testing.T) {
 	key, keys := maaSigningKey(t)
 	m, err := verifyMAAToken(mintJWT(t, "maa1", "RS256", key, validMAAClaims()), keys, maaPolicy())

@@ -79,9 +79,28 @@ func newAzureConfidentialAdapter(ctx context.Context) (adapter.TargetAdapter, er
 	// The MAA issuer is the instance URL (the token's iss).
 	return cloudvm.NewAzureConfidentialAdapter(
 		cloudvm.NewAzureProvider(rg, location),
-		keys, maaURL, maaURL, agentBin,
+		keys, maaURL, maaURL, agentBin, azureMeasuredBoot(),
 		cloudvm.Config{ProviderID: cloudvm.ProviderAzure, Region: location, SSHUser: "dispatcher"},
 	), nil
+}
+
+// azureMeasuredBoot reads the pinned measured-boot state from the environment: a
+// base64 SHA-256 value per PCR (DISPATCHER_AZURE_PCR<n>, chiefly PCR4 — the UKI
+// carrying the agent) and DISPATCHER_AZURE_REQUIRE_SECUREBOOT=1. Unset means no
+// measured-boot enforcement (the scp'd agent is not measured — the current caveat).
+func azureMeasuredBoot() attest.MAAMeasuredBoot {
+	var mb attest.MAAMeasuredBoot
+	pcrs := map[int]string{}
+	for _, idx := range []int{0, 4, 7} {
+		if v := os.Getenv(fmt.Sprintf("DISPATCHER_AZURE_PCR%d", idx)); v != "" {
+			pcrs[idx] = v
+		}
+	}
+	if len(pcrs) > 0 {
+		mb.PCRs = pcrs
+	}
+	mb.RequireSecureBoot = os.Getenv("DISPATCHER_AZURE_REQUIRE_SECUREBOOT") == "1"
+	return mb
 }
 
 // newConfidentialSpaceAdapter builds the Confidential Space adapter for a run:
