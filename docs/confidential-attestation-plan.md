@@ -30,10 +30,11 @@ vTPM/MAA) — no hand-rolled crypto in any operational path. This doc is the
   - **AWS** — EC2 SEV-SNP measures the AWS guest **firmware** only, and there is
     **no vTPM/PCR chain**, so the agent cannot be folded into the launch
     measurement via a custom AMI. The only path is **Nitro Enclaves**, where the
-    enclave image itself is measured (PCR0). **Verifier done**
-    (`NewAWSNitroAttester`); pending: the enclave EIF + vsock execution model +
-    live validation. Note Nitro is a distinct, restricted execution model (no
-    direct network/disk in the enclave).
+    enclave image itself is measured (PCR0). **Verifier + enclave loop
+    live-validated** on real hardware (`NewAWSNitroAttester`, in-enclave agent
+    over vsock + NSM, pinned Root-G1 — see `docs/confidential-nitro.md`); pending:
+    the dispatcher-side adapter that automates provisioning. Note Nitro is a
+    distinct, restricted execution model (no direct network/disk in the enclave).
 
   Until the image/enclave builds land, agent integrity on the SSH-VM paths
   assumes the host does not tamper with the on-disk binary before it runs (a

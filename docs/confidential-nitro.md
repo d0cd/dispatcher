@@ -70,7 +70,14 @@ the attestation format (Nitro COSE doc) differ.
 
 ## Status
 
-- ✅ Verifier (`attest.NewAWSNitroAttester`), pinned Root-G1, in-enclave agent
-  (vsock + NSM), parent proxy, EIF packaging.
-- ⏳ Pending: the dispatcher-side Nitro adapter (provision parent, ship EIF, run
-  enclave, attest+seal+run) and end-to-end live validation.
+- ✅ **Core loop live-validated** on a real enclave (c6a.xlarge, us-east-1):
+  build EIF → capture PCR0 → run enclave + proxy → fetch the real NSM attestation
+  doc → verify (chain to Root-G1 + COSE signature + nonce + PCR0) → seal → run the
+  workload inside the enclave → open the sealed result. Verifier
+  (`attest.NewAWSNitroAttester`), pinned Root-G1, in-enclave agent (vsock + NSM),
+  parent proxy, and EIF packaging all confirmed against hardware.
+  - Finding: the NSM emits an *untagged* COSE_Sign1 (no CBOR tag 18); the verifier
+    accepts either form.
+- ⏳ Pending: the dispatcher-side Nitro adapter that automates the runbook
+  (provision the parent, ship the EIF, run the enclave + proxy, attest+seal+run)
+  so `dispatcher run` targets `aws-nitro` directly instead of the manual steps.
