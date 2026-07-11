@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -155,6 +156,18 @@ type csEvidence struct {
 // (via the container-launcher teeserver socket), passing the per-run nonce. It
 // needs the measured CS runtime, so it is the one part not unit-testable offline.
 type csFetch func(ctx context.Context, nonce []byte) (csEvidence, error)
+
+// csEndpointFetch reads the Google-signed Confidential Space token from the
+// in-TEE agent's /attest endpoint over the untrusted channel, binding the run nonce.
+func csEndpointFetch(baseURL string) csFetch {
+	return func(ctx context.Context, nonce []byte) (csEvidence, error) {
+		token, channelKey, err := agent.FetchAttestation(ctx, baseURL, nonce)
+		if err != nil {
+			return csEvidence{}, err
+		}
+		return csEvidence{token: token, channelKey: channelKey}, nil
+	}
+}
 
 // csAttester verifies GCP Confidential Space attestation tokens. keys are the
 // trusted Google signing keys (JWKS); isReady is false until a real fetch is

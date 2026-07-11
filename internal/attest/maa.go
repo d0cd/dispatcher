@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -43,20 +43,8 @@ type maaToken struct {
 // MAAPolicy is what an Azure confidential run demands of an MAA token.
 type MAAPolicy struct {
 	Issuer       string   // pinned MAA instance issuer (required)
-	Nonce        []byte   // expected client-payload nonce (= maaBindingNonce)
+	Nonce        []byte   // expected client-payload nonce (= agent.MAABindingNonce)
 	Measurements []string // exact allowlist of accepted launch measurements (hex)
-}
-
-// maaBindingNonce is the value the guest passes to MAA as the TPM-quote
-// qualifying data: SHA-256 over the per-run nonce concatenated with the in-TEE
-// channel key. SHA-256 (32 bytes) fits the TPM quote's qualifying-data limit
-// (SHA-512 does not — the live TPM rejects it with TPM_RC_SIZE). MAA echoes it in
-// x-ms-runtime.client-payload.nonce, binding this run + sealing key to the token.
-func maaBindingNonce(nonce, channelKey []byte) []byte {
-	h := sha256.New()
-	h.Write(nonce)
-	h.Write(channelKey)
-	return h.Sum(nil)
 }
 
 // verifyMAAToken verifies an Azure MAA CVM token against the pinned MAA signing
@@ -161,7 +149,7 @@ func (a *azureAttester) Verify(ctx context.Context, req types.ConfidentialRequir
 
 	measurement, err := verifyMAAToken(ev.token, a.keys, MAAPolicy{
 		Issuer:       a.issuer,
-		Nonce:        maaBindingNonce(nonce, ev.channelKey),
+		Nonce:        agent.MAABindingNonce(nonce, ev.channelKey),
 		Measurements: req.Measurements,
 	})
 	if err != nil {

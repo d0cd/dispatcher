@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/attest"
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -47,7 +48,7 @@ func TestGolden_CSLiveExchange(t *testing.T) {
 	require.NotEmpty(t, res.ChannelKey)
 
 	// Seal a payload to the attested key, run it inside the TEE, open the result.
-	result, err := attest.RunSealedExchange(ctx, endpoint, res.ChannelKey, attest.Payload{
+	result, err := agent.RunSealedExchange(ctx, endpoint, res.ChannelKey, agent.Payload{
 		Command: []string{"sh", "-c", "echo hello from TEE; echo secret=$SECRET"},
 		DotEnv:  []byte("SECRET=live-sealed\n"),
 	})

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -216,7 +217,7 @@ func TestSNPAttester_VerifyAccepts(t *testing.T) {
 	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
 		fetch: func(_ context.Context, nonce []byte) (snpEvidence, error) {
 			// The guest binds this run: REPORT_DATA = SHA-512(nonce || channelKey).
-			rd := bindingHash(nonce, channelKey)
+			rd := agent.BindingHash(nonce, channelKey)
 			return snpEvidence{
 				report:     buildSNPReport(t, meas, rd, 5, 0, ch.vcekKey),
 				vcek:       ch.vcek,
@@ -244,7 +245,7 @@ func TestSNPAttester_VerifyRejectsWrongMeasurement(t *testing.T) {
 	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
 		fetch: func(_ context.Context, nonce []byte) (snpEvidence, error) {
 			return snpEvidence{
-				report: buildSNPReport(t, make48(0x01), bindingHash(nonce, channelKey), 5, 0, ch.vcekKey),
+				report: buildSNPReport(t, make48(0x01), agent.BindingHash(nonce, channelKey), 5, 0, ch.vcekKey),
 				vcek:   ch.vcek, ask: ch.ask, channelKey: channelKey,
 			}, nil
 		}}
@@ -265,7 +266,7 @@ func TestSNPAttester_VerifyRejectsReplay(t *testing.T) {
 	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
 		fetch: func(_ context.Context, _ []byte) (snpEvidence, error) {
 			return snpEvidence{
-				report: buildSNPReport(t, meas, bindingHash(stale, channelKey), 5, 0, ch.vcekKey),
+				report: buildSNPReport(t, meas, agent.BindingHash(stale, channelKey), 5, 0, ch.vcekKey),
 				vcek:   ch.vcek, ask: ch.ask, channelKey: channelKey,
 			}, nil
 		}}

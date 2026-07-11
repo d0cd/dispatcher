@@ -12,6 +12,7 @@ import (
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -49,10 +50,10 @@ func stubCSVerify(t *testing.T, res attest.AttestationResult, err error) {
 
 // stubExchange replaces the sealed-exchange seam and records the payload it was
 // handed, so tests can assert what dispatcher sealed and shipped.
-func stubExchange(t *testing.T, got *attest.Payload, res attest.Result, err error) {
+func stubExchange(t *testing.T, got *agent.Payload, res agent.Result, err error) {
 	t.Helper()
 	prev := runSealedExchange
-	runSealedExchange = func(_ context.Context, _ string, _ []byte, p attest.Payload) (attest.Result, error) {
+	runSealedExchange = func(_ context.Context, _ string, _ []byte, p agent.Payload) (agent.Result, error) {
 		if got != nil {
 			*got = p
 		}
@@ -66,8 +67,8 @@ func stubExchange(t *testing.T, got *attest.Payload, res attest.Result, err erro
 // run → sealed result.
 func TestExecuteConfidentialSpace_HappyPath(t *testing.T) {
 	stubCSVerify(t, attest.AttestationResult{Verified: true, Measurement: csTestDigest, ChannelKey: []byte("channel-key")}, nil)
-	var got attest.Payload
-	stubExchange(t, &got, attest.Result{ExitCode: 0, Stdout: []byte("trained")}, nil)
+	var got agent.Payload
+	stubExchange(t, &got, agent.Result{ExitCode: 0, Stdout: []byte("trained")}, nil)
 
 	provider := NewMockProvider(ProviderGCP)
 	deps := csDeps{
@@ -97,9 +98,9 @@ func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
 	stubCSVerify(t, attest.AttestationResult{Verified: false, Verdict: "digest mismatch"}, nil)
 	ran := false
 	prevExchange := runSealedExchange
-	runSealedExchange = func(context.Context, string, []byte, attest.Payload) (attest.Result, error) {
+	runSealedExchange = func(context.Context, string, []byte, agent.Payload) (agent.Result, error) {
 		ran = true
-		return attest.Result{}, nil
+		return agent.Result{}, nil
 	}
 	t.Cleanup(func() { runSealedExchange = prevExchange })
 

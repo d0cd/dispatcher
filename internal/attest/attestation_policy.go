@@ -2,9 +2,10 @@ package attest
 
 import (
 	"bytes"
-	"crypto/sha512"
 	"fmt"
 	"strings"
+
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 )
 
 // Claims is the normalized, provider-agnostic set of facts a verifier extracts
@@ -29,23 +30,13 @@ type VerificationPolicy struct {
 	ChannelKey   []byte   // the in-TEE channel public key bound in REPORT_DATA
 }
 
-// bindingHash is the value that must appear in REPORT_DATA: SHA-512 over the
-// per-run nonce concatenated with the in-TEE channel key. SHA-512 is 64 bytes,
-// matching SEV-SNP's REPORT_DATA field.
-func bindingHash(nonce, channelKey []byte) []byte {
-	h := sha512.New()
-	h.Write(nonce)
-	h.Write(channelKey)
-	return h.Sum(nil)
-}
-
 // applyPolicy enforces R5–R8 and freshness/binding (R1/R2) on extracted claims.
 // The caller must already have verified the signature chain (R3/R4). Returns nil
 // only when every check passes; any failure must abort and destroy the VM.
 func applyPolicy(c Claims, p VerificationPolicy) error {
 	// Self-defend on the binding inputs (R1/R2): never trust the caller to have
 	// populated them. An empty nonce/key would make the binding check below
-	// degenerate to matching bindingHash("","") = SHA-512(""), a public constant
+	// degenerate to matching agent.BindingHash("","") = SHA-512(""), a public constant
 	// any host could place in REPORT_DATA with no genuine TEE or fresh challenge.
 	if len(p.Nonce) != 32 {
 		return fmt.Errorf("attestation: per-run nonce must be exactly 32 bytes, got %d — R1", len(p.Nonce))
@@ -71,7 +62,7 @@ func applyPolicy(c Claims, p VerificationPolicy) error {
 	if !measurementAllowed(c.Measurement, p.Measurements) {
 		return fmt.Errorf("attestation: launch measurement %q is not on the allowlist", c.Measurement)
 	}
-	if want := bindingHash(p.Nonce, p.ChannelKey); !bytes.Equal(c.ReportData, want) {
+	if want := agent.BindingHash(p.Nonce, p.ChannelKey); !bytes.Equal(c.ReportData, want) {
 		return fmt.Errorf("attestation: REPORT_DATA does not bind this run's nonce and channel key (replay/relay or wrong key)")
 	}
 	return nil

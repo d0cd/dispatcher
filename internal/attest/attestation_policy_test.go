@@ -2,6 +2,7 @@ package attest
 
 import (
 	"bytes"
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -17,7 +18,7 @@ func validClaims() Claims {
 		DebugEnabled:     false,
 		MigrationEnabled: false,
 		TCB:              10,
-		ReportData:       bindingHash(testNonce, []byte("key")),
+		ReportData:       agent.BindingHash(testNonce, []byte("key")),
 	}
 }
 
@@ -56,7 +57,7 @@ func TestApplyPolicy_FailsClosedOnMissingBindingInputs(t *testing.T) {
 	})
 	t.Run("the SHA-512 empty constant does not pass", func(t *testing.T) {
 		c := validClaims()
-		c.ReportData = bindingHash(nil, nil) // = SHA-512("")
+		c.ReportData = agent.BindingHash(nil, nil) // = SHA-512("")
 		assert.Error(t, applyPolicy(c, validPolicy()))
 	})
 }
@@ -124,7 +125,7 @@ func TestApplyPolicy_BindingIsBitExact(t *testing.T) {
 		ExpectedType: "sev-snp", Measurements: []string{"abcd"},
 		Nonce: nonce, ChannelKey: channelKey,
 	}
-	good := Claims{TEEType: "sev-snp", Measurement: "abcd", ReportData: bindingHash(nonce, channelKey)}
+	good := Claims{TEEType: "sev-snp", Measurement: "abcd", ReportData: agent.BindingHash(nonce, channelKey)}
 	require.NoError(t, applyPolicy(good, policy), "the exact binding must be accepted")
 
 	for i := range good.ReportData {
@@ -148,9 +149,9 @@ func TestApplyPolicy_BindingIsBitExact(t *testing.T) {
 }
 
 func TestBindingHash_Deterministic(t *testing.T) {
-	h1 := bindingHash([]byte("n"), []byte("k"))
-	h2 := bindingHash([]byte("n"), []byte("k"))
+	h1 := agent.BindingHash([]byte("n"), []byte("k"))
+	h2 := agent.BindingHash([]byte("n"), []byte("k"))
 	assert.Equal(t, h1, h2)
 	assert.Len(t, h1, 64, "SEV-SNP REPORT_DATA is 64 bytes (SHA-512)")
-	assert.NotEqual(t, h1, bindingHash([]byte("n"), []byte("k2")))
+	assert.NotEqual(t, h1, agent.BindingHash([]byte("n"), []byte("k2")))
 }

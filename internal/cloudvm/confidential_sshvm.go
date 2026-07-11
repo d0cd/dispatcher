@@ -6,14 +6,15 @@ import (
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/attest"
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// runSealedExchange is a seam over attest.RunSealedExchange so adapter
+// runSealedExchange is a seam over agent.RunSealedExchange so adapter
 // orchestration tests can drive the flow without a live in-TEE agent (the agent
 // + exchange are tested end-to-end in the attest package).
-var runSealedExchange = attest.RunSealedExchange
+var runSealedExchange = agent.RunSealedExchange
 
 // sshConfidentialDeps are the collaborators for an SSH-VM confidential run (Azure
 // MAA, AWS SEV-SNP). The provider-specific verification is a closure so the same

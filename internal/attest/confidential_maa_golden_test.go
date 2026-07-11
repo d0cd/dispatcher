@@ -25,7 +25,7 @@ func TestGolden_MAAToken(t *testing.T) {
 	issuer := strings.TrimSpace(string(skipUnlessFixture(t, filepath.Join(dir, "issuer.txt"))))
 
 	// The capture tool passed this raw nonce as the client payload; production
-	// passes maaBindingNonce(runNonce, channelKey), but the verifier checks the
+	// passes agent.MAABindingNonce(runNonce, channelKey), but the verifier checks the
 	// echoed value against whatever we expect, so the golden nonce is the raw one.
 	nonce, err := hex.DecodeString(nonceHex)
 	require.NoError(t, err)

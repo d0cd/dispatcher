@@ -3,6 +3,8 @@ package attest
 import (
 	"context"
 	"crypto"
+
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 )
 
 // The attester constructors expose the provider verifiers over the in-TEE agent's
@@ -26,13 +28,14 @@ func NewAWSAttester(baseURL string) Attester {
 	return &awsAttester{fetchChain: fetchVLEKChainFromKDS, isReady: true, fetch: endpointSNPFetch(baseURL)}
 }
 
-// endpointMAAFetch reads MAA evidence from the agent /attest endpoint.
+// endpointMAAFetch reads MAA evidence (the signed token) from the agent's
+// /attest endpoint over the untrusted channel, binding the run nonce.
 func endpointMAAFetch(baseURL string) maaFetch {
 	return func(ctx context.Context, nonce []byte) (maaEvidence, error) {
-		ev, err := csEndpointFetch(baseURL)(ctx, nonce)
+		token, channelKey, err := agent.FetchAttestation(ctx, baseURL, nonce)
 		if err != nil {
 			return maaEvidence{}, err
 		}
-		return maaEvidence{token: ev.token, channelKey: ev.channelKey}, nil
+		return maaEvidence{token: token, channelKey: channelKey}, nil
 	}
 }

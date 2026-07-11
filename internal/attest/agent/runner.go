@@ -1,4 +1,4 @@
-package attest
+package agent
 
 import (
 	"archive/tar"
@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,15 +19,7 @@ import (
 // exec runner for the workload. This is the entrypoint the dispatcher-attest
 // binary (the measured container) calls.
 func RunAgent(addr, audience string) error {
-	agent, err := newConfidentialAgent(agentConfig{
-		attest: csAttestFunc(csTeeserverSocket, audience),
-		runner: defaultRunner,
-	})
-	if err != nil {
-		return err
-	}
-	srv := &http.Server{Addr: addr, Handler: agent.handler()}
-	return srv.ListenAndServe()
+	return RunServer(addr, csAttestFunc(csTeeserverSocket, audience))
 }
 
 // defaultRunner extracts the sealed source into a scratch workdir, runs the

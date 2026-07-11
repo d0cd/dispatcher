@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/attest"
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -44,8 +45,8 @@ func cannedVerify(res attest.AttestationResult, err error) func(context.Context,
 // orchestration: provision → start agent → verify → seal source/.env → run →
 // sealed result. The VM stays up until Cleanup.
 func TestExecuteSSHConfidential_HappyPath(t *testing.T) {
-	var got attest.Payload
-	stubExchange(t, &got, attest.Result{ExitCode: 0, Stdout: []byte("ran")}, nil)
+	var got agent.Payload
+	stubExchange(t, &got, agent.Result{ExitCode: 0, Stdout: []byte("ran")}, nil)
 
 	provider := NewMockProvider(ProviderAzure)
 	deps := sshConfidentialDeps{
@@ -70,9 +71,9 @@ func TestExecuteSSHConfidential_HappyPath(t *testing.T) {
 func TestExecuteSSHConfidential_UnverifiedTearsDown(t *testing.T) {
 	ran := false
 	prevExchange := runSealedExchange
-	runSealedExchange = func(context.Context, string, []byte, attest.Payload) (attest.Result, error) {
+	runSealedExchange = func(context.Context, string, []byte, agent.Payload) (agent.Result, error) {
 		ran = true
-		return attest.Result{}, nil
+		return agent.Result{}, nil
 	}
 	t.Cleanup(func() { runSealedExchange = prevExchange })
 

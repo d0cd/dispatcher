@@ -1,4 +1,4 @@
-package attest
+package agent
 
 import (
 	"context"
@@ -10,13 +10,13 @@ import (
 	"sync"
 )
 
-// confidentialAgent is the in-TEE side of a Confidential Space run — the measured
+// Agent is the in-TEE side of a Confidential Space run — the measured
 // entrypoint baked into the workload image (its digest is the attested identity).
 // It holds the channel keypair (private key never leaves the TEE), serves
 // attestation evidence, opens the sealed payload, runs the workload, and serves a
 // sealed result. dispatcher talks to it over the untrusted TCP channel; the
 // attestation binding + sealing are what make that safe (R9).
-type confidentialAgent struct {
+type Agent struct {
 	pub, priv []byte
 	cfg       agentConfig
 
@@ -27,17 +27,17 @@ type confidentialAgent struct {
 	result    Result
 }
 
-// attestFunc obtains an attestation token that binds this run's nonce and the
+// AttestFunc obtains an attestation token that binds this run's nonce and the
 // agent's channel public key. It is the one provider-specific part of the agent:
 // GCP Confidential Space fetches a CS token from the teeserver socket; Azure
 // fetches an MAA token via the vTPM. Everything downstream (seal-open, run,
 // sealed result) is provider-agnostic.
-type attestFunc func(ctx context.Context, runNonce, channelPub []byte) (string, error)
+type AttestFunc func(ctx context.Context, runNonce, channelPub []byte) (string, error)
 
 type agentConfig struct {
 	// attest obtains the attestation token; defaults to the GCP Confidential
 	// Space teeserver fetch. Tests inject a stub.
-	attest attestFunc
+	attest AttestFunc
 	// runner executes the opened payload's workload and returns its result. The
 	// default exec runner ships with the agent binary; the core is injectable.
 	runner func(ctx context.Context, p Payload) Result
@@ -45,7 +45,7 @@ type agentConfig struct {
 
 // csAttestFunc binds [runNonce, SHA-256(channelPub)] into a Confidential Space
 // token from the container-launcher teeserver socket.
-func csAttestFunc(socket, audience string) attestFunc {
+func csAttestFunc(socket, audience string) AttestFunc {
 	return func(ctx context.Context, runNonce, channelPub []byte) (string, error) {
 		sum := sha256.Sum256(channelPub)
 		nonces := []string{hex.EncodeToString(runNonce), hex.EncodeToString(sum[:])}
@@ -53,7 +53,7 @@ func csAttestFunc(socket, audience string) attestFunc {
 	}
 }
 
-func newConfidentialAgent(cfg agentConfig) (*confidentialAgent, error) {
+func newConfidentialAgent(cfg agentConfig) (*Agent, error) {
 	if cfg.attest == nil {
 		cfg.attest = csAttestFunc(csTeeserverSocket, "dispatcher")
 	}
@@ -61,10 +61,32 @@ func newConfidentialAgent(cfg agentConfig) (*confidentialAgent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &confidentialAgent{pub: pub, priv: priv, cfg: cfg}, nil
+	return &Agent{pub: pub, priv: priv, cfg: cfg}, nil
 }
 
-func (a *confidentialAgent) handler() http.Handler {
+// NewAgent builds an in-TEE agent with a provider-specific attestation function
+// and workload runner. A nil runner uses the default exec runner. The per-cloud
+// agent packages and tests construct agents this way; the sealed-exchange handler
+// and the runner are provider-agnostic.
+func NewAgent(attest AttestFunc, runner func(ctx context.Context, p Payload) Result) (*Agent, error) {
+	if runner == nil {
+		runner = defaultRunner
+	}
+	return newConfidentialAgent(agentConfig{attest: attest, runner: runner})
+}
+
+// RunServer builds an agent with the default exec runner and serves the sealed-
+// exchange HTTP API on addr until the process exits. It is the shared entrypoint
+// each per-cloud agent binary calls with its own attestation function.
+func RunServer(addr string, attest AttestFunc) error {
+	a, err := NewAgent(attest, defaultRunner)
+	if err != nil {
+		return err
+	}
+	return (&http.Server{Addr: addr, Handler: a.Handler()}).ListenAndServe()
+}
+
+func (a *Agent) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/attest", a.handleAttest)
 	mux.HandleFunc("/payload", a.handlePayload)
@@ -75,7 +97,7 @@ func (a *confidentialAgent) handler() http.Handler {
 // handleAttest obtains an attestation token binding this run's nonce and the
 // channel public key, and returns both — the evidence dispatcher verifies and
 // seals to.
-func (a *confidentialAgent) handleAttest(w http.ResponseWriter, r *http.Request) {
+func (a *Agent) handleAttest(w http.ResponseWriter, r *http.Request) {
 	nonceHex := r.URL.Query().Get("nonce")
 	if nonceHex == "" {
 		http.Error(w, "missing nonce", http.StatusBadRequest)
@@ -97,7 +119,7 @@ func (a *confidentialAgent) handleAttest(w http.ResponseWriter, r *http.Request)
 // handlePayload opens the sealed payload with the channel private key and starts
 // the workload. A payload that doesn't open (not sealed to this TEE) is rejected
 // and never runs.
-func (a *confidentialAgent) handlePayload(w http.ResponseWriter, r *http.Request) {
+func (a *Agent) handlePayload(w http.ResponseWriter, r *http.Request) {
 	if a.cfg.runner == nil {
 		http.Error(w, "no runner configured", http.StatusNotImplemented)
 		return
@@ -143,7 +165,7 @@ func (a *confidentialAgent) handlePayload(w http.ResponseWriter, r *http.Request
 
 // handleResult serves the workload result sealed to the payload's result key.
 // 202 until the workload finishes, then 200 with the sealed result.
-func (a *confidentialAgent) handleResult(w http.ResponseWriter, _ *http.Request) {
+func (a *Agent) handleResult(w http.ResponseWriter, _ *http.Request) {
 	a.mu.Lock()
 	done, res, resultPub := a.done, a.result, a.resultPub
 	a.mu.Unlock()

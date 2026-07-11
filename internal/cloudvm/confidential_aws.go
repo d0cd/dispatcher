@@ -12,6 +12,7 @@ import (
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -255,7 +256,7 @@ func (a *AWSConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHand
 	if err != nil {
 		return nil, fmt.Errorf("create artifacts dir: %w", err)
 	}
-	if err := attest.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
+	if err := agent.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
 		return nil, fmt.Errorf("extract outputs: %w", err)
 	}
 	var refs []adapter.ArtifactRef

@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -116,10 +117,10 @@ func TestVerifyMAAToken_Rejects(t *testing.T) {
 func TestMAABindingNonce_BindsBothInputs(t *testing.T) {
 	nonce := bytes.Repeat([]byte{0x01}, 32)
 	key := bytes.Repeat([]byte{0x02}, 32)
-	base := maaBindingNonce(nonce, key)
+	base := agent.MAABindingNonce(nonce, key)
 	assert.Len(t, base, 32, "SHA-256 output fits the TPM quote qualifying data")
-	assert.NotEqual(t, base, maaBindingNonce(bytes.Repeat([]byte{0x03}, 32), key), "a different nonce changes the binding")
-	assert.NotEqual(t, base, maaBindingNonce(nonce, bytes.Repeat([]byte{0x04}, 32)), "a different channel key changes the binding")
+	assert.NotEqual(t, base, agent.MAABindingNonce(bytes.Repeat([]byte{0x03}, 32), key), "a different nonce changes the binding")
+	assert.NotEqual(t, base, agent.MAABindingNonce(nonce, bytes.Repeat([]byte{0x04}, 32)), "a different channel key changes the binding")
 	// Concatenation is order-sensitive (no ambiguity between nonce and key).
 	sum := sha256.Sum256(append(append([]byte{}, nonce...), key...))
 	assert.Equal(t, sum[:], base)
@@ -133,7 +134,7 @@ func TestAzureAttester_BindsNonceAndChannelKey(t *testing.T) {
 			c := validMAAClaims()
 			// echo the binding the guest would have supplied
 			c["x-ms-runtime"].(map[string]any)["client-payload"].(map[string]any)["nonce"] =
-				base64.StdEncoding.EncodeToString(maaBindingNonce(nonce, channelKey))
+				base64.StdEncoding.EncodeToString(agent.MAABindingNonce(nonce, channelKey))
 			return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
 		}}
 	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}}

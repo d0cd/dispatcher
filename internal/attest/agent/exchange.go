@@ -1,4 +1,4 @@
-package attest
+package agent
 
 import (
 	"bytes"
@@ -46,32 +46,32 @@ type Result struct {
 	OutputsTarGz []byte `json:"outputs_tar_gz,omitempty"`
 }
 
-// csEndpointFetch is a csFetch that obtains attestation evidence from the in-TEE
-// agent's /attest endpoint over HTTP (the untrusted channel), passing the run
-// nonce. It replaces the placeholder fetch and is what a live CS adapter wires
-// into csAttester.
-func csEndpointFetch(baseURL string) csFetch {
-	return func(ctx context.Context, nonce []byte) (csEvidence, error) {
-		u := baseURL + "/attest?nonce=" + url.QueryEscape(hex.EncodeToString(nonce))
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		if err != nil {
-			return csEvidence{}, err
-		}
-		resp, err := csHTTPClient().Do(req)
-		if err != nil {
-			return csEvidence{}, fmt.Errorf("attest fetch: %w", err)
-		}
-		defer resp.Body.Close()
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		if resp.StatusCode != http.StatusOK {
-			return csEvidence{}, fmt.Errorf("attest fetch failed: %d: %s", resp.StatusCode, bytes.TrimSpace(body))
-		}
-		var ar attestResponse
-		if err := json.Unmarshal(body, &ar); err != nil {
-			return csEvidence{}, fmt.Errorf("parse attest response: %w", err)
-		}
-		return csEvidence{token: ar.Token, channelKey: ar.ChannelKey}, nil
+// FetchAttestation obtains attestation evidence from the in-TEE agent's /attest
+// endpoint over the untrusted channel, passing the run nonce, and returns the raw
+// evidence token and the agent's channel public key. The caller — a provider's
+// verifier — interprets the token (CS/MAA JWT or a base64 SEV-SNP report) and
+// checks it commits to the nonce and channel key. This is the one point where the
+// dispatcher side of the sealed exchange reaches across to the agent for evidence.
+func FetchAttestation(ctx context.Context, baseURL string, nonce []byte) (token string, channelKey []byte, err error) {
+	u := baseURL + "/attest?nonce=" + url.QueryEscape(hex.EncodeToString(nonce))
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return "", nil, err
 	}
+	resp, err := csHTTPClient().Do(req)
+	if err != nil {
+		return "", nil, fmt.Errorf("attest fetch: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return "", nil, fmt.Errorf("attest fetch failed: %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
+	var ar attestResponse
+	if err := json.Unmarshal(body, &ar); err != nil {
+		return "", nil, fmt.Errorf("parse attest response: %w", err)
+	}
+	return ar.Token, ar.ChannelKey, nil
 }
 
 // RunSealedExchange seals payload to the attested channel key, POSTs it to the

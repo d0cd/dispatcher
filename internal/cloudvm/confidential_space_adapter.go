@@ -15,6 +15,7 @@ import (
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
+	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/dlog"
 	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
@@ -68,7 +69,7 @@ type csRunState struct {
 	Region      string                   `json:"region"`
 	ImageRef    string                   `json:"imageRef"`
 	Outputs     []string                 `json:"outputs,omitempty"`
-	Result      attest.Result            `json:"result"`
+	Result      agent.Result             `json:"result"`
 	Attestation attest.AttestationResult `json:"attestation"`
 	CreatedAt   time.Time                `json:"createdAt"`
 }
@@ -196,15 +197,15 @@ func a2provider(p Provider) ProviderID { return p.Name() }
 // buildConfidentialPayload assembles what dispatcher seals to the TEE: the
 // workload command, its source (tarred, minus the usual heavy dirs), the .env,
 // and the output paths to bring back.
-func buildConfidentialPayload(w types.WorkloadSpec) (attest.Payload, error) {
+func buildConfidentialPayload(w types.WorkloadSpec) (agent.Payload, error) {
 	command, err := csCommand(w)
 	if err != nil {
-		return attest.Payload{}, err
+		return agent.Payload{}, err
 	}
 
 	entries, err := os.ReadDir(w.Source.Path)
 	if err != nil {
-		return attest.Payload{}, fmt.Errorf("read source dir: %w", err)
+		return agent.Payload{}, fmt.Errorf("read source dir: %w", err)
 	}
 	skip := map[string]bool{".git": true, "node_modules": true, ".venv": true, "venv": true, "__pycache__": true, ".dispatcher": true}
 	var paths []string
@@ -214,18 +215,18 @@ func buildConfidentialPayload(w types.WorkloadSpec) (attest.Payload, error) {
 		}
 		paths = append(paths, e.Name())
 	}
-	sourceTar, err := attest.TarGz(w.Source.Path, paths)
+	sourceTar, err := agent.TarGz(w.Source.Path, paths)
 	if err != nil {
-		return attest.Payload{}, fmt.Errorf("tar source: %w", err)
+		return agent.Payload{}, fmt.Errorf("tar source: %w", err)
 	}
 
 	// .env is optional; delivered sealed, never over the untrusted channel clear.
 	dotenv, err := os.ReadFile(filepath.Join(w.Source.Path, ".env"))
 	if err != nil && !os.IsNotExist(err) {
-		return attest.Payload{}, fmt.Errorf("read .env: %w", err)
+		return agent.Payload{}, fmt.Errorf("read .env: %w", err)
 	}
 
-	return attest.Payload{Command: command, SourceTarGz: sourceTar, DotEnv: dotenv, Outputs: w.Outputs}, nil
+	return agent.Payload{Command: command, SourceTarGz: sourceTar, DotEnv: dotenv, Outputs: w.Outputs}, nil
 }
 
 func csCommand(w types.WorkloadSpec) ([]string, error) {
@@ -345,7 +346,7 @@ func (a *ConfidentialSpaceAdapter) Artifacts(_ context.Context, h *adapter.RunHa
 	if err != nil {
 		return nil, fmt.Errorf("create artifacts dir: %w", err)
 	}
-	if err := attest.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
+	if err := agent.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
 		return nil, fmt.Errorf("extract outputs: %w", err)
 	}
 	var refs []adapter.ArtifactRef

@@ -9,7 +9,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/d0cd/dispatcher/internal/attest"
+	awsagent "github.com/d0cd/dispatcher/internal/attest/agent/aws"
 )
 
 func main() {
@@ -17,7 +17,7 @@ func main() {
 	flag.Parse()
 
 	log.Printf("dispatcher-attest-aws listening on %s", *addr)
-	if err := attest.RunAWSAgent(*addr); err != nil {
+	if err := awsagent.RunAgent(*addr); err != nil {
 		log.Fatal(err)
 	}
 }
