@@ -18,9 +18,15 @@ truth; the adapters read it (falling back to `DISPATCHER_*` env vars).
 dispatcher confidential pins                      # list current pins
 dispatcher confidential pin <target> --image … --measurement …
 dispatcher confidential capture <target> <source> [--pin]
+dispatcher confidential build <target>            # build + capture + pin (Nitro; guidance for the rest)
 ```
 
 `<target>` is `gcp` | `aws-nitro` | `azure-snp`.
+
+`build` wraps the whole build → capture → pin for **AWS Nitro** (a single-host
+build); GCP has no pre-build (the per-run workload container is measured at run
+time) and Azure is a multi-host build (mkosi → VHD → gallery), so `build` prints
+the exact next step for those.
 
 ## Per cloud
 
@@ -36,13 +42,18 @@ dispatcher run .        # confidential GCP run
 
 ### AWS Nitro (enclave PCR0)
 
-Build the EIF on a Nitro instance (`deploy/nitro/build-eif.sh`), which prints the
-`Measurements` JSON. Capture PCR0 and pin the EIF + parent proxy:
+On a Nitro instance, one command builds the EIF, captures PCR0, and pins it:
+
+```
+dispatcher confidential build aws-nitro --repo-root . --proxy dispatcher-nitro-proxy
+dispatcher run .        # workload with confidential.type: nitro
+```
+
+Or capture from an already-built EIF's `nitro-cli describe-eif` JSON:
 
 ```
 dispatcher confidential capture aws-nitro describe-eif.json \
     --eif dispatcher-attest-nitro.eif --proxy dispatcher-nitro-proxy --pin
-dispatcher run .        # workload with confidential.type: nitro
 ```
 
 ### Azure (measured CVM — PCR11 via dm-verity)

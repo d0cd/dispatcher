@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -177,6 +179,83 @@ func fetchAttestToken(endpoint string) (string, error) {
 	return r.Token, nil
 }
 
+var confidentialBuildFlags struct {
+	repoRoot string
+	eif      string
+	proxy    string
+}
+
+var confidentialBuildCmd = &cobra.Command{
+	Use:   "build <aws-nitro|gcp|azure-snp>",
+	Short: "Build a measured image, capture its measurement, and pin it",
+	Long: "Runs the per-cloud build, then captures + pins the measurement. The build\n" +
+		"is irreducibly per-cloud; only AWS Nitro is a single-host build this wraps.\n" +
+		"  aws-nitro  build-eif.sh -> PCR0 -> pin (run on a Nitro instance)\n" +
+		"  gcp        no pre-build: the per-run workload container is measured at run time\n" +
+		"  azure-snp  multi-host (mkosi -> VHD -> gallery); see docs/confidential-azure-uki.md",
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		target, err := parseTarget(args[0])
+		if err != nil {
+			return err
+		}
+		switch target {
+		case confidential.AWSNitro:
+			return buildNitro(cmd)
+		case confidential.GCP:
+			return fmt.Errorf("GCP Confidential Space measures the per-run workload container (agent + workload), " +
+				"built and allowlisted during `dispatcher run` — there is no static image to pre-build. " +
+				"For a pre-built digest-pinned agent image, use `dispatcher confidential capture gcp <ref>@sha256:<digest> --pin`")
+		case confidential.AzureSNP:
+			return fmt.Errorf("the Azure measured image is a multi-host build (mkosi → VHD → ConfidentialVm gallery image); " +
+				"follow deploy/azure-uki/mkosi/build-and-upload.md, boot a CVM, then " +
+				"`dispatcher confidential capture azure-snp http://<cvm>:8443 --image <gallery-id> --pin`")
+		}
+		return fmt.Errorf("unknown target %q", target)
+	},
+}
+
+// buildNitro builds the enclave EIF (deploy/nitro/build-eif.sh) on a Nitro host,
+// describes it for PCR0, and pins the EIF + PCR0 + proxy. Needs docker + nitro-cli.
+func buildNitro(cmd *cobra.Command) error {
+	repo := confidentialBuildFlags.repoRoot
+	if repo == "" {
+		repo = "."
+	}
+	if confidentialBuildFlags.proxy == "" {
+		return fmt.Errorf("--proxy is required (the cross-compiled dispatcher-nitro-proxy path)")
+	}
+	eif := confidentialBuildFlags.eif
+	if eif == "" {
+		eif = filepath.Join(repo, "dispatcher-attest-nitro.eif")
+	}
+	if _, err := exec.LookPath("nitro-cli"); err != nil {
+		return fmt.Errorf("nitro-cli not found — run `dispatcher confidential build aws-nitro` on a Nitro-enabled instance (see docs/confidential-nitro.md)")
+	}
+
+	fmt.Fprintln(cmd.OutOrStdout(), "building EIF (deploy/nitro/build-eif.sh)…")
+	build := exec.Command("bash", filepath.Join(repo, "deploy/nitro/build-eif.sh"))
+	build.Env = append(os.Environ(), "EIF="+eif)
+	build.Stdout, build.Stderr = cmd.OutOrStderr(), cmd.OutOrStderr()
+	if err := build.Run(); err != nil {
+		return fmt.Errorf("build-eif.sh: %w", err)
+	}
+
+	describe, err := exec.Command("nitro-cli", "describe-eif", "--eif-path", eif).Output()
+	if err != nil {
+		return fmt.Errorf("nitro-cli describe-eif: %w", err)
+	}
+	pcr0, err := confidential.CaptureNitroPCR0(describe)
+	if err != nil {
+		return err
+	}
+	pin := confidential.Pin{
+		Image: eif, Measurement: pcr0, CapturedAt: nowRFC3339(),
+		Extra: map[string]string{"proxy": confidentialBuildFlags.proxy},
+	}
+	return savePin(cmd, confidential.AWSNitro, pin)
+}
+
 func savePin(cmd *cobra.Command, target confidential.Target, pin confidential.Pin) error {
 	path, err := confidential.DefaultPath()
 	if err != nil {
@@ -212,5 +291,8 @@ func init() {
 	confidentialCaptureCmd.Flags().StringVar(&confidentialCaptureFlags.eif, "eif", "", "aws-nitro: the EIF path to pin")
 	confidentialCaptureCmd.Flags().StringVar(&confidentialCaptureFlags.image, "image", "", "azure-snp: the gallery image id to pin")
 	confidentialCaptureCmd.Flags().StringVar(&confidentialCaptureFlags.proxy, "proxy", "", "aws-nitro: the parent proxy binary path to pin")
-	confidentialCmd.AddCommand(confidentialPinsCmd, confidentialPinCmd, confidentialCaptureCmd)
+	confidentialBuildCmd.Flags().StringVar(&confidentialBuildFlags.repoRoot, "repo-root", ".", "aws-nitro: the dispatcher source tree (has deploy/nitro/build-eif.sh)")
+	confidentialBuildCmd.Flags().StringVar(&confidentialBuildFlags.eif, "eif", "", "aws-nitro: output EIF path (default <repo-root>/dispatcher-attest-nitro.eif)")
+	confidentialBuildCmd.Flags().StringVar(&confidentialBuildFlags.proxy, "proxy", "", "aws-nitro: the parent dispatcher-nitro-proxy binary path")
+	confidentialCmd.AddCommand(confidentialPinsCmd, confidentialPinCmd, confidentialCaptureCmd, confidentialBuildCmd)
 }
