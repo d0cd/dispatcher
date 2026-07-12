@@ -127,9 +127,22 @@ so re-capture and re-pin per image.
 ## Status
 
 - ✅ Verifier (`MAAMeasuredBoot`, PCR pinning) — done and unit-tested.
-- ✅ Build assets + recipe (this doc, `deploy/azure-uki/`).
-- ✅ Live-probed the fork: CVM Secure-Boot-off is accepted + the agent/MAA egress
-  work, but the shared MAA denies `secureboot==false` (finding above).
-- ⏳ Remaining live build: stand up a custom MAA instance with a policy that
-  permits `secureboot==false` (option 2), OR solve MOK-signed UKI under Secure
-  Boot on (option 1); then build the UKI image, capture PCR4, and validate.
+- ✅ **Direct SNP+vTPM verification + agent — DONE and LIVE-VALIDATED** (the
+  chosen approach; supersedes the MAA/PCR4 path). `verifyAzureSNP` +
+  `dispatcher-attest-azuresnp` proven end-to-end on a real CVM: no MAA, pins PCR11.
+- ⏳ **Measured image (agent → PCR11): the remaining piece.** Live attempts found:
+  - The stock Azure Ubuntu 24.04 CVM is a **snapd-managed, immutable, UKI image**
+    (no loose kernel/initrd; `snapd_recovery_mode=cloudimg-rootfs`) — it can't be
+    modified in place to fold the agent into the measured initrd. A purpose-built
+    image is required.
+  - Its OS disk is **plain ext4** under `VMGuestStateOnly` (no TPM-sealed LUKS), so
+    changing PCRs does **not** brick it — good.
+  - **mkosi 20.2 on Ubuntu 24.04 does not build cleanly**: Ubuntu ships no
+    `bootctl` (shimmable) and mkosi's package lists reference pre-`t64` names
+    (`libtss2-mu0` etc.). This is a known ecosystem friction.
+  - **Recommended path for the image build** (a dedicated effort): a **newer
+    mkosi** with a **Debian or Fedora base** (where UKI + dm-verity build cleanly),
+    or adopt **Constellation's** prebuilt measured images — not Ubuntu-24.04 +
+    mkosi-20.2. Then: verity-protected root → roothash in the UKI cmdline → PCR11,
+    upload to a Shared Image Gallery (ConfidentialVmSupported), boot a CVM, capture
+    PCR11, pin. The verifier + agent are ready to consume it unchanged.
