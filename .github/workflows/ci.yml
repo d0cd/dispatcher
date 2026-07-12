@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - name: gofmt
@@ -44,6 +44,22 @@ jobs:
           ./dispatcher --version
           ./dispatcher --help >/dev/null
 
+      # Confidential-image durability guard. Measurements are content-addressed, so
+      # a change to the attestation agent, its build config, or deps invalidates a
+      # pinned image's measurement. When pins are committed to deploy/confidential-pins.yaml
+      # (produced by `confidential capture --pin --pins …`), this fails if any drifted
+      # from the tree — the signal to rebuild, re-capture, and re-pin. It does not
+      # build images (that needs the per-cloud hosts). The guard is inactive, and says
+      # so, until the registry is committed.
+      - name: confidential pin drift guard
+        run: |
+          if [ -f deploy/confidential-pins.yaml ]; then
+            ./dispatcher confidential check --pins deploy/confidential-pins.yaml --repo-root .
+          else
+            echo "drift guard inactive: no committed pins at deploy/confidential-pins.yaml"
+            echo "activate with: dispatcher confidential capture --pin --pins deploy/confidential-pins.yaml …"
+          fi
+
       # Dependency/stdlib CVE scan. Non-blocking: a freshly-disclosed stdlib
       # advisory shouldn't red the build before the toolchain is patched — it
       # surfaces as an annotation to act on.
@@ -63,7 +79,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.24'
+          go-version: '1.25'
           cache: true
 
       - uses: helm/kind-action@v1

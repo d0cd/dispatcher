@@ -1,6 +1,7 @@
 package confidential
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -40,6 +41,27 @@ func TestRegistry_RoundTrip(t *testing.T) {
 
 	_, ok = got.Get(GCP)
 	assert.False(t, ok, "an unset target has no pin")
+}
+
+// TestSave_AtomicAndPrivate: a saved registry is 0600 and leaves no temp file
+// behind, so a crash mid-write can't surface a torn or world-readable registry.
+func TestSave_AtomicAndPrivate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "confidential-pins.yaml")
+
+	r := &Registry{}
+	r.Set(GCP, Pin{Image: "ref@sha256:x", Measurement: "sha256:x"})
+	require.NoError(t, r.Save(path))
+	require.NoError(t, r.Save(path)) // overwrite an existing registry
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "registry is owner-only")
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "no leftover temp file")
+	assert.Equal(t, "confidential-pins.yaml", entries[0].Name())
 }
 
 // TestLoad_MissingIsEmpty: a missing registry file loads as empty (not an error),

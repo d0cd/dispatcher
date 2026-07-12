@@ -32,6 +32,7 @@ type Pin struct {
 	Measurement string            `yaml:"measurement"`           // digest / PCR0 / PCR11
 	Extra       map[string]string `yaml:"extra,omitempty"`       // target-specific artifacts
 	CapturedAt  string            `yaml:"captured_at,omitempty"` // when the measurement was captured
+	InputsHash  string            `yaml:"inputs_hash,omitempty"` // hash of the measurement inputs at capture (drift check)
 }
 
 // Registry is the single source of truth for measured-image pins: the run path
@@ -61,20 +62,45 @@ func Load(path string) (*Registry, error) {
 }
 
 // Save writes the registry to path atomically (0600 — it records image identities,
-// not secrets, but stays with the run state's posture).
+// not secrets, but stays with the run state's posture). It writes to a unique temp
+// file in the same directory, fsyncs it, then renames over path, removing the temp
+// on any error — so a crash or a concurrent Save can't leave a torn or
+// world-readable registry, and two writers can't collide on a shared temp name.
 func (r *Registry) Save(path string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create pins dir: %w", err)
 	}
 	data, err := yaml.Marshal(r)
 	if err != nil {
 		return fmt.Errorf("marshal pins: %w", err)
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	tmp, err := os.CreateTemp(dir, ".confidential-pins-*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp pins: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op after a successful rename
+
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod temp pins: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write pins: %w", err)
 	}
-	return os.Rename(tmp, path)
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync pins: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close pins: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("commit pins %s: %w", path, err)
+	}
+	return nil
 }
 
 // Get returns the pin for a target, or false if unset.

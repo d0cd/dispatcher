@@ -1,11 +1,9 @@
 package cli
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/confidential"
 )
 
@@ -64,6 +63,8 @@ var confidentialPinFlags struct {
 	image       string
 	measurement string
 	proxy       string
+	repoRoot    string
+	pins        string
 }
 
 var confidentialPinCmd = &cobra.Command{
@@ -86,15 +87,17 @@ var confidentialPinCmd = &cobra.Command{
 		if confidentialPinFlags.proxy != "" {
 			pin.Extra = map[string]string{"proxy": confidentialPinFlags.proxy}
 		}
-		return savePin(cmd, target, pin)
+		return savePin(cmd, target, pin, confidentialPinFlags.repoRoot, confidentialPinFlags.pins)
 	},
 }
 
 var confidentialCaptureFlags struct {
-	pin   bool
-	eif   string
-	image string
-	proxy string
+	pin      bool
+	eif      string
+	image    string
+	proxy    string
+	repoRoot string
+	pins     string
 }
 
 var confidentialCaptureCmd = &cobra.Command{
@@ -119,7 +122,7 @@ var confidentialCaptureCmd = &cobra.Command{
 			fmt.Fprintln(cmd.OutOrStdout(), "(re-run with --pin to record it)")
 			return nil
 		}
-		return savePin(cmd, target, pin)
+		return savePin(cmd, target, pin, confidentialCaptureFlags.repoRoot, confidentialCaptureFlags.pins)
 	},
 }
 
@@ -144,11 +147,10 @@ func captureMeasurement(target confidential.Target, source string) (confidential
 		}
 		return pin, nil
 	case confidential.AzureSNP:
-		token, err := fetchAttestToken(source)
-		if err != nil {
-			return confidential.Pin{}, err
-		}
-		pcr11, err := confidential.CaptureAzurePCR11(token)
+		// Verify the full SEV-SNP + vTPM chain (fresh nonce, AK-bound quote) and derive
+		// the hardware-attested PCR11, so a compromised or MITM'd /attest endpoint can't
+		// poison the pinned measurement.
+		pcr11, err := attest.CaptureAzureSNPMeasurement(context.Background(), source)
 		if err != nil {
 			return confidential.Pin{}, err
 		}
@@ -157,32 +159,11 @@ func captureMeasurement(target confidential.Target, source string) (confidential
 	return confidential.Pin{}, fmt.Errorf("unknown target %q", target)
 }
 
-// fetchAttestToken fetches the agent's /attest evidence bundle from a booted
-// measured CVM, so its live PCR11 can be captured.
-func fetchAttestToken(endpoint string) (string, error) {
-	u := strings.TrimRight(endpoint, "/") + "/attest?nonce=" + url.QueryEscape(strings.Repeat("00", 32))
-	resp, err := (&http.Client{Timeout: 45 * time.Second}).Get(u)
-	if err != nil {
-		return "", fmt.Errorf("fetch %s: %w", endpoint, err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("agent /attest returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var r struct {
-		Token string `json:"token"`
-	}
-	if err := json.Unmarshal(body, &r); err != nil || r.Token == "" {
-		return "", fmt.Errorf("agent /attest response has no token")
-	}
-	return r.Token, nil
-}
-
 var confidentialBuildFlags struct {
 	repoRoot string
 	eif      string
 	proxy    string
+	pins     string
 }
 
 var confidentialBuildCmd = &cobra.Command{
@@ -253,11 +234,88 @@ func buildNitro(cmd *cobra.Command) error {
 		Image: eif, Measurement: pcr0, CapturedAt: nowRFC3339(),
 		Extra: map[string]string{"proxy": confidentialBuildFlags.proxy},
 	}
-	return savePin(cmd, confidential.AWSNitro, pin)
+	return savePin(cmd, confidential.AWSNitro, pin, repo, confidentialBuildFlags.pins)
 }
 
-func savePin(cmd *cobra.Command, target confidential.Target, pin confidential.Pin) error {
-	path, err := confidential.DefaultPath()
+var confidentialCheckFlags struct {
+	repoRoot string
+	pins     string
+}
+
+var confidentialCheckCmd = &cobra.Command{
+	Use:   "check",
+	Short: "Fail if any pinned image's measurement inputs changed since capture (CI drift guard)",
+	Long: "Recompute each pin's measurement-input hash (agent source, build config, deps) and\n" +
+		"fail if it no longer matches what was recorded at capture — the signal that the\n" +
+		"measured image must be rebuilt, re-captured, and re-pinned. Run this in CI so a\n" +
+		"routine agent or build change can't silently invalidate a pin. It does not build\n" +
+		"images (that needs the per-cloud hosts); it only detects drift.",
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		// An explicitly requested registry that is absent is an error, not an empty
+		// pass — otherwise a mistyped path or a not-yet-committed file reads as
+		// "verified". Only the implicit state-dir default may be absent (fresh machine).
+		if confidentialCheckFlags.pins != "" {
+			if _, err := os.Stat(confidentialCheckFlags.pins); err != nil {
+				return fmt.Errorf("pin registry %q not found — commit it or produce it with "+
+					"`confidential capture --pin --pins %s` (an absent registry is not an empty pass): %w",
+					confidentialCheckFlags.pins, confidentialCheckFlags.pins, err)
+			}
+		}
+		pins := confidentialCheckFlags.pins
+		if pins == "" {
+			p, err := confidential.DefaultPath()
+			if err != nil {
+				return err
+			}
+			pins = p
+		}
+		return runConfidentialCheck(cmd.OutOrStdout(), confidentialCheckFlags.repoRoot, pins)
+	},
+}
+
+// runConfidentialCheck loads the pin registry at pinsPath and fails if any pin's
+// measurement inputs drifted from repoRoot. A missing registry is a clean pass.
+func runConfidentialCheck(out io.Writer, repoRoot, pinsPath string) error {
+	if repoRoot == "" {
+		repoRoot = "."
+	}
+	reg, err := confidential.Load(pinsPath)
+	if err != nil {
+		return err
+	}
+	stale, err := confidential.CheckPins(reg, repoRoot)
+	if err != nil {
+		return err
+	}
+	if len(stale) == 0 {
+		fmt.Fprintf(out, "confidential pins current (%s)\n", pinsPath)
+		return nil
+	}
+	names := make([]string, len(stale))
+	for i, s := range stale {
+		names[i] = string(s.Target)
+		fmt.Fprintf(out, "STALE %s: measurement inputs changed since capture\n", s.Target)
+	}
+	return fmt.Errorf("confidential pin(s) stale [%s] — rebuild the measured image, then re-capture and re-pin (dispatcher confidential build / capture --pin)", strings.Join(names, ", "))
+}
+
+// savePin writes pin to the registry (pinsPath, or the state-dir default), first
+// recording the target's measurement-inputs hash from repoRoot so a later
+// `confidential check` can detect drift. The hashing error is surfaced, not
+// swallowed: a pin with no drift baseline is silently exempt from the guard, so if
+// the inputs can't be hashed (e.g. repoRoot isn't the source tree) the pin is
+// refused rather than saved unprotected. GCP has no static inputs (empty hash, no
+// error), which is expected.
+func savePin(cmd *cobra.Command, target confidential.Target, pin confidential.Pin, repoRoot, pinsPath string) error {
+	if pin.InputsHash == "" {
+		h, err := confidential.InputsHash(repoRoot, target)
+		if err != nil {
+			return fmt.Errorf("record measurement inputs for %s (is --repo-root %q the dispatcher source tree?): %w", target, repoRoot, err)
+		}
+		pin.InputsHash = h
+	}
+	path, err := pinsRegistryPath(pinsPath)
 	if err != nil {
 		return err
 	}
@@ -271,6 +329,15 @@ func savePin(cmd *cobra.Command, target confidential.Target, pin confidential.Pi
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "pinned %s = %s (%s)\n", target, pin.Measurement, path)
 	return nil
+}
+
+// pinsRegistryPath resolves the registry path: the explicit flag, or the state-dir
+// default. It is the single place write and check commands agree on a location.
+func pinsRegistryPath(flag string) (string, error) {
+	if flag != "" {
+		return flag, nil
+	}
+	return confidential.DefaultPath()
 }
 
 func parseTarget(s string) (confidential.Target, error) {
@@ -287,12 +354,19 @@ func init() {
 	confidentialPinCmd.Flags().StringVar(&confidentialPinFlags.image, "image", "", "measured image (container ref / EIF path / gallery image id)")
 	confidentialPinCmd.Flags().StringVar(&confidentialPinFlags.measurement, "measurement", "", "the measurement (digest / PCR0 / PCR11)")
 	confidentialPinCmd.Flags().StringVar(&confidentialPinFlags.proxy, "proxy", "", "aws-nitro: parent vsock-proxy binary path")
+	confidentialPinCmd.Flags().StringVar(&confidentialPinFlags.repoRoot, "repo-root", ".", "the dispatcher source tree to hash measurement inputs from")
+	confidentialPinCmd.Flags().StringVar(&confidentialPinFlags.pins, "pins", "", "pin registry to write (default: the state-dir registry)")
 	confidentialCaptureCmd.Flags().BoolVar(&confidentialCaptureFlags.pin, "pin", false, "record the captured measurement in the registry")
 	confidentialCaptureCmd.Flags().StringVar(&confidentialCaptureFlags.eif, "eif", "", "aws-nitro: the EIF path to pin")
 	confidentialCaptureCmd.Flags().StringVar(&confidentialCaptureFlags.image, "image", "", "azure-snp: the gallery image id to pin")
 	confidentialCaptureCmd.Flags().StringVar(&confidentialCaptureFlags.proxy, "proxy", "", "aws-nitro: the parent proxy binary path to pin")
+	confidentialCaptureCmd.Flags().StringVar(&confidentialCaptureFlags.repoRoot, "repo-root", ".", "the dispatcher source tree to hash measurement inputs from")
+	confidentialCaptureCmd.Flags().StringVar(&confidentialCaptureFlags.pins, "pins", "", "pin registry to write (default: the state-dir registry)")
 	confidentialBuildCmd.Flags().StringVar(&confidentialBuildFlags.repoRoot, "repo-root", ".", "aws-nitro: the dispatcher source tree (has deploy/nitro/build-eif.sh)")
 	confidentialBuildCmd.Flags().StringVar(&confidentialBuildFlags.eif, "eif", "", "aws-nitro: output EIF path (default <repo-root>/dispatcher-attest-nitro.eif)")
 	confidentialBuildCmd.Flags().StringVar(&confidentialBuildFlags.proxy, "proxy", "", "aws-nitro: the parent dispatcher-nitro-proxy binary path")
-	confidentialCmd.AddCommand(confidentialPinsCmd, confidentialPinCmd, confidentialCaptureCmd, confidentialBuildCmd)
+	confidentialBuildCmd.Flags().StringVar(&confidentialBuildFlags.pins, "pins", "", "pin registry to write (default: the state-dir registry)")
+	confidentialCheckCmd.Flags().StringVar(&confidentialCheckFlags.repoRoot, "repo-root", ".", "the dispatcher source tree to hash measurement inputs from")
+	confidentialCheckCmd.Flags().StringVar(&confidentialCheckFlags.pins, "pins", "", "pin registry to check (default: the state-dir registry)")
+	confidentialCmd.AddCommand(confidentialPinsCmd, confidentialPinCmd, confidentialCaptureCmd, confidentialBuildCmd, confidentialCheckCmd)
 }

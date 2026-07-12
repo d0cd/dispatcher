@@ -1,8 +1,6 @@
 package confidential
 
 import (
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -14,17 +12,34 @@ import (
 // capture step is deterministic and shared.
 
 // CaptureGCP returns the pin for a digest-pinned Confidential Space image — the
-// container digest IS the attested measurement.
+// container digest IS the attested measurement, so it is validated for shape.
 func CaptureGCP(imageRef string) (Pin, error) {
 	at := strings.Index(imageRef, "@sha256:")
 	if at < 0 {
 		return Pin{}, fmt.Errorf("image must be digest-pinned (…@sha256:…), got %q", imageRef)
 	}
-	return Pin{Image: imageRef, Measurement: imageRef[at+1:]}, nil
+	digest := imageRef[at+1:]
+	if err := ValidateImageDigest(digest); err != nil {
+		return Pin{}, err
+	}
+	return Pin{Image: imageRef, Measurement: digest}, nil
+}
+
+// ValidateImageDigest checks a container image digest is sha256:<64 lowercase hex>
+// — the canonical shape GCP Confidential Space attests. The digest IS the pinned
+// measurement, so a truncated/typo'd/duplicated (…@sha256:…@sha256:…) value must be
+// rejected, not silently pinned.
+func ValidateImageDigest(digest string) error {
+	hexPart, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || !isHexLen(hexPart, 64) {
+		return fmt.Errorf("image digest must be sha256:<64 hex>, got %q", digest)
+	}
+	return nil
 }
 
 // CaptureNitroPCR0 extracts PCR0 (the enclave-image measurement) from the JSON
-// `nitro-cli describe-eif` (or build-enclave) emits.
+// `nitro-cli describe-eif` (or build-enclave) emits. PCR0 is a SHA-384 (96 hex)
+// value; it is validated so a malformed measurement is never pinned.
 func CaptureNitroPCR0(describeEIF []byte) (string, error) {
 	var d struct {
 		Measurements struct {
@@ -34,33 +49,21 @@ func CaptureNitroPCR0(describeEIF []byte) (string, error) {
 	if err := json.Unmarshal(describeEIF, &d); err != nil {
 		return "", fmt.Errorf("parse nitro-cli output: %w", err)
 	}
-	if d.Measurements.PCR0 == "" {
-		return "", fmt.Errorf("no PCR0 in nitro-cli output")
+	if !isHexLen(d.Measurements.PCR0, 96) {
+		return "", fmt.Errorf("nitro-cli PCR0 must be 96 hex chars (SHA-384), got %q", d.Measurements.PCR0)
 	}
 	return d.Measurements.PCR0, nil
 }
 
-// CaptureAzurePCR11 extracts PCR11 (hex) from the in-CVM agent's /attest evidence
-// bundle (the base64-JSON "token"), the same evidence the verifier consumes. The
-// measured CVM must be booted from the pinned image to read its real PCR11.
-func CaptureAzurePCR11(attestToken string) (string, error) {
-	raw, err := base64.StdEncoding.DecodeString(attestToken)
-	if err != nil {
-		return "", fmt.Errorf("decode evidence: %w", err)
+// isHexLen reports whether s is exactly n lowercase hex digits.
+func isHexLen(s string, n int) bool {
+	if len(s) != n {
+		return false
 	}
-	var ev struct {
-		PCRs map[string]string `json:"pcrs"`
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
 	}
-	if err := json.Unmarshal(raw, &ev); err != nil {
-		return "", fmt.Errorf("parse evidence: %w", err)
-	}
-	b64, ok := ev.PCRs["11"]
-	if !ok || b64 == "" {
-		return "", fmt.Errorf("evidence carries no pcr11")
-	}
-	pcr, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil {
-		return "", fmt.Errorf("decode pcr11: %w", err)
-	}
-	return hex.EncodeToString(pcr), nil
+	return true
 }

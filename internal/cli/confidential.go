@@ -217,6 +217,9 @@ func confidentialImageBuilder(project string) (func(context.Context, types.Workl
 			return nil, fmt.Errorf("DISPATCHER_CS_AGENT_IMAGE must be digest-pinned (…@sha256:…), got %q", ref)
 		}
 		digest := ref[at+1:]
+		if err := confidential.ValidateImageDigest(digest); err != nil {
+			return nil, fmt.Errorf("DISPATCHER_CS_AGENT_IMAGE: %w", err)
+		}
 		return func(context.Context, types.WorkloadSpec) (string, string, error) { return ref, digest, nil }, nil
 	}
 	repoRoot := os.Getenv("DISPATCHER_CS_REPO_ROOT")
