@@ -142,6 +142,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&rootFlags.json, "json", false, "shorthand for --output json")
 
 	rootCmd.AddCommand(planCmd)
+	rootCmd.AddCommand(confidentialCmd)
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(targetsCmd)
 }
