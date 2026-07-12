@@ -10,8 +10,19 @@ import (
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/cloudvm"
+	"github.com/d0cd/dispatcher/internal/confidential"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// orEnv prefers a registry-resolved value, falling back to an environment
+// variable. It is how the confidential adapters read pins from the unified
+// registry while staying backward-compatible with the DISPATCHER_* env vars.
+func orEnv(v, env string) string {
+	if v != "" {
+		return v
+	}
+	return os.Getenv(env)
+}
 
 // usesConfidentialSpace reports whether a run should take the GCP Confidential
 // Space container path instead of the SSH VM path: a confidential GCP run with
@@ -82,9 +93,10 @@ func newAWSConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, error)
 // (a cross-compiled dispatcher-nitro-proxy). Fails closed when unconfigured; build
 // the EIF + read PCR0 with deploy/nitro/build-eif.sh.
 func newNitroConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, error) {
-	eif := os.Getenv("DISPATCHER_AWS_NITRO_EIF")
-	proxy := os.Getenv("DISPATCHER_AWS_NITRO_PROXY_BIN")
-	pcr0 := os.Getenv("DISPATCHER_AWS_NITRO_PCR0")
+	pin := confidential.Resolve(confidential.AWSNitro)
+	eif := orEnv(pin.Image, "DISPATCHER_AWS_NITRO_EIF")
+	proxy := orEnv(pin.Extra["proxy"], "DISPATCHER_AWS_NITRO_PROXY_BIN")
+	pcr0 := orEnv(pin.Measurement, "DISPATCHER_AWS_NITRO_PCR0")
 	if eif == "" || proxy == "" || pcr0 == "" {
 		return nil, fmt.Errorf("confidential AWS Nitro runs need the pinned enclave image: set DISPATCHER_AWS_NITRO_EIF, " +
 			"DISPATCHER_AWS_NITRO_PROXY_BIN (a cross-compiled dispatcher-nitro-proxy), and DISPATCHER_AWS_NITRO_PCR0 " +
@@ -103,8 +115,9 @@ func newNitroConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, erro
 // DISPATCHER_AZURE_SNP_PCR11 the pinned PCR11 (from deploy/azure-uki/mkosi). Fails
 // closed when unconfigured.
 func newAzureSNPConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, error) {
-	image := os.Getenv("DISPATCHER_AZURE_SNP_IMAGE")
-	pcr11 := os.Getenv("DISPATCHER_AZURE_SNP_PCR11")
+	pin := confidential.Resolve(confidential.AzureSNP)
+	image := orEnv(pin.Image, "DISPATCHER_AZURE_SNP_IMAGE")
+	pcr11 := orEnv(pin.Measurement, "DISPATCHER_AZURE_SNP_PCR11")
 	if image == "" || pcr11 == "" {
 		return nil, fmt.Errorf("confidential Azure measured runs need the pinned measured image: set DISPATCHER_AZURE_SNP_IMAGE " +
 			"(a ConfidentialVm gallery image id) and DISPATCHER_AZURE_SNP_PCR11 (its measured PCR11); build with deploy/azure-uki/mkosi")
@@ -196,7 +209,9 @@ func newConfidentialSpaceAdapter(ctx context.Context) (adapter.TargetAdapter, er
 // a prebuilt digest-pinned image (DISPATCHER_CS_AGENT_IMAGE) skips the build;
 // otherwise it's built from the dispatcher source (DISPATCHER_CS_REPO_ROOT).
 func confidentialImageBuilder(project string) (func(context.Context, types.WorkloadSpec) (string, string, error), error) {
-	if ref := os.Getenv("DISPATCHER_CS_AGENT_IMAGE"); ref != "" {
+	// A pinned, digest-addressed image (the registry pin, or DISPATCHER_CS_AGENT_IMAGE)
+	// skips the build — the digest IS the GCP measurement.
+	if ref := orEnv(confidential.Resolve(confidential.GCP).Image, "DISPATCHER_CS_AGENT_IMAGE"); ref != "" {
 		at := strings.Index(ref, "@sha256:")
 		if at < 0 {
 			return nil, fmt.Errorf("DISPATCHER_CS_AGENT_IMAGE must be digest-pinned (…@sha256:…), got %q", ref)

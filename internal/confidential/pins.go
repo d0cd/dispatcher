@@ -94,6 +94,23 @@ func (r *Registry) Set(t Target, p Pin) {
 	r.Pins[t] = p
 }
 
+// Resolve returns the pin for a target from the default registry, or an empty pin
+// (never an error) when there's no registry or no pin — callers then fall back to
+// environment variables. This is how the run path reads the registry without every
+// caller handling load errors.
+func Resolve(t Target) Pin {
+	path, err := DefaultPath()
+	if err != nil {
+		return Pin{}
+	}
+	r, err := Load(path)
+	if err != nil {
+		return Pin{}
+	}
+	p, _ := r.Get(t)
+	return p
+}
+
 // DefaultPath is where the registry lives by default: the dispatcher state dir.
 func DefaultPath() (string, error) {
 	dir, err := statedir.Dir()
