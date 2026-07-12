@@ -127,6 +127,55 @@ func TestVerifyAzureSNP_Accepts(t *testing.T) {
 	assert.Equal(t, channelKey, gotKey, "the bound channel key is returned to seal to")
 }
 
+// TestCaptureAzureSNPPCR11_DerivesVerifiedPCR11: capture-time verification of a
+// genuine bundle returns the quoted PCR11 without a pre-existing pin — so the value
+// pinned at capture is one the hardware actually attested, not one an endpoint
+// merely claimed. A forged quote must be refused, closing the poisoned-pin gap.
+func TestCaptureAzureSNPPCR11_DerivesVerifiedPCR11(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+
+	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
+	got, err := captureAzureSNPPCR11(ev, roots, nonce)
+	require.NoError(t, err)
+	assert.Equal(t, hex.EncodeToString(pcr11), got, "capture derives the hardware-attested PCR11")
+}
+
+func TestCaptureAzureSNPPCR11_RejectsForgedQuote(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+
+	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, func(e *agent.AzureSNPEvidence) {
+		other, _ := rsa.GenerateKey(rand.Reader, 2048)
+		signed := sha256.Sum256(e.Quote)
+		e.QuoteSig, _ = rsa.SignPKCS1v15(rand.Reader, other, crypto.SHA256, signed[:])
+	})
+	_, err := captureAzureSNPPCR11(ev, roots, nonce)
+	require.Error(t, err, "a bundle not signed by the bound AK cannot be captured")
+}
+
+// TestVerifyAzureSNP_RejectsUnquotedPinnedPCR: a pinned PCR that the signed quote
+// does not actually cover must fail — the value in the evidence map for it is
+// unverified, so it can't be trusted even if it equals the pin.
+func TestVerifyAzureSNP_RejectsUnquotedPinnedPCR(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+
+	// Add PCR7 to the evidence map that the quote (which covers only PCR11) never
+	// signed, then pin PCR7 — verification must reject it as unquoted.
+	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, func(e *agent.AzureSNPEvidence) {
+		e.PCRs[7] = make48(0x77)[:32]
+	})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+		Roots: roots, Nonce: nonce, PCRs: map[int]string{7: hex.EncodeToString(make48(0x77)[:32])},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "quote")
+}
+
 // TestVerifyAzureSNP_RejectsPCRMismatch: a different PCR11 (a different measured
 // image / agent) must fail.
 func TestVerifyAzureSNP_RejectsPCRMismatch(t *testing.T) {

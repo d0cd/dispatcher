@@ -38,75 +38,24 @@ type AzureSNPPolicy struct {
 	PCRs  map[int]string      // pinned PCR values (index → hex); PCR11 is the UKI
 }
 
-// verifyAzureSNP verifies the full chain and returns the PCR11 measurement + the
-// bound channel key to seal to.
+// verifyAzureSNP verifies the full chain against a policy that pins the measured
+// PCRs, returning the PCR11 measurement + the bound channel key to seal to.
 func verifyAzureSNP(ev agent.AzureSNPEvidence, p AzureSNPPolicy) (measurement string, channelKey []byte, err error) {
-	// 1. Genuine SEV-SNP hardware: the report signature + cert chain to a pinned ARK.
-	rep, err := parseSNPReport(ev.SNPReport)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse snp report: %w", err)
-	}
-	vcek, err := x509.ParseCertificate(ev.VCEK)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse vcek: %w", err)
-	}
-	ask, err := x509.ParseCertificate(ev.ASK)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse ask: %w", err)
-	}
-	if err := verifySNPChain(vcek, ask, p.Roots); err != nil {
-		return "", nil, fmt.Errorf("snp cert chain: %w", err)
-	}
-	if err := verifySNPSignature(rep, vcek); err != nil {
-		return "", nil, fmt.Errorf("snp report signature: %w", err)
-	}
-
-	// 2. REPORT_DATA binds the runtime data (its SHA-256 in the first 32 bytes), so
-	// the AK inside the runtime data is bound to this genuine hardware.
-	rd := sha256.Sum256(ev.RuntimeData)
-	if !bytes.Equal(rep.reportData[:32], rd[:]) {
-		return "", nil, fmt.Errorf("snp report does not bind the runtime data (AK not hardware-bound)")
-	}
-
-	// 3. Extract the vTPM Attestation Key.
-	ak, err := hclAkPub(ev.RuntimeData)
+	pcrs, quoted, channelKey, err := verifyAzureSNPEvidence(ev, p.Roots, p.Nonce)
 	if err != nil {
 		return "", nil, err
 	}
-
-	// 4. The TPM quote must be signed by that AK.
-	signed := sha256.Sum256(ev.Quote)
-	if err := rsa.VerifyPKCS1v15(ak, crypto.SHA256, signed[:], ev.QuoteSig); err != nil {
-		return "", nil, fmt.Errorf("quote signature: %w", err)
-	}
-	ad, err := legacytpm.DecodeAttestationData(ev.Quote)
-	if err != nil {
-		return "", nil, fmt.Errorf("parse quote: %w", err)
-	}
-	if ad.Type != legacytpm.TagAttestQuote || ad.AttestedQuoteInfo == nil {
-		return "", nil, fmt.Errorf("attestation is not a PCR quote")
-	}
-
-	// 5. Freshness + channel binding: the quote's extraData is this run's binding.
-	if len(p.Nonce) == 0 {
-		return "", nil, fmt.Errorf("azure snp policy nonce missing — fail closed")
-	}
-	if !bytes.Equal(ad.ExtraData, agent.MAABindingNonce(p.Nonce, ev.ChannelKey)) {
-		return "", nil, fmt.Errorf("quote extraData does not match this run's binding (replay/relay)")
-	}
-
-	// 6. The quote commits to a digest of the PCRs; recompute it from the provided
-	// values so we know they are the genuine quoted PCRs, not attacker-substituted.
-	if err := checkQuotedPCRs(ad.AttestedQuoteInfo, ev.PCRs); err != nil {
-		return "", nil, err
-	}
-
-	// 7. Pin the measured PCRs (PCR11 = the UKI carrying the agent).
+	// Pin the measured PCRs (PCR11 = the UKI carrying the agent). Each pinned PCR
+	// must be one the quote actually covered — a value in the evidence map that the
+	// AK never signed is unverified, so it can't be trusted even if it equals the pin.
 	if len(p.PCRs) == 0 {
 		return "", nil, fmt.Errorf("azure snp policy pins no PCRs — fail closed")
 	}
 	for idx, want := range p.PCRs {
-		got, ok := ev.PCRs[uint32(idx)]
+		if !containsInt(quoted, idx) {
+			return "", nil, fmt.Errorf("pinned pcr%d was not covered by the signed quote", idx)
+		}
+		got, ok := pcrs[uint32(idx)]
 		if !ok {
 			return "", nil, fmt.Errorf("evidence does not carry pcr%d", idx)
 		}
@@ -114,7 +63,120 @@ func verifyAzureSNP(ev agent.AzureSNPEvidence, p AzureSNPPolicy) (measurement st
 			return "", nil, fmt.Errorf("pcr%d does not match the pinned measured-image value", idx)
 		}
 	}
-	return hex.EncodeToString(ev.PCRs[11]), ev.ChannelKey, nil
+	return hex.EncodeToString(pcrs[11]), channelKey, nil
+}
+
+// verifyAzureSNPEvidence performs the genuineness, freshness, and quote-binding
+// checks — everything except comparing to a pinned PCR set — and returns the
+// verified PCR values, the PCR indices the quote actually covers, and the bound
+// channel key. Both the run-path attester (which compares to a pin) and capture
+// (which derives the value to pin) build on this, so a measurement is never pinned
+// or accepted without the same cryptographic proof.
+func verifyAzureSNPEvidence(ev agent.AzureSNPEvidence, roots []*x509.Certificate, nonce []byte) (pcrs map[uint32][]byte, quoted []int, channelKey []byte, err error) {
+	// 1. Genuine SEV-SNP hardware: the report signature + cert chain to a pinned ARK.
+	rep, err := parseSNPReport(ev.SNPReport)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse snp report: %w", err)
+	}
+	vcek, err := x509.ParseCertificate(ev.VCEK)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse vcek: %w", err)
+	}
+	ask, err := x509.ParseCertificate(ev.ASK)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse ask: %w", err)
+	}
+	if err := verifySNPChain(vcek, ask, roots); err != nil {
+		return nil, nil, nil, fmt.Errorf("snp cert chain: %w", err)
+	}
+	if err := verifySNPSignature(rep, vcek); err != nil {
+		return nil, nil, nil, fmt.Errorf("snp report signature: %w", err)
+	}
+
+	// 2. REPORT_DATA binds the runtime data (its SHA-256 in the first 32 bytes), so
+	// the AK inside the runtime data is bound to this genuine hardware.
+	rd := sha256.Sum256(ev.RuntimeData)
+	if !bytes.Equal(rep.reportData[:32], rd[:]) {
+		return nil, nil, nil, fmt.Errorf("snp report does not bind the runtime data (AK not hardware-bound)")
+	}
+
+	// 3. Extract the vTPM Attestation Key.
+	ak, err := hclAkPub(ev.RuntimeData)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	// 4. The TPM quote must be signed by that AK.
+	signed := sha256.Sum256(ev.Quote)
+	if err := rsa.VerifyPKCS1v15(ak, crypto.SHA256, signed[:], ev.QuoteSig); err != nil {
+		return nil, nil, nil, fmt.Errorf("quote signature: %w", err)
+	}
+	ad, err := legacytpm.DecodeAttestationData(ev.Quote)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("parse quote: %w", err)
+	}
+	if ad.Type != legacytpm.TagAttestQuote || ad.AttestedQuoteInfo == nil {
+		return nil, nil, nil, fmt.Errorf("attestation is not a PCR quote")
+	}
+
+	// 5. Freshness + channel binding: the quote's extraData is this run's binding.
+	if len(nonce) == 0 {
+		return nil, nil, nil, fmt.Errorf("azure snp nonce missing — fail closed")
+	}
+	if !bytes.Equal(ad.ExtraData, agent.MAABindingNonce(nonce, ev.ChannelKey)) {
+		return nil, nil, nil, fmt.Errorf("quote extraData does not match this run's binding (replay/relay)")
+	}
+
+	// 6. The quote commits to a digest of the PCRs; recompute it from the provided
+	// values so we know they are the genuine quoted PCRs, not attacker-substituted.
+	if err := checkQuotedPCRs(ad.AttestedQuoteInfo, ev.PCRs); err != nil {
+		return nil, nil, nil, err
+	}
+	return ev.PCRs, ad.AttestedQuoteInfo.PCRSelection.PCRs, ev.ChannelKey, nil
+}
+
+// CaptureAzureSNPMeasurement fetches the evidence bundle from a booted measured CVM
+// and returns its PCR11 only after full cryptographic verification (genuine SEV-SNP
+// hardware, AK-bound quote, a fresh random nonce, and PCR11 actually covered by the
+// signed quote) against the pinned AMD roots. It derives the measurement to pin
+// rather than trusting whatever the endpoint returns, so a compromised host or a
+// network MITM at the /attest endpoint cannot poison the pinned measurement — the
+// capture-time counterpart to NewAzureSNPAttester.
+func CaptureAzureSNPMeasurement(ctx context.Context, baseURL string) (string, error) {
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", fmt.Errorf("generate capture nonce: %w", err)
+	}
+	ev, err := endpointAzureSNPFetch(baseURL)(ctx, nonce)
+	if err != nil {
+		return "", fmt.Errorf("fetch azure snp evidence: %w", err)
+	}
+	return captureAzureSNPPCR11(ev, amdRoots, nonce)
+}
+
+// captureAzureSNPPCR11 verifies the evidence and returns its quoted PCR11.
+func captureAzureSNPPCR11(ev agent.AzureSNPEvidence, roots []*x509.Certificate, nonce []byte) (string, error) {
+	pcrs, quoted, _, err := verifyAzureSNPEvidence(ev, roots, nonce)
+	if err != nil {
+		return "", fmt.Errorf("verify azure snp evidence: %w", err)
+	}
+	if !containsInt(quoted, 11) {
+		return "", fmt.Errorf("evidence quote does not cover pcr11 — refusing to capture an unmeasured value")
+	}
+	v, ok := pcrs[11]
+	if !ok {
+		return "", fmt.Errorf("verified evidence carries no pcr11")
+	}
+	return hex.EncodeToString(v), nil
+}
+
+func containsInt(s []int, v int) bool {
+	for _, x := range s {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // azureSNPFetch obtains the direct-verification evidence bundle from the in-CVM
