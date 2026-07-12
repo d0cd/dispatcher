@@ -23,10 +23,12 @@ vTPM/MAA) — no hand-rolled crypto in any operational path. This doc is the
   On the SSH-VM paths the agent is scp'd after boot, so it's outside the launch
   measurement. What each measurement *does* anchor, and how each closes:
   - **GCP** — the workload container image digest (agent included). ✅ closed.
-  - **Azure** — the SEV-SNP launch measurement covers only the CVM firmware, but
-    the **vTPM measures the boot chain into PCRs that MAA attests** (PCR4 = the
-    boot application / UKI). **Verifier done** (`MAAMeasuredBoot`,
-    `DISPATCHER_AZURE_PCR*`); pending: build the custom UKI image + pin PCR4.
+  - **Azure** — ✅ **closed.** The agent is baked into a **dm-verity root** in a
+    custom mkosi image; the verity roothash rides in the UKI cmdline, measured into
+    **PCR11**, verified **directly** (SEV-SNP report + vTPM quote, no MAA — which
+    sidesteps MAA's 0–7 PCR limit and its secure-boot policy). Live-validated E2E
+    (`NewAzureSNPAttester`, `dispatcher-attest-azuresnp`, the mkosi image, and the
+    `AzureSNPConfidentialAdapter`). See `docs/confidential-azure-uki.md`.
   - **AWS** — EC2 SEV-SNP measures the AWS guest **firmware** only, and there is
     **no vTPM/PCR chain**, so the agent cannot be folded into the launch
     measurement via a custom AMI. The only path is **Nitro Enclaves**, where the
