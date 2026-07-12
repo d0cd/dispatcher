@@ -62,10 +62,14 @@ func azureConfidentialArgs(opts VMOptions) ([]string, error) {
 	if opts.ConfidentialType == "sev" {
 		return nil, fmt.Errorf("azure confidential VMs are sev-snp or tdx (chosen by SKU), not plain sev")
 	}
+	secureBoot := "true"
+	if opts.SecureBootDisabled {
+		secureBoot = "false"
+	}
 	return []string{
 		"--security-type", "ConfidentialVM",
 		"--enable-vtpm", "true",
-		"--enable-secure-boot", "true",
+		"--enable-secure-boot", secureBoot,
 		"--os-disk-security-encryption-type", "VMGuestStateOnly",
 	}, nil
 }

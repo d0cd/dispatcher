@@ -27,7 +27,18 @@ func usesConfidentialSpace(p *types.Plan) bool {
 // attestation on. `attestation: off` stays on the plain SSH path.
 func usesAzureConfidential(p *types.Plan) bool {
 	c := p.Workload.Requirements.Confidential
-	return c.Required && c.Attestation != "off" && p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
+	return c.Required && c.Attestation != "off" && c.Type != "azure-snp" &&
+		p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
+}
+
+// usesAzureSNP reports whether a confidential Azure run should take the measured
+// direct SNP+vTPM path (a custom measured image, agent in PCR11), selected by
+// `confidential.type: azure-snp`. This is the Azure path that measures the agent;
+// the MAA path (sev-snp) does not.
+func usesAzureSNP(p *types.Plan) bool {
+	c := p.Workload.Requirements.Confidential
+	return c.Required && c.Attestation != "off" && c.Type == "azure-snp" &&
+		p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
 }
 
 // usesAWSNitro reports whether a confidential AWS run should take the Nitro
@@ -83,6 +94,29 @@ func newNitroConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, erro
 	return cloudvm.NewAWSNitroConfidentialAdapter(
 		cloudvm.NewAWSProvider(region), eif, proxy, pcr0, os.Getenv("DISPATCHER_AWS_NITRO_INSTANCE_TYPE"),
 		cloudvm.Config{ProviderID: cloudvm.ProviderAWS, Region: region, SSHUser: "ec2-user"},
+	), nil
+}
+
+// newAzureSNPConfidentialAdapter builds the Azure measured-boot adapter (direct
+// SNP+vTPM): a pinned custom measured image whose agent lives in a dm-verity root
+// measured into PCR11. DISPATCHER_AZURE_SNP_IMAGE is the gallery image id and
+// DISPATCHER_AZURE_SNP_PCR11 the pinned PCR11 (from deploy/azure-uki/mkosi). Fails
+// closed when unconfigured.
+func newAzureSNPConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, error) {
+	image := os.Getenv("DISPATCHER_AZURE_SNP_IMAGE")
+	pcr11 := os.Getenv("DISPATCHER_AZURE_SNP_PCR11")
+	if image == "" || pcr11 == "" {
+		return nil, fmt.Errorf("confidential Azure measured runs need the pinned measured image: set DISPATCHER_AZURE_SNP_IMAGE " +
+			"(a ConfidentialVm gallery image id) and DISPATCHER_AZURE_SNP_PCR11 (its measured PCR11); build with deploy/azure-uki/mkosi")
+	}
+	rg := os.Getenv("DISPATCHER_AZURE_RG")
+	if rg == "" {
+		rg = "dispatcher-rg"
+	}
+	location := os.Getenv("DISPATCHER_AZURE_LOCATION")
+	return cloudvm.NewAzureSNPConfidentialAdapter(
+		cloudvm.NewAzureProvider(rg, location), image, map[int]string{11: pcr11},
+		cloudvm.Config{ProviderID: cloudvm.ProviderAzure, Region: location, SSHUser: "dispatcher"},
 	), nil
 }
 

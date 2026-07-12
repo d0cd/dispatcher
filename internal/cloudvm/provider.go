@@ -59,6 +59,10 @@ type VMOptions struct {
 	// --enclave-options Enabled=true). The parent itself is not memory-encrypted;
 	// the measured enclave it launches is the TEE. Distinct from ConfidentialType.
 	EnclaveEnabled bool
+	// SecureBootDisabled turns Secure Boot off on a confidential VM. The Azure
+	// direct SNP+vTPM measured path uses an unsigned custom UKI image, which needs
+	// Secure Boot off; attestation there rests on PCR11, not Secure Boot.
+	SecureBootDisabled bool
 }
 
 // VMInfo describes a provisioned VM.

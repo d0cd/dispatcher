@@ -26,13 +26,14 @@ type sshConfidentialDeps struct {
 	// confidential is VMOptions.ConfidentialType: "sev-snp" for a memory-encrypted
 	// CVM (Azure MAA, AWS SEV-SNP), or "" for a Nitro Enclaves parent (the parent
 	// is a plain instance — the measured enclave it launches is the TEE).
-	confidential string
-	enclave      bool   // request Nitro Enclaves support on the parent
-	instanceType string // optional; a Nitro parent pins an enclave-capable type
-	sshPubKey    string
-	sshUser      string
-	startAgent   func(ctx context.Context, vm *VMInfo) (baseURL string, err error)
-	waitReady    func(ctx context.Context, baseURL string) error
+	confidential  string
+	enclave       bool   // request Nitro Enclaves support on the parent
+	secureBootOff bool   // Secure Boot off (the Azure direct-SNP unsigned UKI image)
+	instanceType  string // optional; a Nitro parent pins an enclave-capable type
+	sshPubKey     string
+	sshUser       string
+	startAgent    func(ctx context.Context, vm *VMInfo) (baseURL string, err error)
+	waitReady     func(ctx context.Context, baseURL string) error
 	// verify runs the provider's attester over the agent endpoint (MAA for Azure,
 	// raw SEV-SNP for AWS, Nitro doc for enclaves) and returns the verdict + the
 	// channel key to seal to.
@@ -53,14 +54,15 @@ func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types
 
 	region := p.Constraints.Region
 	opts := VMOptions{
-		Name:             vmName,
-		Region:           region,
-		Image:            d.image,
-		InstanceType:     d.instanceType,
-		ConfidentialType: d.confidential,
-		EnclaveEnabled:   d.enclave,
-		SSHKeyPath:       d.sshPubKey,
-		SSHUser:          d.sshUser,
+		Name:               vmName,
+		Region:             region,
+		Image:              d.image,
+		InstanceType:       d.instanceType,
+		ConfidentialType:   d.confidential,
+		EnclaveEnabled:     d.enclave,
+		SecureBootDisabled: d.secureBootOff,
+		SSHKeyPath:         d.sshPubKey,
+		SSHUser:            d.sshUser,
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",

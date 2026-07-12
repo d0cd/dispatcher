@@ -44,10 +44,29 @@ func TestUsesAzureConfidential(t *testing.T) {
 		{"attestation off stays on SSH path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Attestation: "off"}), false},
 		{"non-confidential azure", planWith("azure-vm", types.ConfidentialRequirement{}), false},
 		{"confidential gcp is not the azure path", planWith("gcp-vm", types.ConfidentialRequirement{Required: true}), false},
+		{"azure-snp type routes away from the MAA path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Type: "azure-snp"}), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.expect, usesAzureConfidential(tc.plan))
+		})
+	}
+}
+
+func TestUsesAzureSNP(t *testing.T) {
+	cases := []struct {
+		name   string
+		plan   *types.Plan
+		expect bool
+	}{
+		{"azure-snp type on azure → measured path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Type: "azure-snp"}), true},
+		{"default type is the MAA path, not measured", planWith("azure-vm", types.ConfidentialRequirement{Required: true}), false},
+		{"attestation off stays on SSH path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Type: "azure-snp", Attestation: "off"}), false},
+		{"azure-snp on aws is not the azure path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Type: "azure-snp"}), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.expect, usesAzureSNP(tc.plan))
 		})
 	}
 }
