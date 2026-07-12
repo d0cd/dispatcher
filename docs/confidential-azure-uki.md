@@ -126,23 +126,31 @@ so re-capture and re-pin per image.
 
 ## Status
 
-- ✅ Verifier (`MAAMeasuredBoot`, PCR pinning) — done and unit-tested.
-- ✅ **Direct SNP+vTPM verification + agent — DONE and LIVE-VALIDATED** (the
-  chosen approach; supersedes the MAA/PCR4 path). `verifyAzureSNP` +
-  `dispatcher-attest-azuresnp` proven end-to-end on a real CVM: no MAA, pins PCR11.
-- ⏳ **Measured image (agent → PCR11): the remaining piece.** Live attempts found:
-  - The stock Azure Ubuntu 24.04 CVM is a **snapd-managed, immutable, UKI image**
-    (no loose kernel/initrd; `snapd_recovery_mode=cloudimg-rootfs`) — it can't be
-    modified in place to fold the agent into the measured initrd. A purpose-built
-    image is required.
-  - Its OS disk is **plain ext4** under `VMGuestStateOnly` (no TPM-sealed LUKS), so
-    changing PCRs does **not** brick it — good.
-  - **mkosi 20.2 on Ubuntu 24.04 does not build cleanly**: Ubuntu ships no
-    `bootctl` (shimmable) and mkosi's package lists reference pre-`t64` names
-    (`libtss2-mu0` etc.). This is a known ecosystem friction.
-  - **Recommended path for the image build** (a dedicated effort): a **newer
-    mkosi** with a **Debian or Fedora base** (where UKI + dm-verity build cleanly),
-    or adopt **Constellation's** prebuilt measured images — not Ubuntu-24.04 +
-    mkosi-20.2. Then: verity-protected root → roothash in the UKI cmdline → PCR11,
-    upload to a Shared Image Gallery (ConfidentialVmSupported), boot a CVM, capture
-    PCR11, pin. The verifier + agent are ready to consume it unchanged.
+**✅ COMPLETE — measured boot live-validated end-to-end.**
+
+- ✅ Verifier (`verifyAzureSNP` / `NewAzureSNPAttester`) + agent
+  (`dispatcher-attest-azuresnp`) — direct SNP+vTPM, no MAA, pins PCR11.
+- ✅ **Measured image built + live-validated.** A custom mkosi image bakes the
+  agent into a **dm-verity root**; mkosi injects the verity **roothash into the UKI
+  cmdline** (`roothash=…`), which systemd-stub measures into **PCR11**. The agent
+  runs from the verity-protected read-only root (`systemd.volatile=overlay` gives a
+  tmpfs upper for writes). So PCR11 attests the entire root — including the agent.
+  Confirmed on a real CVM booted from this image: the full pipeline (attest →
+  verify PCR11 → seal → run inside the CVM → sealed result) passed
+  (`TestGolden_AzureSNPLiveExchange`). A changed agent → different roothash →
+  different PCR11 → rejected before any secret is sealed.
+
+Build flow: `deploy/azure-uki/mkosi/` (mkosi 27 from git; verity partitions in
+`mkosi.repart/`) → VHD blob → ConfidentialVm gallery image → CVM via ARM template.
+See `deploy/azure-uki/mkosi/build-and-upload.md`.
+
+### Gotchas found live (all documented in the build flow)
+
+- Stock Azure Ubuntu 24.04 CVM is snapd-immutable (no loose kernel/initrd) — can't
+  modify in place; a purpose-built image is required. Its OS disk is plain ext4
+  (`VMGuestStateOnly`), so PCR changes don't brick it.
+- mkosi **20.2** (apt) and PyPI don't work on noble; install mkosi **from git** (v27).
+- ConfidentialVm gallery images need a **VHD blob** source (not a managed disk).
+- Register the `Microsoft.Storage` provider first.
+- `az vm create` from a custom gallery image trips an az-CLI bug (2.88/Python 3.14);
+  use an **ARM template** deployment instead.
