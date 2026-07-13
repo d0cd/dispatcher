@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,4 +71,21 @@ func TestIsTransient_KnownMarkers(t *testing.T) {
 	} {
 		assert.False(t, IsTransient(errors.New(msg)), "expected non-transient: %q", msg)
 	}
+}
+
+// runCLI must surface the CLI's stderr, not just "exit status N", so operators
+// can see why a teardown/list/get failed.
+func TestRunCLI_SurfacesStderr(t *testing.T) {
+	_, err := runCLI(context.Background(), "sh", "-c", "echo 'boom detail' >&2; exit 3")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "boom detail")
+}
+
+// wrapExecError over an already-wrapped runCLI error must not repeat the stderr.
+func TestWrapExecError_IdempotentOverRunCLI(t *testing.T) {
+	_, err := runCLI(context.Background(), "sh", "-c", "echo 'boom detail' >&2; exit 3")
+	require.Error(t, err)
+	wrapped := wrapExecError("delete vm", err)
+	assert.Contains(t, wrapped.Error(), "delete vm")
+	assert.Equal(t, 1, strings.Count(wrapped.Error(), "boom detail"), "stderr must appear exactly once")
 }

@@ -115,7 +115,11 @@ type Provider interface {
 	// WaitReady blocks until the VM is SSH-reachable.
 	WaitReady(ctx context.Context, vmID string, ip string, keyPath string) error
 
-	// GetVM returns current VM information.
+	// GetVM returns current VM information. Contract: if the VM no longer
+	// exists (a "not found" describe result), return &VMInfo{State:
+	// VMStateTerminated}, nil — absence is a definitive state, not an error.
+	// Every other failure (transient/API/auth) propagates as an error so a
+	// caller doesn't mistake a blip for a terminated VM.
 	GetVM(ctx context.Context, vmID string) (*VMInfo, error)
 
 	// DestroyVM terminates and deletes the VM.

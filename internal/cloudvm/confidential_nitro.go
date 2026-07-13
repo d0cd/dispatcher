@@ -3,7 +3,6 @@ package cloudvm
 import (
 	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,8 +10,6 @@ import (
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
-	"github.com/d0cd/dispatcher/internal/attest/agent"
-	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -66,7 +63,7 @@ func nitroStartAgent(eifPath, proxyBin, keyPath, sshUser, egressCIDR string, pro
 		if err := provider.WaitReady(ctx, vm.ID, vm.IP, keyPath); err != nil {
 			return "", fmt.Errorf("wait for ssh: %w", err)
 		}
-		opts := azureSSHOpts(keyPath) // same ssh/scp flags (accept-new TOFU)
+		opts := confidentialAgentSSHOpts(keyPath)
 		target := sshUser + "@" + vm.IP
 
 		// Install + configure the Nitro allocator (the EIF is pre-built and pinned,
@@ -127,13 +124,11 @@ func resolveAWSNitroAMI(ctx context.Context, region string) (string, error) {
 // the agent-not-measured caveat — at the cost of the enclave execution model (no
 // network/disk; self-contained workloads only). See docs/confidential-nitro.md.
 type AWSNitroConfidentialAdapter struct {
-	targetID     string
-	provider     Provider
+	confidentialVMAdapter
 	eifPath      string // pre-built enclave image (deploy/nitro/build-eif.sh)
 	proxyBin     string // cross-compiled dispatcher-nitro-proxy
 	pcr0         string // pinned enclave-image measurement (from build-eif.sh)
 	instanceType string
-	config       Config
 }
 
 // NewAWSNitroConfidentialAdapter builds the adapter. eifPath is the pre-built,
@@ -144,25 +139,20 @@ func NewAWSNitroConfidentialAdapter(provider Provider, eifPath, proxyBin, pcr0, 
 		instanceType = defaultNitroInstanceType
 	}
 	return &AWSNitroConfidentialAdapter{
-		targetID: string(cfg.ProviderID) + "-nitro",
-		provider: provider, eifPath: eifPath, proxyBin: proxyBin, pcr0: pcr0,
-		instanceType: instanceType, config: cfg,
+		confidentialVMAdapter: confidentialVMAdapter{
+			targetID: string(cfg.ProviderID) + "-nitro",
+			provider: provider, config: cfg,
+			costAssumption: "Nitro Enclaves parent instance (measured enclave)",
+		},
+		eifPath: eifPath, proxyBin: proxyBin, pcr0: pcr0, instanceType: instanceType,
 	}
 }
-
-func (a *AWSNitroConfidentialAdapter) ID() string { return a.targetID }
 
 func (a *AWSNitroConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	if a.eifPath == "" || a.proxyBin == "" || a.pcr0 == "" {
 		return nil, fmt.Errorf("nitro adapter needs a pinned EIF, proxy binary, and PCR0 (build with deploy/nitro/build-eif.sh)")
 	}
-	region := p.Constraints.Region
-	if region == "" {
-		region = a.config.Region
-	}
-	if rp, ok := a.provider.(regionalProvider); ok && region != "" {
-		rp.SetRegion(region)
-	}
+	region := a.resolveRegion(p)
 	ami, err := resolveAWSNitroAMI(ctx, region)
 	if err != nil {
 		return nil, err
@@ -176,6 +166,10 @@ func (a *AWSNitroConfidentialAdapter) Execute(ctx context.Context, p *types.Plan
 		_ = os.Remove(keyPath + ".pub")
 	}()
 
+	egress, err := detectEgressCIDR(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("scope confidential agent firewall: %w", err)
+	}
 	deps := nitroDeps{
 		provider:     a.provider,
 		image:        ami,
@@ -183,7 +177,7 @@ func (a *AWSNitroConfidentialAdapter) Execute(ctx context.Context, p *types.Plan
 		pcr0:         a.pcr0,
 		sshPubKey:    keyPath + ".pub",
 		sshUser:      a.config.SSHUser,
-		startAgent:   nitroStartAgent(a.eifPath, a.proxyBin, keyPath, a.config.SSHUser, detectEgressCIDR(ctx), a.provider),
+		startAgent:   nitroStartAgent(a.eifPath, a.proxyBin, keyPath, a.config.SSHUser, egress, a.provider),
 		waitReady:    waitForAgentEndpoint,
 	}
 	state, err := executeNitroConfidential(ctx, deps, p)
@@ -191,103 +185,4 @@ func (a *AWSNitroConfidentialAdapter) Execute(ctx context.Context, p *types.Plan
 		return nil, err
 	}
 	return &adapter.RunHandle{ID: state.VMID, TargetID: a.targetID, State: state}, nil
-}
-
-func (a *AWSNitroConfidentialAdapter) Validate(ctx context.Context, _ types.WorkloadSpec) (types.ValidationResult, error) {
-	v := types.ValidationResult{
-		Schema: types.ValidationPass, PackageBuild: types.ValidationPass,
-		TargetCapabilities: types.ValidationPass, Credentials: types.ValidationPass,
-		Quota: types.ValidationSkipped, Network: types.ValidationPass,
-		Policy: types.ValidationPass, CostEstimate: types.ValidationPass, CleanupPlan: types.ValidationPass,
-	}
-	if err := a.provider.CheckCLI(ctx); err != nil {
-		v.Credentials = types.ValidationFail
-		return v, fmt.Errorf("provider CLI check failed: %w", err)
-	}
-	return v, nil
-}
-
-func (a *AWSNitroConfidentialAdapter) EstimateCost(_ context.Context, w types.WorkloadSpec) (types.CostEstimate, error) {
-	hours := 1.0
-	if w.DetectedKind == types.WorkloadKindService {
-		hours = 24.0
-	}
-	total := providerBaseRate(a.config.ProviderID) * hours
-	return types.CostEstimate{
-		Value: float64(int(total*1000)) / 1000, Currency: "USD", Confidence: types.ConfidenceMedium,
-		Assumptions: []string{fmt.Sprintf("assumes %.0fh runtime", hours), "Nitro Enclaves parent instance (measured enclave)"},
-		Exclusions:  []string{"excludes network egress", "excludes storage"},
-	}, nil
-}
-
-func (a *AWSNitroConfidentialAdapter) Prepare(context.Context, *types.Plan) error { return nil }
-
-func (a *AWSNitroConfidentialAdapter) Status(_ context.Context, h *adapter.RunHandle) (types.RunState, error) {
-	if h.State.(*confidentialRunState).Result.ExitCode != 0 {
-		return types.RunStateExecutionFailed, nil
-	}
-	return types.RunStateCompleted, nil
-}
-
-func (a *AWSNitroConfidentialAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails {
-	state, ok := h.State.(*confidentialRunState)
-	if !ok {
-		return adapter.FailureDetails{Message: "no confidential run state"}
-	}
-	fd := adapter.FailureDetails{ExitCode: state.Result.ExitCode}
-	if state.Result.ExitCode != 0 {
-		fd.Message = fmt.Sprintf("confidential workload exited with code %d", state.Result.ExitCode)
-	}
-	return fd
-}
-
-func (a *AWSNitroConfidentialAdapter) Logs(_ context.Context, h *adapter.RunHandle, w io.Writer) error {
-	state := h.State.(*confidentialRunState)
-	if len(state.Result.Stdout) > 0 {
-		_, _ = w.Write(state.Result.Stdout)
-	}
-	if len(state.Result.Stderr) > 0 {
-		_, _ = w.Write(state.Result.Stderr)
-	}
-	return nil
-}
-
-func (a *AWSNitroConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
-	state := h.State.(*confidentialRunState)
-	if len(state.Result.OutputsTarGz) == 0 {
-		return nil, nil
-	}
-	indexKey := h.RunID
-	if indexKey == "" {
-		indexKey = h.ID
-	}
-	dest, err := statedir.Subdir(filepath.Join("runs", indexKey, "artifacts"))
-	if err != nil {
-		return nil, fmt.Errorf("create artifacts dir: %w", err)
-	}
-	if err := agent.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
-		return nil, fmt.Errorf("extract outputs: %w", err)
-	}
-	var refs []adapter.ArtifactRef
-	_ = filepath.Walk(dest, func(pth string, info os.FileInfo, _ error) error {
-		if info == nil || info.IsDir() {
-			return nil
-		}
-		refs = append(refs, adapter.ArtifactRef{Name: filepath.Base(pth), Path: pth, Size: info.Size()})
-		return nil
-	})
-	return refs, nil
-}
-
-func (a *AWSNitroConfidentialAdapter) Terminate(context.Context, *adapter.RunHandle) error {
-	return nil
-}
-
-func (a *AWSNitroConfidentialAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
-	state := h.State.(*confidentialRunState)
-	// Terminating the parent instance tears down the enclave with it.
-	if err := a.provider.DestroyVM(ctx, state.VMID); err != nil {
-		return &adapter.CleanupResult{Success: false, Errors: []string{err.Error()}}, nil
-	}
-	return &adapter.CleanupResult{Success: true, ResourcesCleaned: []string{state.VMID}}, nil
 }

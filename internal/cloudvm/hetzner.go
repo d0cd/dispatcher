@@ -172,7 +172,10 @@ func (h *HetznerProvider) WaitReady(ctx context.Context, _ string, ip string, _ 
 func (h *HetznerProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 	output, err := runCLI(ctx, "hcloud", "server", "describe", vmID, "-o", "json")
 	if err != nil {
-		return nil, fmt.Errorf("hcloud server describe failed: %w", err)
+		if isVMNotFound(err) {
+			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		}
+		return nil, wrapExecError("hcloud server describe", err)
 	}
 
 	var server struct {

@@ -76,17 +76,72 @@ func retryCLIOutput(ctx context.Context, bin, label string, args ...string) ([]b
 // runCLI executes a provider CLI and returns its stdout. It is a package-level
 // seam so tests can capture the exact argv and stub output without invoking a
 // real cloud binary — the teardown/list/get command lines are cost-critical and
-// must not regress.
+// must not regress. On failure it returns a cliError carrying the CLI's stderr,
+// so every caller surfaces the real complaint instead of "exit status N" even
+// when it wraps the error with plain fmt.Errorf.
 var runCLI = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
+	out, err := exec.CommandContext(ctx, name, args...).Output()
+	if err != nil {
+		return out, newCLIError(err)
+	}
+	return out, nil
 }
 
-// wrapExecError appends stderr from an *exec.ExitError so the classifier can
-// see the cloud CLI's actual complaint, not just "exit status 1".
-func wrapExecError(label string, err error) error {
+// cliError carries a cloud CLI's stderr alongside the underlying exec error so
+// its Error() surfaces the actual complaint. runCLI returns one on every
+// failure; wrapExecError recognises it and won't append the stderr twice.
+type cliError struct {
+	stderr string
+	err    error
+}
+
+func (e *cliError) Error() string {
+	if e.stderr != "" {
+		return e.stderr + ": " + e.err.Error()
+	}
+	return e.err.Error()
+}
+
+func (e *cliError) Unwrap() error { return e.err }
+
+// isVMNotFound reports whether a provider CLI error means the VM no longer
+// exists (as opposed to a transient/auth failure). GetVM maps this to
+// State=Terminated,nil per the Provider contract; every other error propagates.
+// It matches on the CLI's stderr, now carried by cliError.
+func isVMNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	for _, marker := range []string{"not found", "notfound", "does not exist", "could not be found", "404"} {
+		if strings.Contains(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// newCLIError wraps a failed exec in a cliError when stderr is available.
+func newCLIError(err error) error {
 	var ee *exec.ExitError
 	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-		return fmt.Errorf("%s: %s: %w", label, string(ee.Stderr), err)
+		return &cliError{stderr: strings.TrimSpace(string(ee.Stderr)), err: err}
+	}
+	return err
+}
+
+// wrapExecError prefixes a label and, for a raw *exec.ExitError, appends stderr
+// so the classifier sees the cloud CLI's actual complaint, not just "exit status
+// 1". It is idempotent over a cliError (which already carries stderr), so
+// callers that wrap a runCLI result don't get the stderr twice.
+func wrapExecError(label string, err error) error {
+	var ce *cliError
+	if errors.As(err, &ce) {
+		return fmt.Errorf("%s: %w", label, err)
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		return fmt.Errorf("%s: %s: %w", label, strings.TrimSpace(string(ee.Stderr)), err)
 	}
 	return fmt.Errorf("%s: %w", label, err)
 }

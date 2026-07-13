@@ -311,7 +311,10 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 
 	output, err := runCLI(ctx, "gcloud", args...)
 	if err != nil {
-		return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		if isVMNotFound(err) {
+			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		}
+		return nil, wrapExecError("gcloud compute instances describe", err)
 	}
 
 	var inst struct {

@@ -1,6 +1,30 @@
 package cloudvm
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
+
+// ValidateAgentURL guards a confidential-agent endpoint URL (e.g. the MAA URL)
+// before it is embedded in a remote `bash -c '...'` command. It requires an
+// http(s) URL whose characters stay within isSafeArg's charset, so the value
+// can never break out of the shell literal it is interpolated into.
+func ValidateAgentURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid agent URL %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("agent URL %q must be http or https", raw)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("agent URL %q has no host", raw)
+	}
+	if !isSafeArg(raw) {
+		return fmt.Errorf("agent URL %q contains characters outside [a-zA-Z0-9_.:/@-]", raw)
+	}
+	return nil
+}
 
 // validateLabelKV requires `[a-zA-Z0-9_.-]` on cloud tag/label keys and
 // values — a strict subset of every provider's documented charset and

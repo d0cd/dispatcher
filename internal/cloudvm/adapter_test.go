@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -169,6 +170,27 @@ func TestCloudVMAdapter_Cleanup(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, result.Success)
 	assert.Equal(t, 0, mock.VMCount())
+}
+
+// When DestroyVM fails, Cleanup must report failure (Success=false + the
+// provider error) rather than swallowing it — that signal is what tells the
+// operator a billable VM may be orphaned.
+func TestCloudVMAdapter_Cleanup_DestroyFailureSurfaces(t *testing.T) {
+	mock := NewMockProvider(ProviderHetzner)
+	mock.DestroyErr = fmt.Errorf("provider quota exhausted")
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})
+
+	handle := &adapter.RunHandle{
+		ID:       "vm-1",
+		TargetID: "hetzner-vm",
+		State:    &CloudVMState{Provider: ProviderHetzner, VMID: "vm-1"},
+	}
+
+	result, err := a.Cleanup(context.Background(), handle)
+	require.NoError(t, err, "Cleanup reports the failure via the result, not a returned error")
+	require.NotNil(t, result)
+	assert.False(t, result.Success, "a failed DestroyVM must mark the cleanup unsuccessful")
+	assert.Contains(t, result.Errors, "provider quota exhausted")
 }
 
 func TestCloudVMAdapter_Cleanup_Idempotent(t *testing.T) {

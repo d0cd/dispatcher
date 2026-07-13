@@ -385,6 +385,9 @@ func (a *AWSProvider) getVMInRegion(ctx context.Context, vmID, region string) (*
 		"--output", "json",
 	)
 	if err != nil {
+		if isVMNotFound(err) {
+			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		}
 		return nil, wrapExecError("aws ec2 describe-instances", err)
 	}
 

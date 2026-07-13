@@ -4,17 +4,13 @@ import (
 	"context"
 	"crypto"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
-	"github.com/d0cd/dispatcher/internal/attest/agent"
-	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -76,10 +72,11 @@ func (a *AzureProvider) OpenAgentPort(ctx context.Context, vmName string, port i
 	return err
 }
 
-// azureSSHOpts are the ssh/scp options for reaching a freshly-booted CVM. Host
-// key is accept-new (TOFU): the untrusted channel is made safe by attestation +
-// sealing, not by SSH host identity.
-func azureSSHOpts(keyPath string) []string {
+// confidentialAgentSSHOpts are the ssh/scp options for reaching a freshly-booted
+// confidential VM to install the in-TEE agent, shared by the Azure, AWS SEV-SNP,
+// and Nitro flows. Host key is accept-new (TOFU): the untrusted channel is made
+// safe by attestation + sealing, not by SSH host identity.
+func confidentialAgentSSHOpts(keyPath string) []string {
 	return []string{"-i", keyPath, "-o", "IdentitiesOnly=yes",
 		"-o", "StrictHostKeyChecking=accept-new", "-o", "UserKnownHostsFile=/dev/null",
 		"-o", "ConnectTimeout=20"}
@@ -100,7 +97,7 @@ func azureStartAgent(agentBin, maaURL, keyPath, sshUser, egressCIDR string, prov
 		if err := provider.WaitReady(ctx, vm.ID, vm.IP, keyPath); err != nil {
 			return "", fmt.Errorf("wait for ssh: %w", err)
 		}
-		opts := azureSSHOpts(keyPath)
+		opts := confidentialAgentSSHOpts(keyPath)
 		target := sshUser + "@" + vm.IP
 
 		scpArgs := append(append([]string{}, opts...), agentBin, target+":/tmp/dispatcher-agent")
@@ -108,6 +105,12 @@ func azureStartAgent(agentBin, maaURL, keyPath, sshUser, egressCIDR string, prov
 			return "", fmt.Errorf("scp agent: %s: %w", strings.TrimSpace(string(out)), err)
 		}
 
+		// Defense in depth: maaURL is embedded in a guest-side `bash -c '...'`
+		// literal. The CLI boundary validates it, but re-check here so no caller
+		// can smuggle a shell-metacharacter-bearing URL past this point.
+		if err := ValidateAgentURL(maaURL); err != nil {
+			return "", fmt.Errorf("unsafe maa url: %w", err)
+		}
 		start := fmt.Sprintf("chmod +x /tmp/dispatcher-agent && sudo bash -c 'nohup /tmp/dispatcher-agent --addr=:%d --maa-url=%s >/tmp/dispatcher-agent.log 2>&1 &' && sleep 2",
 			csAgentPort, maaURL)
 		sshArgs := append(append([]string{}, opts...), target, start)
@@ -129,14 +132,12 @@ func azureStartAgent(agentBin, maaURL, keyPath, sshUser, egressCIDR string, prov
 // VM, but the workload arrives sealed and runs inside the TEE via the agent's
 // sealed exchange — not rsync-in-the-clear.
 type AzureConfidentialAdapter struct {
-	targetID     string
-	provider     Provider
+	confidentialVMAdapter
 	keys         map[string]crypto.PublicKey
 	issuer       string
 	maaURL       string
 	agentBin     string
 	measuredBoot attest.MAAMeasuredBoot
-	config       Config
 }
 
 // NewAzureConfidentialAdapter builds the adapter. keys/issuer are the pinned MAA
@@ -146,24 +147,20 @@ type AzureConfidentialAdapter struct {
 // firmware-only attestation (the scp'd agent is not measured).
 func NewAzureConfidentialAdapter(provider Provider, keys map[string]crypto.PublicKey, issuer, maaURL, agentBin string, mb attest.MAAMeasuredBoot, cfg Config) *AzureConfidentialAdapter {
 	return &AzureConfidentialAdapter{
-		targetID: string(cfg.ProviderID) + "-confidential",
-		provider: provider, keys: keys, issuer: issuer, maaURL: maaURL, agentBin: agentBin, measuredBoot: mb, config: cfg,
+		confidentialVMAdapter: confidentialVMAdapter{
+			targetID: string(cfg.ProviderID) + "-confidential",
+			provider: provider, config: cfg,
+			costAssumption: "confidential (SEV-SNP) CVM",
+		},
+		keys: keys, issuer: issuer, maaURL: maaURL, agentBin: agentBin, measuredBoot: mb,
 	}
 }
-
-func (a *AzureConfidentialAdapter) ID() string { return a.targetID }
 
 func (a *AzureConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	if a.agentBin == "" {
 		return nil, fmt.Errorf("azure confidential adapter has no agent binary configured")
 	}
-	region := p.Constraints.Region
-	if region == "" {
-		region = a.config.Region
-	}
-	if rp, ok := a.provider.(regionalProvider); ok && region != "" {
-		rp.SetRegion(region)
-	}
+	a.resolveRegion(p)
 
 	keyPath, err := generateSSHKey(ctx, p.Metadata.ID)
 	if err != nil {
@@ -174,6 +171,10 @@ func (a *AzureConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (
 		_ = os.Remove(keyPath + ".pub")
 	}()
 
+	egress, err := detectEgressCIDR(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("scope confidential agent firewall: %w", err)
+	}
 	deps := azureDeps{
 		provider:   a.provider,
 		keys:       a.keys,
@@ -181,7 +182,7 @@ func (a *AzureConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (
 		mb:         a.measuredBoot,
 		sshPubKey:  keyPath + ".pub",
 		sshUser:    a.config.SSHUser,
-		startAgent: azureStartAgent(a.agentBin, a.maaURL, keyPath, a.config.SSHUser, detectEgressCIDR(ctx), a.provider),
+		startAgent: azureStartAgent(a.agentBin, a.maaURL, keyPath, a.config.SSHUser, egress, a.provider),
 		waitReady:  waitForAgentEndpoint,
 	}
 	state, err := executeAzureConfidential(ctx, deps, p)
@@ -189,101 +190,4 @@ func (a *AzureConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (
 		return nil, err
 	}
 	return &adapter.RunHandle{ID: state.VMID, TargetID: a.targetID, State: state}, nil
-}
-
-func (a *AzureConfidentialAdapter) Validate(ctx context.Context, _ types.WorkloadSpec) (types.ValidationResult, error) {
-	v := types.ValidationResult{
-		Schema: types.ValidationPass, PackageBuild: types.ValidationPass,
-		TargetCapabilities: types.ValidationPass, Credentials: types.ValidationPass,
-		Quota: types.ValidationSkipped, Network: types.ValidationPass,
-		Policy: types.ValidationPass, CostEstimate: types.ValidationPass, CleanupPlan: types.ValidationPass,
-	}
-	if err := a.provider.CheckCLI(ctx); err != nil {
-		v.Credentials = types.ValidationFail
-		return v, fmt.Errorf("provider CLI check failed: %w", err)
-	}
-	return v, nil
-}
-
-func (a *AzureConfidentialAdapter) EstimateCost(_ context.Context, w types.WorkloadSpec) (types.CostEstimate, error) {
-	hours := 1.0
-	if w.DetectedKind == types.WorkloadKindService {
-		hours = 24.0
-	}
-	total := providerBaseRate(a.config.ProviderID) * hours
-	return types.CostEstimate{
-		Value: float64(int(total*1000)) / 1000, Currency: "USD", Confidence: types.ConfidenceMedium,
-		Assumptions: []string{fmt.Sprintf("assumes %.0fh runtime", hours), "confidential (SEV-SNP) CVM"},
-		Exclusions:  []string{"excludes network egress", "excludes storage"},
-	}, nil
-}
-
-func (a *AzureConfidentialAdapter) Prepare(context.Context, *types.Plan) error { return nil }
-
-func (a *AzureConfidentialAdapter) Status(_ context.Context, h *adapter.RunHandle) (types.RunState, error) {
-	if h.State.(*confidentialRunState).Result.ExitCode != 0 {
-		return types.RunStateExecutionFailed, nil
-	}
-	return types.RunStateCompleted, nil
-}
-
-func (a *AzureConfidentialAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails {
-	state, ok := h.State.(*confidentialRunState)
-	if !ok {
-		return adapter.FailureDetails{Message: "no confidential run state"}
-	}
-	fd := adapter.FailureDetails{ExitCode: state.Result.ExitCode}
-	if state.Result.ExitCode != 0 {
-		fd.Message = fmt.Sprintf("confidential workload exited with code %d", state.Result.ExitCode)
-	}
-	return fd
-}
-
-func (a *AzureConfidentialAdapter) Logs(_ context.Context, h *adapter.RunHandle, w io.Writer) error {
-	state := h.State.(*confidentialRunState)
-	if len(state.Result.Stdout) > 0 {
-		_, _ = w.Write(state.Result.Stdout)
-	}
-	if len(state.Result.Stderr) > 0 {
-		_, _ = w.Write(state.Result.Stderr)
-	}
-	return nil
-}
-
-func (a *AzureConfidentialAdapter) Artifacts(_ context.Context, h *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
-	state := h.State.(*confidentialRunState)
-	if len(state.Result.OutputsTarGz) == 0 {
-		return nil, nil
-	}
-	indexKey := h.RunID
-	if indexKey == "" {
-		indexKey = h.ID
-	}
-	dest, err := statedir.Subdir(filepath.Join("runs", indexKey, "artifacts"))
-	if err != nil {
-		return nil, fmt.Errorf("create artifacts dir: %w", err)
-	}
-	if err := agent.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
-		return nil, fmt.Errorf("extract outputs: %w", err)
-	}
-	var refs []adapter.ArtifactRef
-	_ = filepath.Walk(dest, func(pth string, info os.FileInfo, _ error) error {
-		if info == nil || info.IsDir() {
-			return nil
-		}
-		refs = append(refs, adapter.ArtifactRef{Name: filepath.Base(pth), Path: pth, Size: info.Size()})
-		return nil
-	})
-	return refs, nil
-}
-
-func (a *AzureConfidentialAdapter) Terminate(context.Context, *adapter.RunHandle) error { return nil }
-
-func (a *AzureConfidentialAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
-	state := h.State.(*confidentialRunState)
-	// DestroyVM cascades the CVM's disk/NIC/IP/NSG (the agent NSG rule with it).
-	if err := a.provider.DestroyVM(ctx, state.VMID); err != nil {
-		return &adapter.CleanupResult{Success: false, Errors: []string{err.Error()}}, nil
-	}
-	return &adapter.CleanupResult{Success: true, ResourcesCleaned: []string{state.VMID}}, nil
 }

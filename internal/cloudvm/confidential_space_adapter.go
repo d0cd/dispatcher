@@ -50,7 +50,7 @@ type csDeps struct {
 	waitReady func(ctx context.Context, baseURL string) error
 	// egressCIDR resolves the source range the agent-port firewall is scoped to
 	// (dispatcher's egress IP). Nil skips the firewall (e.g. in unit tests).
-	egressCIDR func(ctx context.Context) string
+	egressCIDR func(ctx context.Context) (string, error)
 }
 
 // agentFirewaller is an optional Provider capability: manage the per-run firewall
@@ -127,7 +127,11 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 		},
 	}
 	if d.egressCIDR != nil {
-		opts.ConfidentialAllowFrom = d.egressCIDR(ctx)
+		allowFrom, err := d.egressCIDR(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("scope confidential agent firewall: %w", err)
+		}
+		opts.ConfidentialAllowFrom = allowFrom
 	}
 
 	dlog.L().Info("cs.create.start", "run", p.Metadata.ID, "image", imageDigest)
@@ -381,22 +385,25 @@ func (a *ConfidentialSpaceAdapter) Cleanup(ctx context.Context, h *adapter.RunHa
 }
 
 // detectEgressCIDR resolves dispatcher's public egress IP as a /32 to scope the
-// agent-port firewall. Best-effort: on failure it returns 0.0.0.0/0 (the endpoint
-// is safe to expose — sealing + attestation are the security boundary) after a
-// warning, so a run is never blocked by IP detection.
-func detectEgressCIDR(ctx context.Context) string {
+// agent-port firewall. It fails closed: if the IP can't be resolved it returns an
+// error so the caller aborts the run, rather than opening the agent port to
+// 0.0.0.0/0 (which would let any host race dispatcher's sealed payload).
+func detectEgressCIDR(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
-	if err == nil {
-		if resp, derr := (&http.Client{Timeout: 10 * time.Second}).Do(req); derr == nil {
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
-			if ip := strings.TrimSpace(string(body)); net.ParseIP(ip) != nil {
-				return ip + "/32"
-			}
-		}
+	if err != nil {
+		return "", fmt.Errorf("build egress-ip request: %w", err)
 	}
-	dlog.L().Warn("cs.egress_ip.undetected", "fallback", "0.0.0.0/0")
-	return "0.0.0.0/0"
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return "", fmt.Errorf("query egress ip: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
+	ip := strings.TrimSpace(string(body))
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("egress-ip service returned %q, not an IP address", ip)
+	}
+	return ip + "/32", nil
 }
 
 // waitForAgentEndpoint polls the in-TEE agent's endpoint until it accepts a TCP

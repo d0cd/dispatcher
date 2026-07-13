@@ -235,7 +235,10 @@ func (a *AzureProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error)
 		"--output", "json",
 	)
 	if err != nil {
-		return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		if isVMNotFound(err) {
+			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		}
+		return nil, wrapExecError("az vm show", err)
 	}
 
 	var result struct {
