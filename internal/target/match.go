@@ -26,8 +26,13 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 	}
 
 	// Check GPU requirements
-	if w.Requirements.GPU.Required && !t.Capabilities.Resources.GPU.Supported {
-		reasons = append(reasons, "GPU required but target does not support GPU")
+	if w.Requirements.GPU.Required {
+		gpu := t.Capabilities.Resources.GPU
+		if !gpu.Supported {
+			reasons = append(reasons, "GPU required but target does not support GPU")
+		} else if m := w.Requirements.GPU.Model; m != "" && len(gpu.Models) > 0 && !inSlice(gpu.Models, m) {
+			reasons = append(reasons, "GPU model "+m+" not offered by target (offers: "+strings.Join(gpu.Models, ", ")+")")
+		}
 	}
 
 	// Check confidential-computing requirements
@@ -37,6 +42,12 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 			reasons = append(reasons, "confidential computing required but target does not support it")
 		} else if c.Type != "" && c.Type != "any" && !inSlice(cap.Types, c.Type) {
 			reasons = append(reasons, "confidential type "+c.Type+" not offered by target (offers: "+strings.Join(cap.Types, ", ")+")")
+		}
+		// A measured-boot profile is provider-specific — it may only run on the
+		// matching provider's target, so the plan can't recommend a cross-cloud
+		// target that would silently route to an unmeasured backend.
+		if req := requiredTargetForProfile(c.Profile); req != "" && t.ID != req {
+			reasons = append(reasons, "confidential profile "+c.Profile+" requires target "+req)
 		}
 	}
 
@@ -52,6 +63,19 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 	return FeasibilityResult{
 		Feasible: len(reasons) == 0,
 		Reasons:  reasons,
+	}
+}
+
+// requiredTargetForProfile maps a measured-boot confidential profile to the
+// only target ID it can run on. Empty profile (the standard backend) returns "".
+func requiredTargetForProfile(profile string) string {
+	switch profile {
+	case "nitro":
+		return "aws-vm"
+	case "azure-snp":
+		return "azure-vm"
+	default:
+		return ""
 	}
 }
 

@@ -208,23 +208,9 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return runErr
 	}
 
-	// Select adapter — confidential GCP runs take the container (Confidential
-	// Space) path; everything else resolves by target ID.
-	var a adapter.TargetAdapter
-	switch {
-	case usesConfidentialSpace(p):
-		a, err = newConfidentialSpaceAdapter(cmd.Context())
-	case usesAzureSNP(p):
-		a, err = newAzureSNPConfidentialAdapter(cmd.Context())
-	case usesAzureConfidential(p):
-		a, err = newAzureConfidentialAdapter(cmd.Context())
-	case usesAWSNitro(p):
-		a, err = newNitroConfidentialAdapter(cmd.Context())
-	case usesAWSConfidential(p):
-		a, err = newAWSConfidentialAdapter(cmd.Context())
-	default:
-		a, err = adapterForTarget(p.Recommendation.Target)
-	}
+	// Select adapter — confidential runs take an attesting backend; everything
+	// else resolves by target ID.
+	a, err := adapterForPlan(cmd.Context(), p)
 	if err != nil {
 		return err
 	}
@@ -377,6 +363,40 @@ func recordRunHistory(r *run.Run, p *types.Plan) {
 // adapterForTargetFn is the seam status's primary reconnect path (runStatusByID)
 // uses to resolve an adapter; tests override it to inject a fake durable adapter.
 var adapterForTargetFn = adapterForTarget
+
+// adapterForPlan selects the execution adapter for a plan: an attesting
+// confidential backend when the workload requests confidential compute, else
+// the plain target adapter. Every execution path (single run AND each shard)
+// must go through this — resolving a confidential plan via adapterForTarget
+// would silently drop attestation.
+func adapterForPlan(ctx context.Context, p *types.Plan) (adapter.TargetAdapter, error) {
+	// Fail closed on a measured-profile / target mismatch. Feasibility already
+	// prevents the plan from recommending a cross-cloud target, but a persisted
+	// or hand-forced plan must never silently fall through to a provider's
+	// unmeasured default backend.
+	if c := p.Workload.Requirements.Confidential; c.Required && c.Attestation != "off" && p.Recommendation != nil {
+		if c.Profile == "nitro" && p.Recommendation.Target != "aws-vm" {
+			return nil, fmt.Errorf("confidential.profile: nitro requires target aws-vm, but the plan selected %s", p.Recommendation.Target)
+		}
+		if c.Profile == "azure-snp" && p.Recommendation.Target != "azure-vm" {
+			return nil, fmt.Errorf("confidential.profile: azure-snp requires target azure-vm, but the plan selected %s", p.Recommendation.Target)
+		}
+	}
+	switch {
+	case usesConfidentialSpace(p):
+		return newConfidentialSpaceAdapter(ctx)
+	case usesAzureSNP(p):
+		return newAzureSNPConfidentialAdapter(ctx)
+	case usesAzureConfidential(p):
+		return newAzureConfidentialAdapter(ctx)
+	case usesAWSNitro(p):
+		return newNitroConfidentialAdapter(ctx)
+	case usesAWSConfidential(p):
+		return newAWSConfidentialAdapter(ctx)
+	default:
+		return adapterForTarget(p.Recommendation.Target)
+	}
+}
 
 func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 	// Check known adapters by ID first

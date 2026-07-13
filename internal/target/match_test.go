@@ -42,6 +42,73 @@ func TestCheckFeasibility_Confidential(t *testing.T) {
 	assert.True(t, CheckFeasibility(target, w).Feasible)
 }
 
+// A measured-boot profile (nitro/azure-snp) is provider-specific: it must make
+// only the matching provider's target feasible, so the plan can't recommend a
+// cross-cloud target that would silently route to an unmeasured backend.
+func TestCheckFeasibility_ConfidentialProfileBinding(t *testing.T) {
+	confTarget := func(id string, types_ []string) types.TargetConfig {
+		return types.TargetConfig{
+			ID:      id,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{types.WorkloadKindScript},
+				Resources: types.ResourceCapability{
+					Confidential: types.ConfidentialCapability{Supported: true, Types: types_},
+				},
+			},
+		}
+	}
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{
+			Confidential: types.ConfidentialRequirement{Required: true, Profile: "nitro"},
+		},
+	}
+	// nitro profile is feasible only on aws-vm.
+	assert.True(t, CheckFeasibility(confTarget("aws-vm", []string{"sev-snp"}), w).Feasible)
+	assert.False(t, CheckFeasibility(confTarget("azure-vm", []string{"sev-snp"}), w).Feasible,
+		"nitro profile must be infeasible on azure-vm")
+
+	// azure-snp profile is feasible only on azure-vm.
+	w.Requirements.Confidential.Profile = "azure-snp"
+	assert.True(t, CheckFeasibility(confTarget("azure-vm", []string{"sev-snp"}), w).Feasible)
+	assert.False(t, CheckFeasibility(confTarget("aws-vm", []string{"sev-snp"}), w).Feasible,
+		"azure-snp profile must be infeasible on aws-vm")
+}
+
+// A workload pinning a GPU model must be infeasible on a target that supports
+// GPUs but not that model — otherwise it becomes the recommendation and fails
+// only later as a provisioning refusal.
+func TestCheckFeasibility_GPUModel(t *testing.T) {
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindGPUJob,
+		Requirements: types.ResourceRequirements{
+			GPU: types.GPURequirement{Required: true, Model: "h100"},
+		},
+	}
+	target := types.TargetConfig{
+		Enabled: true,
+		Capabilities: types.Capabilities{
+			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindGPUJob},
+			Resources: types.ResourceCapability{
+				GPU: types.GPUCapability{Supported: true, Models: []string{"t4", "a100"}},
+			},
+		},
+	}
+	res := CheckFeasibility(target, w)
+	assert.False(t, res.Feasible, "h100 not in the target's models → infeasible")
+	assert.Contains(t, joinReasons(res), "h100")
+
+	// Model offered → feasible.
+	target.Capabilities.Resources.GPU.Models = []string{"t4", "a100", "h100"}
+	assert.True(t, CheckFeasibility(target, w).Feasible)
+
+	// No model pinned → any GPU-capable target is fine.
+	w.Requirements.GPU.Model = ""
+	target.Capabilities.Resources.GPU.Models = []string{"t4"}
+	assert.True(t, CheckFeasibility(target, w).Feasible)
+}
+
 func joinReasons(r FeasibilityResult) string {
 	out := ""
 	for _, s := range r.Reasons {

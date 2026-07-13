@@ -151,7 +151,9 @@ func runOneShard(ctx context.Context, base *types.Plan, a shard.Assignment) (*ru
 		p.Workload.Env["SHARD_ITEMS_FILE"] = itemsFile
 	}
 
-	adapter, err := adapterForTarget(p.Recommendation.Target)
+	// Route through adapterForPlan (not adapterForTarget) so a confidential
+	// shard gets the same attesting backend as a non-sharded confidential run.
+	adapter, err := adapterForPlan(ctx, p)
 	if err != nil {
 		return nil, err
 	}

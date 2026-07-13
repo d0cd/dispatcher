@@ -38,26 +38,26 @@ func usesConfidentialSpace(p *types.Plan) bool {
 // attestation on. `attestation: off` stays on the plain SSH path.
 func usesAzureConfidential(p *types.Plan) bool {
 	c := p.Workload.Requirements.Confidential
-	return c.Required && c.Attestation != "off" && c.Type != "azure-snp" &&
+	return c.Required && c.Attestation != "off" && c.Profile != "azure-snp" &&
 		p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
 }
 
 // usesAzureSNP reports whether a confidential Azure run should take the measured
 // direct SNP+vTPM path (a custom measured image, agent in PCR11), selected by
-// `confidential.type: azure-snp`. This is the Azure path that measures the agent;
-// the MAA path (sev-snp) does not.
+// `confidential.profile: azure-snp`. This is the Azure path that measures the
+// agent; the MAA path (the standard backend) does not.
 func usesAzureSNP(p *types.Plan) bool {
 	c := p.Workload.Requirements.Confidential
-	return c.Required && c.Attestation != "off" && c.Type == "azure-snp" &&
+	return c.Required && c.Attestation != "off" && c.Profile == "azure-snp" &&
 		p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
 }
 
 // usesAWSNitro reports whether a confidential AWS run should take the Nitro
-// Enclaves path (measured enclave image), selected by `confidential.type: nitro`.
+// Enclaves path (measured enclave image), selected by `confidential.profile: nitro`.
 // This is the AWS path that measures the agent; the SEV-SNP path does not.
 func usesAWSNitro(p *types.Plan) bool {
 	c := p.Workload.Requirements.Confidential
-	return c.Required && c.Attestation != "off" && c.Type == "nitro" &&
+	return c.Required && c.Attestation != "off" && c.Profile == "nitro" &&
 		p.Recommendation != nil && p.Recommendation.Target == "aws-vm"
 }
 
@@ -67,7 +67,7 @@ func usesAWSNitro(p *types.Plan) bool {
 // SSH path.
 func usesAWSConfidential(p *types.Plan) bool {
 	c := p.Workload.Requirements.Confidential
-	return c.Required && c.Attestation != "off" && c.Type != "nitro" &&
+	return c.Required && c.Attestation != "off" && c.Profile != "nitro" &&
 		p.Recommendation != nil && p.Recommendation.Target == "aws-vm"
 }
 
@@ -140,6 +140,11 @@ func newAzureConfidentialAdapter(ctx context.Context) (adapter.TargetAdapter, er
 	maaURL := os.Getenv("DISPATCHER_MAA_URL")
 	if maaURL == "" {
 		maaURL = "https://sharedeus.eus.attest.azure.net"
+	}
+	// maaURL is interpolated into a remote `sudo bash -c '...'` on the guest;
+	// reject anything that isn't a clean http(s) URL so it can't inject commands.
+	if err := cloudvm.ValidateAgentURL(maaURL); err != nil {
+		return nil, fmt.Errorf("DISPATCHER_MAA_URL: %w", err)
 	}
 	agentBin := os.Getenv("DISPATCHER_AZURE_AGENT_BIN")
 	if agentBin == "" {

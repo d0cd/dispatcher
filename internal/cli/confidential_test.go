@@ -44,7 +44,7 @@ func TestUsesAzureConfidential(t *testing.T) {
 		{"attestation off stays on SSH path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Attestation: "off"}), false},
 		{"non-confidential azure", planWith("azure-vm", types.ConfidentialRequirement{}), false},
 		{"confidential gcp is not the azure path", planWith("gcp-vm", types.ConfidentialRequirement{Required: true}), false},
-		{"azure-snp type routes away from the MAA path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Type: "azure-snp"}), false},
+		{"azure-snp profile routes away from the MAA path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Profile: "azure-snp"}), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,10 +59,10 @@ func TestUsesAzureSNP(t *testing.T) {
 		plan   *types.Plan
 		expect bool
 	}{
-		{"azure-snp type on azure → measured path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Type: "azure-snp"}), true},
+		{"azure-snp profile on azure → measured path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Profile: "azure-snp"}), true},
 		{"default type is the MAA path, not measured", planWith("azure-vm", types.ConfidentialRequirement{Required: true}), false},
-		{"attestation off stays on SSH path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Type: "azure-snp", Attestation: "off"}), false},
-		{"azure-snp on aws is not the azure path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Type: "azure-snp"}), false},
+		{"attestation off stays on SSH path", planWith("azure-vm", types.ConfidentialRequirement{Required: true, Profile: "azure-snp", Attestation: "off"}), false},
+		{"azure-snp on aws is not the azure path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Profile: "azure-snp"}), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -81,7 +81,7 @@ func TestUsesAWSConfidential(t *testing.T) {
 		{"attestation off stays on SSH path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Attestation: "off"}), false},
 		{"non-confidential aws", planWith("aws-vm", types.ConfidentialRequirement{}), false},
 		{"confidential gcp is not the aws path", planWith("gcp-vm", types.ConfidentialRequirement{Required: true}), false},
-		{"nitro type routes away from the SEV-SNP path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Type: "nitro"}), false},
+		{"nitro profile routes away from the SEV-SNP path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Profile: "nitro"}), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -96,11 +96,11 @@ func TestUsesAWSNitro(t *testing.T) {
 		plan   *types.Plan
 		expect bool
 	}{
-		{"nitro type on aws → nitro path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Type: "nitro"}), true},
+		{"nitro profile on aws → nitro path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Profile: "nitro"}), true},
 		{"sev-snp type is not the nitro path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Type: "sev-snp"}), false},
 		{"default type is not the nitro path", planWith("aws-vm", types.ConfidentialRequirement{Required: true}), false},
-		{"attestation off stays on SSH path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Type: "nitro", Attestation: "off"}), false},
-		{"nitro type on gcp is not the aws nitro path", planWith("gcp-vm", types.ConfidentialRequirement{Required: true, Type: "nitro"}), false},
+		{"attestation off stays on SSH path", planWith("aws-vm", types.ConfidentialRequirement{Required: true, Profile: "nitro", Attestation: "off"}), false},
+		{"nitro profile on gcp is not the aws nitro path", planWith("gcp-vm", types.ConfidentialRequirement{Required: true, Profile: "nitro"}), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

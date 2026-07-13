@@ -97,6 +97,7 @@ type DispatchAggregateConfig struct {
 // dispatcher.yaml. Type defaults to "any"; Attestation defaults to "required".
 type DispatchConfidentialConfig struct {
 	Type         string   `yaml:"type,omitempty"`         // sev | sev-snp | tdx | any
+	Profile      string   `yaml:"profile,omitempty"`      // azure-snp | nitro (measured backend); empty = standard
 	Attestation  string   `yaml:"attestation,omitempty"`  // required | off
 	Measurements []string `yaml:"measurements,omitempty"` // exact launch-measurement allowlist (hex), R7
 	MinTCB       uint64   `yaml:"minTCB,omitempty"`       // minimum acceptable reported TCB
@@ -175,6 +176,11 @@ func (c *DispatcherConfig) Validate() error {
 		default:
 			return fmt.Errorf("confidential.type %q is invalid (sev|sev-snp|tdx|any)", c.Confidential.Type)
 		}
+		switch c.Confidential.Profile {
+		case "", "azure-snp", "nitro":
+		default:
+			return fmt.Errorf("confidential.profile %q is invalid (azure-snp|nitro)", c.Confidential.Profile)
+		}
 		switch c.Confidential.Attestation {
 		case "", "required", "off":
 		default:
@@ -242,6 +248,7 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 		spec.Requirements.Confidential = types.ConfidentialRequirement{
 			Required:     true,
 			Type:         cfg.Confidential.Type,
+			Profile:      cfg.Confidential.Profile,
 			Attestation:  attestation,
 			Measurements: cfg.Confidential.Measurements,
 			MinTCB:       cfg.Confidential.MinTCB,
