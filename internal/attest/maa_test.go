@@ -179,7 +179,7 @@ func TestMAABindingNonce_BindsBothInputs(t *testing.T) {
 func TestAzureAttester_BindsNonceAndChannelKey(t *testing.T) {
 	key, keys := maaSigningKey(t)
 	channelKey := bytes.Repeat([]byte{0x9A}, 32)
-	att := &azureAttester{keys: keys, issuer: maaIssuer, isReady: true,
+	att := &azureAttester{keys: keys, issuer: maaIssuer,
 		fetch: func(_ context.Context, nonce []byte) (maaEvidence, error) {
 			c := validMAAClaims()
 			// echo the binding the guest would have supplied
@@ -198,7 +198,7 @@ func TestAzureAttester_BindsNonceAndChannelKey(t *testing.T) {
 
 func TestAzureAttester_RejectsUnboundToken(t *testing.T) {
 	key, keys := maaSigningKey(t)
-	att := &azureAttester{keys: keys, issuer: maaIssuer, isReady: true,
+	att := &azureAttester{keys: keys, issuer: maaIssuer,
 		fetch: func(_ context.Context, _ []byte) (maaEvidence, error) {
 			c := validMAAClaims() // client-payload nonce is a stale constant, not this run's binding
 			return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: bytes.Repeat([]byte{0x9A}, 32)}, nil
@@ -212,15 +212,14 @@ func TestAzureAttester_RejectsUnboundToken(t *testing.T) {
 }
 
 func TestAzureAttester_NotReadyAndNoFetch(t *testing.T) {
-	assert.False(t, (&azureAttester{}).ready())
-	_, err := (&azureAttester{isReady: true}).Verify(context.Background(),
+	_, err := (&azureAttester{}).Verify(context.Background(),
 		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
 	require.Error(t, err, "no fetch wired must error, not panic")
 }
 
 func TestAzureAttester_PropagatesFetchFailure(t *testing.T) {
 	_, keys := maaSigningKey(t)
-	att := &azureAttester{keys: keys, issuer: maaIssuer, isReady: true,
+	att := &azureAttester{keys: keys, issuer: maaIssuer,
 		fetch: func(_ context.Context, _ []byte) (maaEvidence, error) {
 			return maaEvidence{}, assertErr("vTPM unavailable")
 		}}

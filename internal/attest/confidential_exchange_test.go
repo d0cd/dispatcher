@@ -68,7 +68,7 @@ func TestConfidentialExchange_SealedRoundTrip(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	// 1. Attest + verify through the real attester (generates its own nonce).
-	att := &csAttester{keys: keys, isReady: true, fetch: csEndpointFetch(srv.URL)}
+	att := &csAttester{keys: keys, fetch: csEndpointFetch(srv.URL)}
 	res, err := att.Verify(context.Background(),
 		types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}})
 	require.NoError(t, err)

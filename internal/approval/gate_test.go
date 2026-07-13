@@ -2,7 +2,9 @@ package approval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -100,6 +102,73 @@ func TestGate_ExternalDenial(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrDenied))
 	assert.Equal(t, "external:security-team", rec.Decider)
+}
+
+// A non-ErrDenied approver error must fail closed as a Denied decision, tagged
+// so audit shows it came from an approver fault (not an explicit deny).
+func TestGate_InProcessApproverErrorDenies(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_apperr", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	approver := func(_ []types.PolicyRequirement) (string, error) {
+		return "carol", errors.New("boom")
+	}
+
+	rec, err := g.Wait(context.Background(), approver)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrDenied), "an approver fault must fail closed as Denied")
+	assert.Equal(t, DecisionDenied, rec.Decision)
+	assert.Contains(t, rec.Decider, "approver-error:")
+}
+
+// A canceled context must abandon the wait with the context error and no
+// recorded decision (operator never responded / Ctrl-C).
+func TestGate_ContextCancelReturnsError(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_ctx", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
+
+	rec, err := g.Wait(ctx, nil) // no approver, no external decision
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled))
+	assert.Equal(t, Decision(""), rec.Decision, "no decision must be recorded on cancel")
+}
+
+// An invalid decision on the wire must be rejected before the single-shot CAS,
+// so it doesn't consume the gate — a subsequent valid decision still wins.
+func TestGate_InvalidDecisionDoesNotConsumeGate(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_baddec", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	sock, err := socketPath("run_baddec")
+	require.NoError(t, err)
+	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
+	require.NoError(t, err)
+	require.NoError(t, json.NewEncoder(conn).Encode(wireMsg{
+		Action: "decide", Decision: Decision("maybe"), Decider: "x",
+	}))
+	var reply wireReply
+	require.NoError(t, json.NewDecoder(conn).Decode(&reply))
+	conn.Close()
+	assert.Equal(t, "error", reply.Status)
+	assert.Contains(t, reply.Reason, "invalid decision")
+
+	// Gate must still be open: a valid decision now wins.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = SendDecision("run_baddec", DecisionApproved, "ci")
+	}()
+	rec, err := g.Wait(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionApproved, rec.Decision)
 }
 
 // Socket perms are the auth boundary; loosening them lets other uids in.

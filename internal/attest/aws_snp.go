@@ -155,14 +155,12 @@ func pinARKAndCheckRevocation(pc *trust.ProductCerts, productLine string) error 
 }
 
 // awsAttester verifies AWS SEV-SNP VMs via a raw report (go-sev-guest + the VLEK
-// chain) and the REPORT_DATA binding. isReady is false until a fetch is wired.
+// chain) and the REPORT_DATA binding. Verify fails closed when no evidence fetch
+// is wired (fetch == nil).
 type awsAttester struct {
 	fetchChain awsVLEKChainFetcher
 	fetch      snpFetch
-	isReady    bool
 }
-
-func (a *awsAttester) ready() bool { return a.isReady }
 
 func (a *awsAttester) Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error) {
 	if a.fetch == nil {

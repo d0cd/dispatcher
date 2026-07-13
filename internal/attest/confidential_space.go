@@ -170,17 +170,14 @@ func csEndpointFetch(baseURL string) csFetch {
 }
 
 // csAttester verifies GCP Confidential Space attestation tokens. keys are the
-// trusted Google signing keys (JWKS); isReady is false until a real fetch is
-// wired, so the preflight fails closed before provisioning. The run's
+// trusted Google signing keys (JWKS). Verify fails closed when no evidence fetch
+// is wired (fetch == nil). The run's
 // ConfidentialRequirement.Measurements carries the accepted container image
 // digests (the CS analog of a launch-measurement allowlist).
 type csAttester struct {
-	keys    map[string]crypto.PublicKey
-	fetch   csFetch
-	isReady bool
+	keys  map[string]crypto.PublicKey
+	fetch csFetch
 }
-
-func (a *csAttester) ready() bool { return a.isReady }
 
 func (a *csAttester) Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error) {
 	if a.fetch == nil {

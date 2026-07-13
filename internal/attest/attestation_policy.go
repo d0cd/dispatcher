@@ -39,10 +39,10 @@ func applyPolicy(c Claims, p VerificationPolicy) error {
 	// degenerate to matching agent.BindingHash("","") = SHA-512(""), a public constant
 	// any host could place in REPORT_DATA with no genuine TEE or fresh challenge.
 	if len(p.Nonce) != 32 {
-		return fmt.Errorf("attestation: per-run nonce must be exactly 32 bytes, got %d — R1", len(p.Nonce))
+		return fmt.Errorf("attestation: per-run nonce must be exactly 32 bytes, got %d", len(p.Nonce))
 	}
 	if len(p.ChannelKey) == 0 {
-		return fmt.Errorf("attestation: in-TEE channel key missing — R2")
+		return fmt.Errorf("attestation: in-TEE channel key missing")
 	}
 	if len(c.ReportData) == 0 {
 		return fmt.Errorf("attestation: report has no REPORT_DATA to bind")

@@ -166,15 +166,12 @@ func endpointSNPFetch(baseURL string) snpFetch {
 }
 
 // snpAttester verifies AMD SEV-SNP reports for GCP and AWS. roots are the pinned
-// AMD ARK roots; isReady is false until a real fetch is wired, so the preflight
-// fails closed before provisioning rather than booting a VM it cannot attest.
+// AMD ARK roots. Verify fails closed when no evidence fetch is wired (fetch ==
+// nil) rather than booting a VM it cannot attest.
 type snpAttester struct {
-	roots   []*x509.Certificate
-	fetch   snpFetch
-	isReady bool
+	roots []*x509.Certificate
+	fetch snpFetch
 }
-
-func (a *snpAttester) ready() bool { return a.isReady }
 
 func (a *snpAttester) Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error) {
 	if req.Type == "tdx" {

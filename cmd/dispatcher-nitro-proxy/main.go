@@ -8,13 +8,23 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"io"
 	"log"
 	"net"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/mdlayher/vsock"
 )
+
+// maxConns bounds concurrent bridges so a peer can't exhaust parent fds / enclave
+// vsock buffers by opening unbounded connections.
+const maxConns = 64
 
 func main() {
 	tcpAddr := flag.String("tcp", ":8443", "TCP listen address (dispatcher-facing)")
@@ -26,13 +36,35 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	// Close the listener on SIGINT/SIGTERM so Accept returns and we drain.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() { <-ctx.Done(); _ = l.Close() }()
+
 	log.Printf("dispatcher-nitro-proxy %s -> vsock(cid=%d port=%d)", *tcpAddr, *cid, *vport)
+	sem := make(chan struct{}, maxConns)
 	for {
 		conn, err := l.Accept()
 		if err != nil {
-			log.Fatal(err)
+			// A closed listener (shutdown) is terminal; any other error is
+			// transient (EMFILE/ECONNABORTED) — log and keep serving instead of
+			// exiting and tearing down every in-flight bridge.
+			if errors.Is(err, net.ErrClosed) {
+				log.Print("listener closed; shutting down")
+				return
+			}
+			log.Printf("accept: %v (continuing)", err)
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
-		go bridge(conn, uint32(*cid), uint32(*vport))
+		select {
+		case sem <- struct{}{}:
+			go func() { defer func() { <-sem }(); bridge(conn, uint32(*cid), uint32(*vport)) }()
+		default:
+			log.Print("connection cap reached; rejecting")
+			_ = conn.Close()
+		}
 	}
 }
 

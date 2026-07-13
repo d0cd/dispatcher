@@ -133,7 +133,7 @@ func TestCSAttester_BindsChannelKey(t *testing.T) {
 	channelKey := bytes.Repeat([]byte{0x22}, 32)
 	sum := sha256.Sum256(channelKey)
 	key, keys := maaSigningKey(t)
-	att := &csAttester{keys: keys, isReady: true,
+	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims()
 			c["eat_nonce"] = []string{hex.EncodeToString(nonce), hex.EncodeToString(sum[:])}
@@ -148,7 +148,7 @@ func TestCSAttester_BindsChannelKey(t *testing.T) {
 
 func TestCSAttester_RejectsUncommittedChannelKey(t *testing.T) {
 	key, keys := maaSigningKey(t)
-	att := &csAttester{keys: keys, isReady: true,
+	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims()
 			c["eat_nonce"] = []string{hex.EncodeToString(nonce)} // nonce echoed, key NOT committed
@@ -164,7 +164,7 @@ func TestCSAttester_RejectsUncommittedChannelKey(t *testing.T) {
 
 func TestCSAttester_VerifyAccepts(t *testing.T) {
 	key, keys := maaSigningKey(t)
-	att := &csAttester{keys: keys, isReady: true,
+	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims()
 			c["eat_nonce"] = []string{hex.EncodeToString(nonce)} // echo the challenge
@@ -180,7 +180,7 @@ func TestCSAttester_VerifyAccepts(t *testing.T) {
 
 func TestCSAttester_RejectsReplay(t *testing.T) {
 	key, keys := maaSigningKey(t)
-	att := &csAttester{keys: keys, isReady: true,
+	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, _ []byte) (csEvidence, error) {
 			c := validCSClaims() // eat_nonce is a STALE nonce, not this run's
 			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c)}, nil
@@ -194,8 +194,7 @@ func TestCSAttester_RejectsReplay(t *testing.T) {
 }
 
 func TestCSAttester_NotReadyAndNoFetch(t *testing.T) {
-	assert.False(t, (&csAttester{}).ready(), "not ready until a fetch is wired")
-	_, err := (&csAttester{isReady: true}).Verify(context.Background(),
+	_, err := (&csAttester{}).Verify(context.Background(),
 		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
 	require.Error(t, err, "no fetch wired must error, not panic")
 }

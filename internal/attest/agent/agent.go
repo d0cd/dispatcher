@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"time"
 )
 
 // Agent is the in-TEE side of a Confidential Space run — the measured
@@ -95,7 +96,19 @@ func Serve(l net.Listener, attest AttestFunc) error {
 	if err != nil {
 		return err
 	}
-	return (&http.Server{Handler: a.Handler()}).Serve(l)
+	// The listener is intentionally unauthenticated, so bound every slow-client
+	// vector: ReadHeaderTimeout stops Slowloris header-dribbling, Idle/Read/Write
+	// caps stuck connections, MaxHeaderBytes bounds header memory. The Read/Write
+	// caps are generous because a sealed payload can be a multi-MB source tarball.
+	srv := &http.Server{
+		Handler:           a.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+	}
+	return srv.Serve(l)
 }
 
 func (a *Agent) Handler() http.Handler {

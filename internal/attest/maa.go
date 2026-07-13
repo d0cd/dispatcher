@@ -161,17 +161,14 @@ type MAAMeasuredBoot struct {
 
 // azureAttester verifies Azure confidential VMs via MAA. keys are the trusted MAA
 // signing keys (the instance's /certs JWKS); issuer is the pinned MAA instance;
-// mb optionally pins measured-boot PCRs; isReady is false until a real fetch is
-// wired, so the preflight fails closed before provisioning.
+// mb optionally pins measured-boot PCRs. Verify fails closed when no evidence
+// fetch is wired (fetch == nil).
 type azureAttester struct {
-	keys    map[string]crypto.PublicKey
-	issuer  string
-	mb      MAAMeasuredBoot
-	fetch   maaFetch
-	isReady bool
+	keys   map[string]crypto.PublicKey
+	issuer string
+	mb     MAAMeasuredBoot
+	fetch  maaFetch
 }
-
-func (a *azureAttester) ready() bool { return a.isReady }
 
 func (a *azureAttester) Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error) {
 	if a.fetch == nil {

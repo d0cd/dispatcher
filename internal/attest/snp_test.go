@@ -214,7 +214,7 @@ func TestSNPAttester_VerifyAccepts(t *testing.T) {
 	meas := make48(0xAB)
 	channelKey := []byte("in-tee-channel-public-key")
 
-	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
+	att := &snpAttester{roots: []*x509.Certificate{ch.ark},
 		fetch: func(_ context.Context, nonce []byte) (snpEvidence, error) {
 			// The guest binds this run: REPORT_DATA = SHA-512(nonce || channelKey).
 			rd := agent.BindingHash(nonce, channelKey)
@@ -242,7 +242,7 @@ func TestSNPAttester_VerifyAccepts(t *testing.T) {
 func TestSNPAttester_VerifyRejectsWrongMeasurement(t *testing.T) {
 	ch := newSNPChain(t)
 	channelKey := []byte("k")
-	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
+	att := &snpAttester{roots: []*x509.Certificate{ch.ark},
 		fetch: func(_ context.Context, nonce []byte) (snpEvidence, error) {
 			return snpEvidence{
 				report: buildSNPReport(t, make48(0x01), agent.BindingHash(nonce, channelKey), 5, 0, ch.vcekKey),
@@ -263,7 +263,7 @@ func TestSNPAttester_VerifyRejectsReplay(t *testing.T) {
 	// The guest binds a STALE nonce (not the one Verify generated) -> binding fails.
 	stale := bytesRepeat(0xEE, 32)
 	channelKey := []byte("k")
-	att := &snpAttester{roots: []*x509.Certificate{ch.ark}, isReady: true,
+	att := &snpAttester{roots: []*x509.Certificate{ch.ark},
 		fetch: func(_ context.Context, _ []byte) (snpEvidence, error) {
 			return snpEvidence{
 				report: buildSNPReport(t, meas, agent.BindingHash(stale, channelKey), 5, 0, ch.vcekKey),
@@ -279,7 +279,7 @@ func TestSNPAttester_VerifyRejectsReplay(t *testing.T) {
 }
 
 func TestSNPAttester_RejectsTDXRequest(t *testing.T) {
-	att := &snpAttester{isReady: true}
+	att := &snpAttester{}
 	_, err := att.Verify(context.Background(),
 		types.ConfidentialRequirement{Required: true, Type: "tdx"})
 	require.Error(t, err, "an AMD SEV-SNP attester cannot verify an Intel TDX report")
@@ -287,7 +287,7 @@ func TestSNPAttester_RejectsTDXRequest(t *testing.T) {
 }
 
 func TestSNPAttester_PropagatesFetchFailure(t *testing.T) {
-	att := &snpAttester{roots: []*x509.Certificate{newSNPChain(t).ark}, isReady: true,
+	att := &snpAttester{roots: []*x509.Certificate{newSNPChain(t).ark},
 		fetch: func(_ context.Context, _ []byte) (snpEvidence, error) {
 			return snpEvidence{}, fmt.Errorf("guest unreachable")
 		}}
@@ -298,12 +298,7 @@ func TestSNPAttester_PropagatesFetchFailure(t *testing.T) {
 }
 
 func TestSNPAttester_NoFetchWired(t *testing.T) {
-	_, err := (&snpAttester{isReady: true}).Verify(context.Background(),
+	_, err := (&snpAttester{}).Verify(context.Background(),
 		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
 	require.Error(t, err, "an attester with no fetch must error, not panic")
-}
-
-func TestSNPAttester_NotReadyByDefault(t *testing.T) {
-	assert.False(t, (&snpAttester{}).ready(), "an attester with no live fetch must report not-ready")
-	assert.True(t, (&snpAttester{isReady: true}).ready())
 }

@@ -52,3 +52,29 @@ func TestSeal_RejectsBadRecipientKey(t *testing.T) {
 	_, err := sealToChannelKey([]byte("not-an-x25519-key"), []byte("x"))
 	require.Error(t, err)
 }
+
+// A payload shorter than the KEM encapsulation prefix must be rejected by the
+// length guard, not slice out of bounds.
+func TestSeal_TooShortPayloadRejected(t *testing.T) {
+	_, priv, err := newChannelKeypair()
+	require.NoError(t, err)
+
+	encSize := hpkeKEM.Scheme().CiphertextSize()
+	_, err = openSealed(priv, make([]byte, encSize-1))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too short")
+}
+
+// Corrupting the KEM encapsulation prefix (not the AEAD ciphertext) must also
+// fail to open — the recipient can't derive the shared secret.
+func TestSeal_EncapsulationTamperFails(t *testing.T) {
+	pub, priv, err := newChannelKeypair()
+	require.NoError(t, err)
+	sealed, err := sealToChannelKey(pub, []byte("secret"))
+	require.NoError(t, err)
+
+	sealed[0] ^= 0xFF // flip a byte in the encapsulation prefix
+
+	_, err = openSealed(priv, sealed)
+	require.Error(t, err, "a corrupted encapsulation must not open the payload")
+}

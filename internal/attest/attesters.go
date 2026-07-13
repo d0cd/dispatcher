@@ -13,20 +13,20 @@ import (
 
 // NewCSAttester verifies GCP Confidential Space tokens from the agent endpoint.
 func NewCSAttester(keys map[string]crypto.PublicKey, baseURL string) Attester {
-	return &csAttester{keys: keys, isReady: true, fetch: csEndpointFetch(baseURL)}
+	return &csAttester{keys: keys, fetch: csEndpointFetch(baseURL)}
 }
 
 // NewAzureAttester verifies Azure MAA tokens from the agent endpoint (issuer is
 // the pinned MAA instance URL). mb optionally pins measured-boot PCRs; its zero
 // value keeps the firmware-only behavior (no measured-agent enforcement).
 func NewAzureAttester(keys map[string]crypto.PublicKey, issuer, baseURL string, mb MAAMeasuredBoot) Attester {
-	return &azureAttester{keys: keys, issuer: issuer, mb: mb, isReady: true, fetch: endpointMAAFetch(baseURL)}
+	return &azureAttester{keys: keys, issuer: issuer, mb: mb, fetch: endpointMAAFetch(baseURL)}
 }
 
 // NewAWSAttester verifies raw AWS SEV-SNP reports (go-sev-guest + the VLEK chain
 // from AMD KDS) from the agent endpoint.
 func NewAWSAttester(baseURL string) Attester {
-	return &awsAttester{fetchChain: fetchVLEKChainFromKDS, isReady: true, fetch: endpointSNPFetch(baseURL)}
+	return &awsAttester{fetchChain: fetchVLEKChainFromKDS, fetch: endpointSNPFetch(baseURL)}
 }
 
 // endpointMAAFetch reads MAA evidence (the signed token) from the agent's
