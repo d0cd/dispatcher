@@ -652,6 +652,23 @@ func TestJSONOutput_Plan(t *testing.T) {
 	assert.NotEmpty(t, p.Metadata.ID)
 }
 
+// plan --ai --json must emit machine-readable JSON, not colored human text —
+// aitelier is unavailable in tests so this exercises the deterministic fallback
+// through the AI code path.
+func TestJSONOutput_PlanAI(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(dir+"/main.py", []byte(`print("hi")`), 0o644))
+
+	stdout := captureStdout(t, func() {
+		_, _, err := executeCommand("plan", dir, "--ai", "--json")
+		require.NoError(t, err)
+	})
+
+	assert.NotContains(t, stdout, "\x1b[", "JSON output must not contain ANSI color codes")
+	require.True(t, json.Valid([]byte(stdout)), "plan --ai --json must emit valid JSON, got: %q", stdout)
+}
+
 // TestJSONUnsupportedCommandErrors covers the no-silent-failure rule: --json on
 // a command that doesn't emit JSON must error rather than print prose.
 func TestJSONUnsupportedCommandErrors(t *testing.T) {

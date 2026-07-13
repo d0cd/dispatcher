@@ -147,6 +147,10 @@ func runAIPlan(path string, constraints types.PlanConstraints) error {
 		}
 	}
 
+	if jsonOutput() {
+		return emitJSON(result)
+	}
+
 	// Print result
 	bold.Fprintln(os.Stdout, result.Explanation)
 	fmt.Fprintln(os.Stdout)

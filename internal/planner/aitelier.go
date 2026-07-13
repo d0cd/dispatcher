@@ -292,6 +292,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 
 		var r chatCompletionResponse
 		if err := json.Unmarshal(raw, &r); err != nil {
+			resCh <- result{err: fmt.Errorf("decode chat response: %w", err)}
 			return
 		}
 		resCh <- result{resp: &r}

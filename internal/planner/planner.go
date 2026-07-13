@@ -162,6 +162,38 @@ func (p *Planner) Plan(ctx context.Context, path string, constraints types.PlanC
 
 // DeterministicPlan runs the same tool pipeline without an LLM.
 // Useful as a fallback or when no API key is configured.
+// withinBudget reports whether a cost estimate is confirmably within a budget.
+// A zero/negative budget means "no cap" (always true). A nil or unknown-confidence
+// estimate cannot be confirmed within a budget and fails — a $0 "unknown" must
+// not pass as if it were free (mirrors plan.Build.orderAndFilter).
+func withinBudget(cost *types.CostEstimate, budget float64) bool {
+	if budget <= 0 {
+		return true
+	}
+	if cost == nil || cost.Confidence == types.ConfidenceUnknown {
+		return false
+	}
+	return cost.Value <= budget
+}
+
+// costLess orders cost estimates cheapest-first, with unknown/nil cost sorted
+// after every priced estimate so it can't rank as the cheapest.
+func costLess(a, b *types.CostEstimate) bool {
+	aUnknown := a == nil || a.Confidence == types.ConfidenceUnknown
+	bUnknown := b == nil || b.Confidence == types.ConfidenceUnknown
+	if aUnknown != bUnknown {
+		return !aUnknown
+	}
+	av, bv := 0.0, 0.0
+	if a != nil {
+		av = a.Value
+	}
+	if b != nil {
+		bv = b.Value
+	}
+	return av < bv
+}
+
 func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraints types.PlanConstraints) (*PlanResult, error) {
 	if err := p.tools.SetWorkloadRoot(path); err != nil {
 		return nil, fmt.Errorf("scope workload: %w", err)
@@ -210,11 +242,16 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 			continue
 		}
 
-		// Budget filter
-		if constraints.MaxEstimatedCostUSD > 0 && ev.Cost != nil && ev.Cost.Value > constraints.MaxEstimatedCostUSD {
+		// Budget filter — an unknown-cost estimate cannot be confirmed within a
+		// budget, so it is rejected rather than passing as if it were free.
+		if !withinBudget(ev.Cost, constraints.MaxEstimatedCostUSD) {
+			reason := fmt.Sprintf("cost unknown; cannot confirm within budget $%.2f", constraints.MaxEstimatedCostUSD)
+			if ev.Cost != nil && ev.Cost.Confidence != types.ConfidenceUnknown {
+				reason = fmt.Sprintf("estimated cost $%.2f exceeds budget $%.2f", ev.Cost.Value, constraints.MaxEstimatedCostUSD)
+			}
 			result.Rejected = append(result.Rejected, types.RejectedTarget{
 				Target: ev.TargetID,
-				Reason: fmt.Sprintf("estimated cost $%.2f exceeds budget $%.2f", ev.Cost.Value, constraints.MaxEstimatedCostUSD),
+				Reason: reason,
 			})
 			continue
 		}
@@ -228,17 +265,11 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 		return &result, nil
 	}
 
-	// Sort by cost
+	// Sort cheapest-first; unknown-cost candidates sort last so a $0 "unknown"
+	// can't masquerade as the cheapest option.
 	for i := 0; i < len(feasible); i++ {
 		for j := i + 1; j < len(feasible); j++ {
-			ci, cj := 0.0, 0.0
-			if feasible[i].eval.Cost != nil {
-				ci = feasible[i].eval.Cost.Value
-			}
-			if feasible[j].eval.Cost != nil {
-				cj = feasible[j].eval.Cost.Value
-			}
-			if cj < ci {
+			if costLess(feasible[j].eval.Cost, feasible[i].eval.Cost) {
 				feasible[i], feasible[j] = feasible[j], feasible[i]
 			}
 		}

@@ -35,8 +35,14 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 	}
 
 	// Merge dispatcher.yaml constraints (file config) into plan constraints.
-	// CLI flags take precedence — only fill in unset values.
-	if cfg, _ := workload.LoadConfig(path); cfg != nil {
+	// CLI flags take precedence — only fill in unset values. A malformed config
+	// is a hard error (InspectCodebase above already aborts on it; this guards
+	// the direct call path too) rather than a silent drop of the constraints.
+	cfg, cfgErr := workload.LoadConfig(path)
+	if cfgErr != nil {
+		return nil, fmt.Errorf("load dispatcher config: %w", cfgErr)
+	}
+	if cfg != nil {
 		if constraints.MaxEstimatedCostUSD == 0 && cfg.MaxCost > 0 {
 			constraints.MaxEstimatedCostUSD = cfg.MaxCost
 		}
@@ -130,29 +136,12 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		return nil, fmt.Errorf("no feasible targets found for workload")
 	}
 
-	// Sort feasible by cost or speed (skip if a specific target was requested)
-	if constraints.TargetName == "" {
-		sortCandidates(feasible, constraints.OptimizeFor)
+	// Order the candidates and apply the budget filter.
+	feasible, budgetRejected, err := orderAndFilter(feasible, constraints)
+	if err != nil {
+		return nil, err
 	}
-
-	// Filter by max cost
-	if constraints.MaxEstimatedCostUSD > 0 {
-		var filtered []candidate
-		for _, c := range feasible {
-			if c.cost.Value <= constraints.MaxEstimatedCostUSD {
-				filtered = append(filtered, c)
-			} else {
-				rejected = append(rejected, types.RejectedTarget{
-					Target: c.target.ID,
-					Reason: fmt.Sprintf("estimated cost $%.2f exceeds budget $%.2f", c.cost.Value, constraints.MaxEstimatedCostUSD),
-				})
-			}
-		}
-		if len(filtered) == 0 {
-			return nil, fmt.Errorf("no targets within budget of $%.2f", constraints.MaxEstimatedCostUSD)
-		}
-		feasible = filtered
-	}
+	rejected = append(rejected, budgetRejected...)
 
 	// Build recommendation (first is best)
 	best := feasible[0]
@@ -208,8 +197,58 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 	return p, nil
 }
 
+// orderAndFilter sorts feasible candidates (unless a target was pinned, in
+// which case the caller has already placed it at index 0) and applies the
+// budget filter. It returns the surviving candidates and the targets rejected
+// for cost. A pinned target that busts the budget is a conflict the user must
+// see, so it returns an error rather than silently rerouting to a cheaper
+// alternative; unknown-cost estimates cannot be confirmed within a budget and
+// are rejected when one is set.
+func orderAndFilter(feasible []candidate, constraints types.PlanConstraints) ([]candidate, []types.RejectedTarget, error) {
+	if constraints.TargetName == "" {
+		sortCandidates(feasible, constraints.OptimizeFor)
+	}
+
+	budget := constraints.MaxEstimatedCostUSD
+	if budget <= 0 {
+		return feasible, nil, nil
+	}
+
+	var kept []candidate
+	var rejected []types.RejectedTarget
+	for _, c := range feasible {
+		unknown := c.cost.Confidence == types.ConfidenceUnknown
+		if !unknown && c.cost.Value <= budget {
+			kept = append(kept, c)
+			continue
+		}
+		if constraints.TargetName == c.target.ID {
+			if unknown {
+				return nil, nil, fmt.Errorf("requested target %q has unknown cost and cannot be confirmed within budget $%.2f", c.target.ID, budget)
+			}
+			return nil, nil, fmt.Errorf("requested target %q estimated $%.2f exceeds budget $%.2f", c.target.ID, c.cost.Value, budget)
+		}
+		reason := fmt.Sprintf("estimated cost $%.2f exceeds budget $%.2f", c.cost.Value, budget)
+		if unknown {
+			reason = fmt.Sprintf("cost unknown; cannot confirm within budget $%.2f", budget)
+		}
+		rejected = append(rejected, types.RejectedTarget{Target: c.target.ID, Reason: reason})
+	}
+	if len(kept) == 0 {
+		return nil, nil, fmt.Errorf("no targets within budget of $%.2f", budget)
+	}
+	return kept, rejected, nil
+}
+
 func sortCandidates(candidates []candidate, optimize types.OptimizeGoal) {
 	sort.Slice(candidates, func(i, j int) bool {
+		// Unknown-cost candidates are non-orderable by price; sort them after
+		// every priced candidate so a $0 "unknown" can't masquerade as cheapest.
+		iUnknown := candidates[i].cost.Confidence == types.ConfidenceUnknown
+		jUnknown := candidates[j].cost.Confidence == types.ConfidenceUnknown
+		if iUnknown != jUnknown {
+			return jUnknown
+		}
 		if optimize == types.OptimizeSpeed {
 			// Prefer local targets for speed
 			iLocal := candidates[i].target.Kind == types.TargetKindLocal || candidates[i].target.Kind == types.TargetKindDocker || candidates[i].target.Kind == types.TargetKindLocalVM
