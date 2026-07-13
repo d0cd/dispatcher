@@ -53,10 +53,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	bold.Fprintln(os.Stderr, "Inspecting workload...")
 
-	spec, err := workload.InspectCodebase(absPath)
-	if err != nil {
-		return fmt.Errorf("inspection failed: %w", err)
-	}
+	// Inspect the code only — init regenerates dispatcher.yaml, so a malformed
+	// existing config must not block scaffolding a fresh one.
+	spec := workload.InspectCode(absPath)
 
 	// Build config from inspection using the shared type
 	cfg := workload.DispatcherConfig{

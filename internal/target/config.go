@@ -33,6 +33,14 @@ func (r *Registry) LoadFromFile(path string) error {
 		if t.ID == "" {
 			return fmt.Errorf("target in %s is missing required field 'id'", path)
 		}
+		// Validate SSH targets on load, not just on save/import — a file-loaded
+		// (state-dir or project-local dispatcher.yaml) host/user is interpolated
+		// into ssh argv, so a flag-like value would inject ssh options (RCE).
+		if t.SSH != nil {
+			if err := ValidateSSHTarget(t.SSH); err != nil {
+				return fmt.Errorf("invalid ssh target %q in %s: %w", t.ID, path, err)
+			}
+		}
 		r.Add(t)
 	}
 

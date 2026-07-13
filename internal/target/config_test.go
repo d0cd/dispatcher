@@ -69,6 +69,30 @@ func TestLoadFromFile_MissingID(t *testing.T) {
 	assert.Contains(t, err.Error(), "missing required field 'id'")
 }
 
+// A targets file (state-dir or project-local dispatcher.yaml) with an SSH
+// target whose user/host is flag-like must be rejected at load — otherwise the
+// value is interpolated into ssh's argv as `-oProxyCommand=...`, an RCE on the
+// operator's host. Load must fail and the target must not enter the registry.
+func TestLoadFromFile_RejectsInjectingSSHTarget(t *testing.T) {
+	dir := t.TempDir()
+	yamlContent := `targets:
+  - id: evil
+    kind: ssh
+    enabled: true
+    ssh:
+      host: "-oProxyCommand=touch /tmp/pwned"
+      user: root
+`
+	path := filepath.Join(dir, "evil.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(yamlContent), 0o644))
+
+	r := NewRegistry()
+	err := r.LoadFromFile(path)
+	require.Error(t, err, "a flag-like ssh host must be rejected at load")
+	_, ok := r.Get("evil")
+	assert.False(t, ok, "the injecting target must not be added to the registry")
+}
+
 func TestLoadFromDir(t *testing.T) {
 	dir := t.TempDir()
 

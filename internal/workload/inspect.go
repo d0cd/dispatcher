@@ -1,14 +1,18 @@
 package workload
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// InspectCodebase scans a directory and returns a WorkloadSpec describing the detected workload.
-func InspectCodebase(path string) (types.WorkloadSpec, error) {
+// InspectCode detects the workload's shape from the source tree alone, WITHOUT
+// reading dispatcher.yaml. `init` uses this because it regenerates the config
+// from code and must not be blocked by a malformed existing config (the very
+// thing `init --force` fixes).
+func InspectCode(path string) types.WorkloadSpec {
 	spec := types.WorkloadSpec{
 		Name: filepath.Base(path),
 		Source: types.WorkloadSource{
@@ -28,18 +32,28 @@ func InspectCodebase(path string) (types.WorkloadSpec, error) {
 	spec.Package = detectPackagePlan(path, spec.Runtime)
 	spec.DetectedKind = classifyWorkload(spec)
 
-	// Apply dispatcher.yaml overrides if present
-	if cfg, err := LoadConfig(path); err == nil && cfg != nil {
-		ApplyConfig(&spec, cfg)
+	// Default outputs detection: if `outputs/` exists in the workload directory,
+	// retrieve it after the run. Config-declared outputs (ApplyConfig) override.
+	if info, err := os.Stat(filepath.Join(path, "outputs")); err == nil && info.IsDir() {
+		spec.Outputs = []string{"outputs/"}
 	}
 
-	// Default outputs detection: if config didn't specify and `outputs/`
-	// exists in the workload directory, retrieve it after the run. Users get
-	// data-preserving behavior without having to declare it.
-	if len(spec.Outputs) == 0 {
-		if info, err := os.Stat(filepath.Join(path, "outputs")); err == nil && info.IsDir() {
-			spec.Outputs = []string{"outputs/"}
-		}
+	return spec
+}
+
+// InspectCodebase scans a directory and returns a WorkloadSpec describing the
+// detected workload, with dispatcher.yaml overrides applied. A malformed config
+// is a hard error, not silently dropped — otherwise a typo would void cost caps
+// and the confidential requirement while the run proceeds unconstrained.
+func InspectCodebase(path string) (types.WorkloadSpec, error) {
+	spec := InspectCode(path)
+
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		return spec, fmt.Errorf("load dispatcher config: %w", err)
+	}
+	if cfg != nil {
+		ApplyConfig(&spec, cfg)
 	}
 
 	return spec, nil
