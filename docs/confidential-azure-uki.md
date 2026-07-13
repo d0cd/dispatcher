@@ -1,6 +1,9 @@
-# Azure measured boot: baking the agent into PCR4 (UKI)
+# Azure measured boot: measuring the agent into PCR11 (dm-verity root)
 
-This closes the agent-not-measured caveat on Azure.
+This closes the agent-not-measured caveat on Azure. The delivered path pins
+**PCR11** (the dm-verity roothash carried in the UKI cmdline), captured as
+`DISPATCHER_AZURE_SNP_PCR11` and built via `deploy/azure-uki/mkosi/`. The PCR4/UKI
+discussion below is retained as background on the approach and why we pivoted.
 
 ## Chosen approach: direct SNP+vTPM verification (no MAA)
 

@@ -57,7 +57,7 @@ the attestation format (Nitro COSE doc) differ.
 
 5. **Run via dispatcher** — the adapter automates provisioning the parent, the
    nitro-cli install, shipping the EIF + proxy, running the enclave, and the
-   attest → seal → run exchange. Select it with `confidential.type: nitro` in the
+   attest → seal → run exchange. Select it with `confidential.profile: nitro` in the
    workload and pin the pre-built enclave image:
 
    ```
@@ -88,7 +88,7 @@ the attestation format (Nitro COSE doc) differ.
   - Finding: the NSM emits an *untagged* COSE_Sign1 (no CBOR tag 18); the verifier
     accepts either form.
 - ✅ **Dispatcher-side adapter** (`AWSNitroConfidentialAdapter`): `dispatcher run`
-  with `confidential.type: nitro` provisions the parent, installs nitro-cli, ships
+  with `confidential.profile: nitro` provisions the parent, installs nitro-cli, ships
   the pinned EIF + proxy, runs the enclave, and drives the sealed exchange —
   **live-validated end-to-end** (`TestGolden_NitroLiveAdapter`, us-east-1): sealed
   .env + source reached the enclave, the workload ran, the sealed result came back,

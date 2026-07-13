@@ -47,7 +47,7 @@ On a Nitro instance, one command builds the EIF, captures PCR0, and pins it:
 
 ```
 dispatcher confidential build aws-nitro --repo-root . --proxy dispatcher-nitro-proxy
-dispatcher run .        # workload with confidential.type: nitro
+dispatcher run .        # workload with confidential.profile: nitro
 ```
 
 Or capture from an already-built EIF's `nitro-cli describe-eif` JSON:
@@ -65,7 +65,7 @@ CVM from it, then capture PCR11 from the running agent and pin the gallery image
 ```
 dispatcher confidential capture azure-snp http://<cvm-ip>:8443 \
     --image /subscriptions/…/versions/1.0.0 --pin
-dispatcher run .        # workload with confidential.type: azure-snp
+dispatcher run .        # workload with confidential.profile: azure-snp
 ```
 
 ## Durability: the CI drift guard

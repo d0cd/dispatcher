@@ -1,6 +1,6 @@
 # Spec: Confidential computing (secure jobs)
 
-**Status:** Implemented — provisioning + both verifier cores + pinned ARK roots; GCP SEV-SNP golden-validated on real hardware. Live evidence fetch (the real-guarantee gate) pending.
+**Status:** Implemented end-to-end on all three clouds — provisioning + verifier cores + pinned ARK/AWS roots + the in-TEE measured agent and live evidence fetch. GCP SEV-SNP golden-validated on real hardware. Residual: on the standard AWS SEV-SNP / Azure MAA paths the scp'd agent isn't in the launch measurement (the measured `profile` backends and GCP Confidential Space close it); MAA per-component TCB mapping and live VCEK/cert revocation remain.
 **Related:** ROADMAP Theme 6.
 
 Run a workload on a TEE-backed VM (hardware-encrypted memory) so the cloud
@@ -185,9 +185,8 @@ then sends source/secrets and runs → retrieves outputs → tears down.
 
 **Failure modes the operator sees (all fail closed):**
 - No confidential-capable target for the requested type → **infeasible** at plan.
-- `attestation: required` but the provider's evidence channel isn't ready (today:
-  always, until the guest-agent fetch lands) → refused **before** provisioning
-  (no VM billed).
+- `attestation: required` but the operator hasn't supplied the measured agent /
+  pinned image for the provider → refused **before** provisioning (no VM billed).
 - Measurement not on the allowlist → **rejected**, showing the actual measurement so
   a legitimate new image can be added.
 - Policy/TCB/revocation/type/binding failure → VM **destroyed**, run fails with the
@@ -209,7 +208,7 @@ warned.
 - Provisioning flags (GCP/AWS/Azure) + confidential-capable builtins.
 - The **verify-and-gate flow**: pluggable per-provider `Attester`, post-boot
   verify that **destroys the VM** on failure, verdict recorded on run state.
-- **Both verifier cores** (synthetic-tested, stdlib only): SEV-SNP report parse +
+- **Both verifier cores** (vetted libraries — go-sev-guest, go-jose, circl): SEV-SNP report parse +
   ECDSA-P384/SHA-384 signature + VCEK←ASK←ARK chain (GCP/AWS); MAA token JWS +
   compliance/type/measurement claims (Azure). Each enforces R3–R8 + freshness/
   binding (R1/R2) via `applyPolicy`.
@@ -218,37 +217,33 @@ warned.
 - **Pinned AMD ARK roots** (Milan/Genoa/Turin), embedded from AMD's KDS; the
   SEV-SNP chain anchors on them (R4) and a captured ASK chains to a pinned ARK
   offline.
-- **Readiness-gated registration**: the attesters are registered but report
-  not-ready until a live evidence fetch is wired, so `attestation: required`
-  still fails closed **before** provisioning.
+- **Live-fetch attesters**: each attester is registered ready with a live
+  evidence fetch; `attestation: required` verifies the bound report before any
+  secret ships and fails closed if the operator hasn't provisioned the agent.
 - **Audit surfacing (R13)**: the verdict is rendered in human-readable `status`
   and `diagnose`, not just `status --json`.
 - Secret-free cloud-init (R11).
 
-**Gaps to close for the real guarantee (not yet built):**
-- **In-TEE agent + evidence fetch** — the measured guest-agent that, given the
-  verifier's per-run nonce, generates the in-TEE ephemeral key, sets `REPORT_DATA
-  = H(N ‖ key)`, and returns the report/token (R1/R2/G3). *The most important
-  gap;* it needs a live confidential VM and is the only thing flipping the
-  attesters to ready. Until it lands the verifier crypto is exercised only
-  against synthetic vectors.
+**Delivered / remaining:**
+- ✅ **In-TEE agent + evidence fetch** — the measured guest-agent
+  (`internal/attest/agent` + `cmd/dispatcher-attest*`) that, given the verifier's
+  per-run nonce, generates the in-TEE ephemeral key, sets `REPORT_DATA = H(N ‖
+  key)`, and returns the report/token (R1/R2/G3). Live on all three clouds.
 - **Provision hardening** — pinned vendor images (R7), confidential disk where
   offered + warn (R10/N1), explicit policy bits (R6).
-- **Format bind** — ✅ GCP SEV-SNP confirmed: a real captured **v4** report
-  verifies through the coded ABI offsets + VCEK→ASK→ARK-Milan (golden test
-  passes). Remaining: the **MAA claim names** (Azure ConfidentialVM
-  provisioning is validated live; the golden capture needs the MAA JWKS
-  fetch/pinning + guest agent, not capacity) and **AWS VLEK** — AWS masks the
-  chip id and signs with **VLEK, not
-  VCEK**, so it needs a VLEK→ASK→ARK path (the report ABI + ARK/ASK-Milan roots
-  already match GCP).
+- **Format bind** — ✅ GCP SEV-SNP confirmed (a real captured **v4** report
+  verifies through the coded ABI offsets + VCEK→ASK→ARK-Milan); ✅ **Azure MAA**
+  claim names + JWKS fetch/pinning + guest agent implemented; ✅ **AWS VLEK** —
+  AWS masks the chip id and signs with VLEK not VCEK, so verification uses a
+  `VLEK→ASK→ARK` path (report ABI + ARK/ASK-Milan roots match GCP).
 - **MAA TCB mapping** — MAA reports per-component SVNs, not one TCB; `minTCB` on
   the MAA path is a no-op until those are mapped.
 - **Revocation** (R4) — the ARK roots are pinned, but VCEK/cert revocation
   checking on the live chain is still pending.
 
-Until the fetch lands, a confidential run is usable only with `attestation: off`
-(encrypted memory, no proof — N4).
+A verified confidential run works today given the operator-supplied agent /
+pinned measured image; `attestation: off` remains the explicit opt-out that
+provisions encrypted memory with no proof (N4).
 
 ---
 
@@ -286,8 +281,7 @@ increment 2/3) is trusted.
   its measurement. A cloud-init-injected agent is **rejected** — it runs after the
   measured boot, so it's host-swappable and defeats R7.
 - **Verifiers — BOTH formats** behind the `Attester` interface: SEV-SNP hardware
-  report and MAA/token JWS, **both stdlib-only** (the JWS path is a hardened
-  RS256/ES256 verifier, not `go-jose`, to keep the dependency footprint at three
-  direct deps); shared nonce/measurement/policy/binding checks via `applyPolicy`.
+  report (go-sev-guest) and MAA/token JWS (`go-jose/v4`, see `internal/attest/jws.go`);
+  shared nonce/measurement/policy/binding checks via `applyPolicy`.
 - **Disk-at-rest — allow both, warn (R10/N1).** Confidential disk where the provider
   offers it; elsewhere run but warn + record that disk-at-rest isn't host-opaque.

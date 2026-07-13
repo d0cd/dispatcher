@@ -86,6 +86,19 @@ dispatcher stop <run-id>       # Stop and clean up
 | `targets import` | Import hosts as SSH targets (see [Bring your own hosts](#bring-your-own-hosts)). |
 | `targets doctor <id>` | Health check a target. |
 
+### Confidential images
+
+Manage the measured-image pins that back attested confidential runs (see
+[Confidential computing](#confidentialyaml) and [confidential-pipeline.md](confidential-pipeline.md)).
+
+| Command | Purpose |
+|---|---|
+| `confidential pins` | List the committed measured-image pins. |
+| `confidential pin <gcp\|aws-nitro\|azure-snp>` | Record/update a pin (image ref + measurement). |
+| `confidential capture <gcp\|aws-nitro\|azure-snp> <source>` | Capture a measurement from a built image / booted CVM. |
+| `confidential build <aws-nitro\|gcp\|azure-snp>` | Build the measured image for a backend. |
+| `confidential check` | Fail if a pin drifted from the current tree (the CI drift guard). |
+
 ## Supported targets
 
 | Target | Status | Requires |
@@ -170,7 +183,8 @@ service:                      # Long-running service
   port: 8080
 sandbox: true                 # Run in an isolated sandbox target
 confidential:                 # Run on a TEE-backed (memory-encrypted) VM
-  type: sev-snp               # sev | sev-snp | tdx | any   (default: any)
+  type: sev-snp               # sev | sev-snp | tdx | any   (default: any) — the TEE technology
+  profile: azure-snp          # azure-snp | nitro (optional) — a measured attestation backend
   attestation: required       # required | off              (default: required)
   measurements:               # exact allowlist of accepted launch measurements (hex)
     - <hex-launch-measurement>
@@ -199,7 +213,7 @@ aggregate:
 
 **GPU workloads:** dispatcher provisions the catalog instance that matches the GPU requirement. If no catalog instance matches (an unknown `gpu.model`, or a provider with no GPU inventory), `plan` flags a `gpu-unschedulable` risk and `run` refuses rather than silently launching a CPU-only box.
 
-**Confidential computing:** `confidential:` requests a TEE-backed VM (hardware-encrypted memory) of the given `type`, so the cloud host can't read the workload's memory. Supported on GCP (`sev`/`sev-snp`/`tdx`), AWS (`sev-snp` only), and Azure (`sev-snp`/`tdx`); a job whose `type` no target offers is rejected (it never silently lands on a non-confidential VM). `attestation` defaults to `required`. The report verifiers are built (SEV-SNP report + AMD cert chain for GCP/AWS, MAA token for Azure) and enforce an exact `measurements` allowlist and `minTCB`, but they still **fail closed before provisioning** because the in-TEE evidence channel (the measured guest agent that produces a fresh, bound report) isn't deployed yet — so a `required` run is refused rather than launched. Set `attestation: off` to provision the encrypted-memory VM without verification today (recorded as an unverified run). `measurements` is an exact allowlist (an empty allowlist fails closed under `required`); `minTCB` rejects reports below a firmware version (no-op on the Azure/MAA path until per-component TCB mapping lands). See [docs/confidential-computing.md](confidential-computing.md) and [SECURITY.md](SECURITY.md).
+**Confidential computing:** `confidential:` requests a TEE-backed VM (hardware-encrypted memory) of the given `type`, so the cloud host can't read the workload's memory. `type` is the TEE technology — GCP (`sev`/`sev-snp`/`tdx`), AWS (`sev-snp`), Azure (`sev-snp`/`tdx`); a job whose `type` no target offers is rejected (it never silently lands on a non-confidential VM). `profile` (optional, orthogonal to `type`) selects a *measured* attestation backend: `azure-snp` (Azure direct SNP+vTPM, agent measured into PCR11) or `nitro` (AWS Nitro Enclaves, PCR0). `attestation` defaults to `required`, and the verified path runs: an in-TEE measured agent binds a per-run nonce + its channel key into the report/token (`REPORT_DATA = H(nonce‖key)`), which dispatcher verifies before the workload proceeds — GCP Confidential Space (agent-image digest + JWS), Azure MAA (pinned JWKS) or measured direct-SNP, AWS SEV-SNP (`VLEK→ASK→ARK`) or Nitro. Set `attestation: off` to provision the encrypted-memory VM without verification (recorded as an unverified run). `measurements` is an exact allowlist enforced by the verifier (an empty allowlist fails closed under `required`); `minTCB` rejects reports below a firmware version (no-op on the Azure/MAA path until per-component TCB mapping lands). **Operator setup:** supply the cross-compiled agent binary (`DISPATCHER_AWS_AGENT_BIN`, `DISPATCHER_AZURE_AGENT_BIN`) or a pinned measured image (via the `DISPATCHER_*` env vars or `dispatcher confidential pin`). One residual: on the *standard* AWS SEV-SNP and Azure MAA paths the scp'd agent is not itself in the launch measurement — the measured `profile` backends (and GCP Confidential Space) close that. See [docs/confidential-computing.md](confidential-computing.md) and [SECURITY.md](SECURITY.md).
 
 **GPU images (operator):** GPU instances need the NVIDIA driver preinstalled, which stock cloud images lack. Point dispatcher at an operator-built driver-baked image via `DISPATCHER_GCP_GPU_IMAGE` (a GCP image name in the current project) or `DISPATCHER_AWS_GPU_IMAGE` (an AMI id); GPU instance families then boot from it instead of stock Ubuntu. Build one once (install `nvidia-driver-*-server`, reboot, then `gcloud compute images create` / `aws ec2 create-image`). Without it, a GPU run comes up driverless.
 

@@ -26,7 +26,7 @@ The reconciler audits what happened.
 
 ## What's Built
 
-### CLI Commands (21 top-level + 5 `targets` subcommands)
+### CLI Commands (22 top-level + 5 `targets` + 5 `confidential` subcommands)
 
 ```bash
 dispatcher init [path]              # Scaffold dispatcher.yaml from workload inspection
@@ -54,6 +54,8 @@ dispatcher renew <run-id>           # Extend a running cloud run's self-destruct
 dispatcher gc [--dry-run]           # Find and destroy orphaned cloud resources
 dispatcher recover                  # Inventory cloud VMs whose local record is missing
 dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to-date
+dispatcher confidential pins        # Show/pin/capture/build/check measured-image pins
+                                    #   (subcommands: pins, pin, capture, build, check)
 ```
 
 ### Execution Targets (10 with adapters)
@@ -67,16 +69,16 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 | firecracker-vm | local-vm | CloudVMAdapter + FirecrackerProvider | Working (needs a KVM host; live-validated) |
 | kubernetes | kubernetes | K8sAdapter | Working (needs kubectl) |
 | hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated: provisioning + gc reap/safety (needs hcloud CLI) |
-| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = provisioning only (VLEK path unbuilt); no attested run completes. |
-| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = provisioning + SEV-SNP verifier golden-tested vs a captured report; no live attested run (fails closed pending evidence fetch). |
-| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Live-validated: provisioning + gc reap/teardown-cascade, and a ConfidentialVM (SEV-SNP, vTPM, secure boot) create+reap. Attestation not verified (fails closed / `off` only, like the others). |
+| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = SEV-SNP (VLEK→ASK→ARK) verifier + measured agent, plus a Nitro Enclaves path (PCR0), both implemented and run-reachable; residual: the scp'd SEV-SNP agent isn't folded into the launch measurement (see confidential_aws.go SECURITY NOTE). |
+| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = Confidential Space (measured agent image digest) with live evidence fetch; SEV-SNP verifier golden-validated on real hardware. |
+| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Live-validated: provisioning + gc reap/teardown-cascade, and a ConfidentialVM (SEV-SNP, vTPM, secure boot) create+reap. Confidential = MAA path (JWKS pinned) and a measured direct-SNP path (`confidential.profile: azure-snp`, agent in PCR11), both implemented and run-reachable. |
 
 ### Key Features
 
 - **Workload inspection**: Recursive scanning for runtime, entrypoints, ports, GPU, secrets, data deps, monorepo detection
 - **dispatcher.yaml**: Declarative config that overrides auto-detection (name, command, GPU, service port, budget, timeout, target)
 - **Cost estimation**: Per-target rate cards, historical run data, instance catalog with ~50 cloud VM types
-- **Risk analysis**: 10 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging)
+- **Risk analysis**: 11 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging, confidential-disk-residual)
 - **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [USAGE.md](USAGE.md#bring-your-own-hosts).
 - **Policy gates**: Per-run Unix-socket approval gate. In-process approver (terminal / `--yes`) races an external `dispatcher approve <id>`; filesystem perms (0700 dir, 0600 socket) are the auth boundary.
 - **GPU workloads**: detection → feasibility → catalog/pricing → provisioning. GCP/AWS provision GPU instances from an operator driver-baked image (`DISPATCHER_{GCP,AWS}_GPU_IMAGE`); validated end-to-end (nvidia-smi in-VM on L4/T4). k8s uses `nvidia.com/gpu` limits.
@@ -91,7 +93,9 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 
 ```
 cmd/
-  dispatcher/         # CLI entry point
+  dispatcher/            # CLI entry point
+  dispatcher-attest*/    # in-TEE measured attestation agents (generic + aws/azure/azuresnp/nitro)
+  dispatcher-nitro-proxy/ # parent-side vsock<->TCP proxy for Nitro enclaves
 internal/
   cli/                # Cobra command definitions
   workload/           # Workload inspection, config loading, recursive scanning
@@ -103,13 +107,15 @@ internal/
   run/                # Run state machine, executor, persistence, reconnection, cost tracking, trace
   approval/           # Per-run Unix-socket approval gate (audit Record embedded in run state)
   adapter/            # TargetAdapter interface, shared utilities, local/docker/ssh adapters
-  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima/Firecracker), watchdog, catalog, confidential attesters
+  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima/Firecracker), watchdog, catalog, gc, bill, confidential adapters
+  attest/             # Attestation verifiers (SEV-SNP/MAA/Nitro), pinned AMD/AWS roots, in-TEE agent + sealed exchange
+  confidential/       # HPKE (RFC 9180) payload sealing + measured-image pin registry
   shard/              # Shard planning (count/discover), bounded-parallel fan-out engine
   planner/            # AI planner, tool registry, aitelier backend, MCP server
   state/              # State-dir resolution + 0700 enforcement
   dlog/               # Structured JSON log file
   types/              # Shared Go types and constants
-docs/                 # DESIGN, USAGE, SECURITY, ROADMAP
+docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, confidential-* design/plan docs
 ```
 
 ## Security

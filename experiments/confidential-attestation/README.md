@@ -17,7 +17,7 @@ live TEE can confirm:
 
 ## How the golden test consumes fixtures
 
-`internal/cloudvm/confidential_golden_test.go` reads:
+`internal/attest/confidential_golden_test.go` reads:
 
 ```
 fixtures/
@@ -30,7 +30,7 @@ Default location is `experiments/confidential-attestation/fixtures` (override wi
 offline. Once captured:
 
 ```bash
-go test ./internal/cloudvm -run Golden -v
+go test ./internal/attest -run Golden -v
 ```
 
 Fixtures are git-ignored (they're per-capture and bulky). Reports/certs aren't
@@ -89,7 +89,7 @@ The script writes `report.bin`, `report-data.hex`, `vcek.pem`, `ask.pem`, `ark.p
 
 ```bash
 scp -r <vm>:snp-out/* experiments/confidential-attestation/fixtures/snp/
-go test ./internal/cloudvm -run Golden_SNPReport -v
+go test ./internal/attest -run Golden_SNPReport -v
 ```
 
 ### 4. Tear down
@@ -130,7 +130,7 @@ Writes `token.jwt` and `jwks.json`.
 
 ```bash
 scp -r <vm>:maa-out/* experiments/confidential-attestation/fixtures/maa/
-go test ./internal/cloudvm -run Golden_MAAToken -v
+go test ./internal/attest -run Golden_MAAToken -v
 ```
 
 ### 4. Tear down

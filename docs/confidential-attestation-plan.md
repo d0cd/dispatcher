@@ -34,9 +34,11 @@ vTPM/MAA) — no hand-rolled crypto in any operational path. This doc is the
     measurement via a custom AMI. The only path is **Nitro Enclaves**, where the
     enclave image itself is measured (PCR0). **Verifier + enclave loop
     live-validated** on real hardware (`NewAWSNitroAttester`, in-enclave agent
-    over vsock + NSM, pinned Root-G1 — see `docs/confidential-nitro.md`); pending:
-    the dispatcher-side adapter that automates provisioning. Note Nitro is a
-    distinct, restricted execution model (no direct network/disk in the enclave).
+    over vsock + NSM, pinned Root-G1 — see `docs/confidential-nitro.md`). The
+    dispatcher-side adapter that automates provisioning has shipped
+    (`AWSNitroConfidentialAdapter`, selected via `confidential.profile: nitro`).
+    Note Nitro is a distinct, restricted execution model (no direct network/disk
+    in the enclave).
 
   Until the image/enclave builds land, agent integrity on the SSH-VM paths
   assumes the host does not tamper with the on-disk binary before it runs (a
@@ -68,10 +70,15 @@ independent security review** (an app-logic review, not a crypto audit).
 - ✅ **Seams exist**: `snpFetch` / `maaFetch` function types, `snpAttester{roots,
   fetch, isReady}` / `azureAttester{keys, fetch, isReady}`, and
   `VerificationPolicy{Nonce, ChannelKey, ...}`.
-- ❌ **The evidence source does not exist.** No attester is ever `isReady=true`,
-  no `fetch` is wired, boot images are stock Ubuntu (no measured agent), so every
-  `required` run fails closed and only `attestation: off` (zero verification)
-  executes. Closing this is the whole job.
+- ✅ **The evidence source is wired.** Every attester constructor sets
+  `isReady=true` with a live `fetch` (`csEndpointFetch` / `endpointMAAFetch` /
+  `endpointSNPFetch`); the in-TEE measured agent (`internal/attest/agent` +
+  `cmd/dispatcher-attest*`) returns the report/token bound to the per-run nonce
+  and channel key (`REPORT_DATA = H(N‖key)`), and a `required` run verifies
+  before shipping any secret. Measured images exist for all three clouds (GCP
+  Confidential Space digest, Azure `profile: azure-snp` PCR11, AWS `profile:
+  nitro` PCR0). Residual: the *standard* AWS SEV-SNP / Azure MAA agent is scp'd,
+  not folded into the launch measurement — the measured backends close that.
 
 ## The trust-bootstrap chain (target)
 
@@ -208,17 +215,19 @@ container-based execution path (CS is container-shaped, no SSH), wiring the
 > `tee-image-reference`/`tee-container-log-redirect`/`tee-env-*` metadata; read
 > the token from the serial console / Cloud Logging.
 
-1. **GCP Confidential Space, end-to-end** — verifier + golden capture ✅ done;
-   remaining = the container run-integration + seal-to-`Kpub`. First real guarantee.
-2. **Secret sealing (R9)** generalized (used by #1, reused by the rest).
-3. **AWS raw SEV-SNP + VLEK** — agent (`/dev/sev-guest`), pinned image +
-   measurement capture, VLEK path, cc-5/cc-6.
-4. **Azure MAA** — guest-attestation agent, JWKS pin + `exp`/`iss`, per-component
-   TCB.
-5. Fold the cheap hardening in as each path lands.
+1. **GCP Confidential Space, end-to-end** — ✅ verifier + golden capture + container
+   run-integration + seal-to-`Kpub`. First real guarantee, delivered.
+2. **Secret sealing (R9)** — ✅ generalized (HPKE, `internal/confidential`), reused by all paths.
+3. **AWS raw SEV-SNP + VLEK** — ✅ agent (`/dev/sev-guest`), pinned image + measurement
+   capture, `VLEK→ASK→ARK` path; plus a measured Nitro Enclaves backend (`profile: nitro`).
+4. **Azure MAA** — ✅ guest-attestation agent, JWKS pin + `exp`/`iss`; plus a measured
+   direct-SNP backend (`profile: azure-snp`, PCR11). Per-component TCB mapping remains.
+5. Cheap hardening folded in as each path landed.
 
-Until #1 ships, confidential mode is honestly **"encrypted memory, unverified"**
-(`attestation: off`) and every `required` run fails closed.
+The remaining honest caveat is narrow: on the *standard* AWS SEV-SNP / Azure MAA
+paths the scp'd agent is not itself in the launch measurement — the measured
+`profile` backends (and GCP Confidential Space) close it. `attestation: off`
+stays the explicit opt-out that provisions the TEE without verification.
 
 ## Decisions (approved)
 

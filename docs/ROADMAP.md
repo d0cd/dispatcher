@@ -3,9 +3,11 @@
 Remaining work, grouped by theme. dispatcher is mature — landed and
 live-validated: provisioning/pricing across Hetzner / AWS / GCP / Azure, plus
 Kubernetes, Lima, local process/docker, and **Firecracker microVMs**; durable
-execution; **GPU end-to-end** (GCP + AWS, via driver-baked images); confidential
-VM provisioning + SEV-SNP/MAA verifier cores (GCP SEV-SNP golden-validated on
-real hardware); **sharding/fan-out**; per-run SSH-key injection + per-run
+execution; **GPU end-to-end** (GCP + AWS, via driver-baked images);
+**confidential computing end-to-end on all three clouds** (SEV-SNP/MAA/Nitro
+verifiers + the in-TEE measured agent's live evidence fetch, GCP SEV-SNP
+golden-validated on real hardware) with the `dispatcher confidential` measured-image
+pin pipeline; **sharding/fan-out**; per-run SSH-key injection + per-run
 firewalls; and the bring-your-own-hosts importer. What's left is completeness
 gaps and new capabilities.
 
@@ -26,7 +28,7 @@ disk + public IP) is fixed at the source via a teardown cascade. Uncatalogued
 instances render `cost unknown` rather than $0.
 
 `dispatcher bill [--all] [--by-service] [--reconcile]` complements it with the
-authoritative per-cloud spend (Cost Explorer / Azure Cost Management / GCP
+authoritative per-cloud spend (Cost Explorer / Azure Consumption / GCP
 BigQuery export), and `gc --warn-over <usd>` warns loudly when total ongoing
 cost crosses a threshold.
 
@@ -47,17 +49,22 @@ configured RG/project; Azure auto-created VNet handled best-effort).
 
 Design: [confidential-computing.md](confidential-computing.md). Provisioning
 (GCP SEV-SNP + AMD Milan pin, AWS `AmdSevSnp`, Azure ConfidentialVM), the typed
-`confidential:` model, verifier cores, and pinned AMD ARK roots have landed; the
-**GCP SEV-SNP golden capture is validated on real hardware** (a real v4 report
-verifies through VCEK→ASK→ARK). Remaining:
+`confidential:` model, verifier cores, pinned AMD ARK/AWS roots, **and the live
+evidence path** have landed on all three clouds: the measured in-TEE agent
+(`internal/attest/agent` + `cmd/dispatcher-attest*`) binds the per-run nonce +
+in-TEE key (`REPORT_DATA=H(N‖key)`) and returns the report/token, and a
+`required` run verifies before shipping any secret — GCP Confidential Space,
+Azure MAA (JWKS pinned) + measured direct-SNP (`profile: azure-snp`), AWS
+SEV-SNP (`VLEK→ASK→ARK`) + Nitro (`profile: nitro`). The `dispatcher
+confidential pins|pin|capture|build|check` pipeline manages measured-image pins.
+The **GCP SEV-SNP golden capture is validated on real hardware**. Remaining:
 
 | Item | Effort | Impact |
 |---|---|---|
-| **Live evidence fetch** — the measured guest-agent binding the per-run nonce + in-TEE key (`REPORT_DATA=H(N‖key)`) and returning the report/token, flipping the attesters to *ready*. The remaining gate to a real guarantee. Plan: [confidential-attestation-plan.md](confidential-attestation-plan.md). | L | High |
-| **MAA golden capture (Azure)** + **AWS VLEK verifier path** — Azure ConfidentialVM (SEV-SNP, vTPM, secure boot) provisioning is now **validated live** (`Standard_DC2ads_v5` + the CVM image), so MAA capture is unblocked *at the provisioning layer*; what's missing is the MAA JWKS fetch/pinning + the guest agent, not capacity. AWS SEV-SNP masks the chip id and signs with **VLEK, not VCEK** (confirmed live on an m6a/EPYC-7R13); the report ABI + ARK/ASK-Milan roots match GCP, but verifying AWS needs a **VLEK→ASK→ARK** path (VLEK is CSP-provided, not KDS-fetchable). | M | Medium |
-| **Secret wrapping (R9)** — source/secrets only into the proven TEE; VCEK revocation; MAA per-component TCB. | M | High |
+| **Standard-path agent measurement** — on the *standard* AWS SEV-SNP and Azure MAA paths the scp'd agent isn't folded into the launch measurement (the measured `profile` backends and GCP Confidential Space close it). Fold the agent into the measured image for those paths too. Plan: [confidential-attestation-plan.md](confidential-attestation-plan.md). | M | Medium |
+| **Secret wrapping (R9) hardening** — source/secrets seal only into the proven TEE (delivered); still open: live VCEK/cert **revocation** and **MAA per-component TCB** mapping (`minTCB` is a no-op on MAA until then). | M | Medium |
 | **AWS live pricing** — the EC2 bulk price list is ~479 MB and rarely parses in the plan timeout (now correctly skipped → static/rate-card fallback). Replace with the lightweight Price List Query API (`get-products`). | M | Low |
-| Nitro Enclaves / k8s Confidential Containers — different, larger models. Out of scope until demand. | — | — |
+| k8s Confidential Containers — a different, larger model. Out of scope until demand. | — | — |
 
 ## Low-latency burst execution
 
@@ -148,9 +155,10 @@ TODO/FIXME/panic debt.
 
 ## Suggested order
 
-1. **Confidential: live evidence fetch** — the real-guarantee gate; then MAA
-   capture (Azure ConfidentialVM provisioning already validated live) and the
-   AWS VLEK path.
+1. **Confidential: close the residuals** — fold the agent into the measured
+   image on the standard AWS SEV-SNP / Azure MAA paths, then live VCEK/cert
+   revocation and MAA per-component TCB mapping. (The live evidence fetch, VLEK
+   path, and Nitro backend already shipped.)
 2. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
    (establishes the REST `Provider` pattern + cheap GPU).
 3. **Low-latency** — cloud-native fast backend + startup-latency feasibility.

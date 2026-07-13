@@ -47,7 +47,7 @@ dispatcher stop <id>
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher
-go test ./...                # ~540 tests across 15 packages
+go test ./...                # ~900 tests across 19 packages
 go vet ./...
 ```
 

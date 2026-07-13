@@ -124,7 +124,7 @@ Hard-won provisioning facts (all validated live):
 | teeserver socket client (agent's token fetch) | ✅ built (`teeserver.go`) |
 | channel-key binding (SHA-256(Kpub) in eat_nonce) | ✅ built (`confidential_space.go`) |
 | sealed exchange protocol (attest → seal payload → sealed result) | ✅ built (`confidential_exchange.go`), unit-tested end-to-end via `httptest` |
-| `dispatcher-attest` agent (measured entrypoint + exec runner) | ✅ built (`agent.go`, `agent_runner.go`, `cmd/dispatcher-attest`) |
+| `dispatcher-attest` agent (measured entrypoint + exec runner) | ✅ built (`agent.go`, `runner.go`, `cmd/dispatcher-attest`) |
 | `ConfidentialSpaceAdapter` (dispatcher-side orchestration) | ✅ built (`confidential_space_adapter.go`) |
 | image build/push + provisioning argv + agent-port firewall | ✅ built (`confidential_image.go`, `confidential_space_provision.go`) |
 | run-selection wiring (route confidential GCP → CS adapter) | ✅ built (`internal/cli/confidential.go`) |
