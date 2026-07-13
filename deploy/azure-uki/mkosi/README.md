@@ -1,15 +1,16 @@
-# Azure measured-image build (mkosi) — WIP scaffold
+# Azure measured-image build (mkosi)
 
 Builds a custom Azure Confidential VM image with `dispatcher-attest-azuresnp`
 baked into a **UKI + dm-verity root**, so PCR11 attests the agent (consumed by
-`attest.NewAzureSNPAttester`, which is done + live-validated). This is the one
-remaining piece of Azure measured boot.
+`attest.NewAzureSNPAttester`, which is done + live-validated).
 
-## Status: scaffold, not yet building cleanly
+## Status: validated end-to-end with mkosi from git (not the distro's 20.2)
 
-A live attempt (see `docs/confidential-azure-uki.md`) established the approach and
-the obstacles. `mkosi.conf` here is the starting config. **It does not build on
-Ubuntu 24.04 + mkosi 20.2** due to known ecosystem friction:
+The build is **validated** with **mkosi 27 from git** (`mkosi.conf` here is the
+validated config; see `build-and-upload.md` for the reproducible VHD → gallery →
+CVM flow). It does **not** build on the distro-packaged **Ubuntu 24.04 + mkosi
+20.2** — install mkosi from git, not apt/PyPI. The 20.2 obstacles below are
+retained as background on why the git version is required:
 
 - Ubuntu 24.04 ships no `bootctl` (mkosi needs `bootctl kernel-identify`). A shim
   that answers `kernel-identify → unknown` unblocks it (`mkosi.skeleton/usr/bin/bootctl`).

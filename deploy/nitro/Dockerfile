@@ -6,7 +6,13 @@
 # The enclave has no network and no persistent disk (tmpfs root only), so the
 # workload it runs must be self-contained (no pip/apt at run time). Bake any
 # runtime the workload needs into this image.
-FROM golang:1.25 AS build
+#
+# REPRODUCIBILITY: PCR0 is a content hash of this whole image, so any base-image
+# or package change silently changes PCR0. For a stable, verifiable PCR0, pin the
+# bases by digest (FROM golang:1.25.0@sha256:… / alpine:3.20.3@sha256:…) and the
+# ca-certificates version, and record the expected PCR0 next to the pin. The
+# tags below are pinned to the go.mod toolchain version but not yet by digest.
+FROM golang:1.25.0 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

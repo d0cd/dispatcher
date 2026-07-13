@@ -6,3 +6,5 @@ docs
 dispatcher
 *.test
 .dispatcher
+.env
+.env.*

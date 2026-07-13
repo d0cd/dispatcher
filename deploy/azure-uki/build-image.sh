@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
-# Bake dispatcher-attest-azure into a measured Unified Kernel Image so the agent
-# lands in PCR4 (attested by MAA). Run on an Ubuntu 24.04 Azure CVM builder with
-# the agent binary already cross-compiled to ./dispatcher-attest-azure.
+# WARNING: this UKI path does NOT measure the agent. It builds a Unified Kernel
+# Image (kernel+initrd+cmdline) measured into PCR4, but the agent is installed to
+# /usr/local/bin on a MUTABLE, UNMEASURED root (root=…/cloudimg-rootfs) and is not
+# pulled into the initrd — so PCR4 does not cover the agent binary and an attacker
+# who modifies the image root could swap it without changing PCR4.
 #
-#   sudo ./deploy/azure-uki/build-image.sh
+# Use the measured path instead: deploy/azure-uki/mkosi/ builds a dm-verity root
+# whose roothash is injected into the UKI cmdline and measured into PCR11, which
+# DOES attest the agent-carrying root. That is the flow the azure-snp adapter pins
+# (DISPATCHER_AZURE_SNP_PCR11). This script remains only as a boot-mechanism
+# reference; do not rely on it for a measured-agent guarantee.
+#
+#   sudo ./deploy/azure-uki/build-image.sh   # boot-mechanism reference only
 #
 # See docs/confidential-azure-uki.md for the mechanism and the Secure Boot fork.
-# Steps 1–3 (install + initrd + UKI) are deterministic; step 4 (boot entry) and
-# the Secure Boot decision are validated on the live build — marked VERIFY.
 set -euo pipefail
+
+echo "WARNING: this UKI path does NOT measure the agent (mutable root); use deploy/azure-uki/mkosi/ (dm-verity -> PCR11) for a measured agent." >&2
 
 AGENT_BIN="${AGENT_BIN:-./dispatcher-attest-azure}"
 UNIT="$(dirname "$0")/dispatcher-attest-azure.service"

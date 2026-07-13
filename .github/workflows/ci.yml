@@ -1,5 +1,13 @@
 name: CI
 
+# Hardening TODO (repo-settings / operator, can't be expressed here):
+#   - Pin every `uses:` action to a full commit SHA (not a floating @vN tag) so a
+#     compromised tag can't inject into CI.
+#   - Require the `test` job as a branch-protection check on main.
+#   - govulncheck is installed at @latest and runs non-blocking (below) so a
+#     fresh stdlib advisory doesn't red the build before the toolchain is patched;
+#     pin it to a released version and run it blocking on a schedule.
+
 on:
   push:
     branches: [main]
