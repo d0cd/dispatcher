@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/plan"
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/types"
 )
@@ -74,13 +75,17 @@ func TestStatus_NoAttestationLineForPlainRun(t *testing.T) {
 // behavior is controllable, for testing the status auto-renew path.
 type fakeStatusAdapter struct {
 	*fakeGCAdapter
-	statusErr error
-	extended  bool
+	statusErr   error
+	statusState types.RunState // reported state; defaults to Running when empty
+	extended    bool
 }
 
 func (f *fakeStatusAdapter) Status(context.Context, *adapter.RunHandle) (types.RunState, error) {
 	if f.statusErr != nil {
 		return "", f.statusErr
+	}
+	if f.statusState != "" {
+		return f.statusState, nil
 	}
 	return types.RunStateRunning, nil
 }
@@ -139,6 +144,46 @@ func TestStatus_DoesNotRenewWatchdogWhenStatusFails(t *testing.T) {
 
 	require.NoError(t, runStatusByID(id))
 	assert.False(t, f.extended, "must not renew the watchdog when the live status could not be confirmed")
+}
+
+// When status discovers a self-terminated durable run, the runtime-scaled
+// final cost must be persisted — not left at its stale pre-run value, which
+// would make list/cost/bill permanently undercount the run's spend.
+func TestStatus_PersistsFinalCostOnTerminalDiscovery(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	quietStdout(t)
+
+	p := &types.Plan{
+		Metadata: types.PlanMetadata{ID: "plan_finalcost"},
+		Recommendation: &types.Recommendation{
+			Target:        "test-target",
+			EstimatedCost: types.CostEstimate{Value: 24, Currency: "USD", Confidence: types.ConfidenceHigh},
+		},
+		Workload: types.WorkloadSpec{DetectedKind: types.WorkloadKindService},
+	}
+	_, err := plan.Save(p)
+	require.NoError(t, err)
+
+	r := run.NewRun(p)
+	require.NoError(t, r.Transition(types.RunStatePlanning))
+	require.NoError(t, r.Transition(types.RunStateValidated))
+	require.NoError(t, r.Transition(types.RunStatePreparing))
+	require.NoError(t, r.Transition(types.RunStateRunning))
+	r.StartedAt = time.Now().Add(-time.Hour) // ~1h of runtime to scale from
+	r.HandleID = "h1"
+	r.HandleState = json.RawMessage(`{}`)
+	_, err = r.Save()
+	require.NoError(t, err)
+
+	f := &fakeStatusAdapter{fakeGCAdapter: &fakeGCAdapter{id: "test-target"}, statusState: types.RunStateCompleted}
+	withAdapterForTarget(t, f)
+
+	require.NoError(t, runStatusByID(r.ID))
+
+	rec, err := run.LoadRecord(r.ID)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateCompleted, rec.State)
+	assert.Greater(t, rec.Cost.Value, 0.0, "final cost must be persisted on terminal discovery")
 }
 
 func TestStatus_RenewsWatchdogWhenRunning(t *testing.T) {

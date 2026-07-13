@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -80,6 +81,45 @@ func TestCostSampler_TerminatesWhenBudgetExceeded(t *testing.T) {
 	}
 	assert.True(t, a.terminated.Load(), "sampler must call Terminate when budget is breached")
 	assert.Equal(t, types.RunStateBudgetExceeded, r.GetState())
+}
+
+// When the workload finishes on its own in the same tick window (the run has
+// already left Running), the sampler must not claim a termination it didn't
+// perform, and must log that enforcement was skipped rather than doing so
+// silently.
+func TestCostSampler_SkipsEnforcementAfterWorkloadDone(t *testing.T) {
+	prev := SetCostSampleInterval(5 * time.Millisecond)
+	defer func() { SetCostSampleInterval(prev) }()
+
+	var logbuf bytes.Buffer
+	dlog.SetOutput(&logbuf)
+	defer dlog.SetOutput(io.Discard)
+
+	a := &budgetAdapter{}
+	exec := NewExecutor(a)
+	var cliOut bytes.Buffer
+
+	r := &Run{
+		ID:    "run_race",
+		State: types.RunStateCollectingArtifacts, // already left Running
+		Plan: &types.Plan{
+			Constraints: types.PlanConstraints{MaxEstimatedCostUSD: 0.01},
+			Recommendation: &types.Recommendation{
+				Target:        "test",
+				EstimatedCost: types.CostEstimate{Value: 100, Currency: "USD", Confidence: types.ConfidenceHigh},
+			},
+			Workload: types.WorkloadSpec{DetectedKind: types.WorkloadKindScript},
+		},
+		StartedAt: time.Now().Add(-time.Minute),
+	}
+
+	stop := exec.startCostSampler(context.Background(), r, &adapter.RunHandle{ID: "h"}, &cliOut)
+	time.Sleep(60 * time.Millisecond)
+	stop()
+
+	assert.False(t, a.terminated.Load(), "must not terminate a workload that already finished")
+	assert.NotContains(t, cliOut.String(), "terminating", "must not claim a termination that did not happen")
+	assert.Contains(t, logbuf.String(), "budget.enforce.skipped", "skipped enforcement must be logged, not silent")
 }
 
 func TestCostSampler_NoBudgetNoSampler(t *testing.T) {

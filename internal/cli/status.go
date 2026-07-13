@@ -64,6 +64,11 @@ func runStatusByID(id string) error {
 						} else {
 							r.MarkTerminal(liveState)
 						}
+						// Persist the runtime-scaled final cost before saving.
+						// A self-terminated durable run never ran executeEphemeral's
+						// FinalizeCost, so without this the record keeps its
+						// pre-run cost and list/cost/bill undercount its spend.
+						r.FinalizeCost()
 						if _, err := r.Save(); err != nil {
 							dlog.L().Warn("status.refresh_save_failed", "run", id, "err", err.Error())
 						}

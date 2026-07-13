@@ -2,6 +2,7 @@ package run
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"testing"
 	"time"
@@ -18,10 +19,11 @@ import (
 // the shared mock a FailureReporter, which would change other tests).
 type retryAdapter struct {
 	*mockAdapter
-	statusSeq []types.RunState
-	idx       int
-	failure   adapter.FailureDetails
-	execCount int
+	statusSeq      []types.RunState
+	idx            int
+	failure        adapter.FailureDetails
+	execCount      int
+	cleanedHandles []string
 }
 
 func (m *retryAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.RunState, error) {
@@ -35,7 +37,17 @@ func (m *retryAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.Ru
 
 func (m *retryAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	m.execCount++
-	return m.mockAdapter.Execute(ctx, p)
+	h, err := m.mockAdapter.Execute(ctx, p)
+	if h != nil {
+		// Distinct id per provisioning so a leaked prior handle is detectable.
+		h.ID = fmt.Sprintf("handle-%d", m.execCount)
+	}
+	return h, err
+}
+
+func (m *retryAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
+	m.cleanedHandles = append(m.cleanedHandles, h.ID)
+	return m.mockAdapter.Cleanup(ctx, h)
 }
 
 func (m *retryAdapter) FailureDetails(_ *adapter.RunHandle) adapter.FailureDetails {
@@ -58,6 +70,11 @@ func TestExecutor_TransientRetrySucceeds(t *testing.T) {
 	assert.Equal(t, types.RunStateCompleted, r.GetState())
 	assert.Equal(t, 1, r.RetryCount, "retried exactly once")
 	assert.Equal(t, 2, m.execCount, "one initial Execute + one retry")
+	// The first provisioning's handle must be torn down before the retry
+	// provisions a new one — otherwise a cloud VM/Job from the failed attempt
+	// leaks and keeps billing.
+	assert.Contains(t, m.cleanedHandles, "handle-1", "leaked first handle must be cleaned up on retry")
+	assert.Contains(t, m.cleanedHandles, "handle-2", "final handle must be cleaned up")
 }
 
 func TestExecutor_NoRetryWhenOptInDisabled(t *testing.T) {

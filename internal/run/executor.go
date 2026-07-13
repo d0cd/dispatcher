@@ -171,8 +171,11 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 		}
 	}
 
-	// Check final status
-	state, err := e.adapter.Status(ctx, handle)
+	// Wait for the workload to reach a terminal state. Blocking-Status adapters
+	// (local/docker) return terminal on the first call; poll-based durable
+	// adapters (cloud VM, k8s) report Running until the workload finishes, so
+	// we must poll rather than tear the run down on the first reading.
+	state, err := e.waitForTerminal(ctx, handle, r.Plan.Constraints.MaxDuration)
 
 	// Collect artifacts BEFORE we transition to a terminal state — even on
 	// failure. Crash dumps and partial outputs are usually exactly what the
@@ -215,6 +218,13 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 			}
 			r.RetryCount++
 			r.Failure = adapter.FailureDetails{}
+			// Tear down the failed attempt's resources before re-provisioning.
+			// The retry overwrites r.Handle, so without this the first
+			// attempt's VM/Job would be orphaned and keep billing until the
+			// watchdog TTL or `dispatcher gc` reclaims it.
+			if _, cErr := e.adapter.Cleanup(context.Background(), handle); cErr != nil {
+				dlog.L().Warn("retry.cleanup.failed", "run", r.ID, "err", cErr.Error())
+			}
 			// A retry is a fresh run from the adapter's perspective. The
 			// previous handle is dead; ask the adapter for a new one. Cloud
 			// VM re-provisioning lives behind adapter.Execute, so this path
@@ -225,10 +235,10 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 				handle = retryHandle
 				r.Handle = retryHandle
 				_ = r.PersistHandle()
-				// Status the new run. We deliberately don't re-stream logs
+				// Wait for the new run. We deliberately don't re-stream logs
 				// here to keep the retry path narrow — the original log
 				// writer is closed.
-				state, err = e.adapter.Status(ctx, handle)
+				state, err = e.waitForTerminal(ctx, handle, r.Plan.Constraints.MaxDuration)
 				if err == nil && state != types.RunStateExecutionFailed {
 					retrySucceeded = true
 				} else if fr, ok := e.adapter.(adapter.FailureReporter); ok {
@@ -265,6 +275,43 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	return nil
 }
 
+// waitForTerminal polls the adapter's Status until it returns a terminal state,
+// the context is canceled, or maxDuration elapses. Blocking-Status adapters
+// (local/docker) return terminal on the first call so the loop exits at once;
+// poll-based durable adapters (cloud VM, k8s) return RunStateRunning until the
+// workload finishes. On a maxDuration timeout the workload is terminated and
+// reported failed; the watchdog is only a backstop for a crashed CLI.
+func (e *Executor) waitForTerminal(ctx context.Context, handle *adapter.RunHandle, maxDuration time.Duration) (types.RunState, error) {
+	var deadline <-chan time.Time
+	if maxDuration > 0 {
+		timer := time.NewTimer(maxDuration)
+		defer timer.Stop()
+		deadline = timer.C
+	}
+
+	for {
+		state, err := e.adapter.Status(ctx, handle)
+		if err != nil {
+			return state, err
+		}
+		if state != types.RunStateRunning {
+			return state, nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return state, ctx.Err()
+		case <-deadline:
+			if termErr := e.adapter.Terminate(context.Background(), handle); termErr != nil {
+				dlog.L().Error("maxduration.terminate.failed", "handle", handle.ID, "err", termErr.Error())
+			}
+			return types.RunStateExecutionFailed,
+				fmt.Errorf("workload exceeded max duration %s", maxDuration)
+		case <-time.After(time.Duration(statusPollInterval.Load())):
+		}
+	}
+}
+
 // startLongRunning sets up a long-running workload that survives CLI exit.
 func (e *Executor) startLongRunning(ctx context.Context, r *Run, logWriter io.Writer) error {
 	durable, ok := e.adapter.(adapter.DurableAdapter)
@@ -297,8 +344,21 @@ func (e *Executor) startLongRunning(ctx context.Context, r *Run, logWriter io.Wr
 // to fit atomic.Int64.
 var costSampleInterval atomic.Int64
 
+// statusPollInterval is how often executeEphemeral re-checks a poll-based
+// adapter's Status while a workload is still running. Blocking-Status adapters
+// (local/docker) return terminal on the first call and never observe it.
+// Test-adjustable via SetStatusPollInterval.
+var statusPollInterval atomic.Int64
+
 func init() {
 	costSampleInterval.Store(int64(5 * time.Second))
+	statusPollInterval.Store(int64(3 * time.Second))
+}
+
+// SetStatusPollInterval changes the Status poll period. Test-only; returns the
+// previous value so the caller can restore it.
+func SetStatusPollInterval(d time.Duration) time.Duration {
+	return time.Duration(statusPollInterval.Swap(int64(d)))
 }
 
 // SetCostSampleInterval changes the cost-sampling period. Test-only; returns
@@ -345,6 +405,20 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter
 					continue
 				}
 				overshoot := live.Value - budget
+				// Claim the run for termination first. The BudgetExceeded
+				// transition is legal only from Running; if it fails the
+				// workload already finished on its own in this tick window, so
+				// there is nothing to terminate. Log the skip rather than
+				// emitting a "terminating" message for a kill that never happens.
+				if err := r.Transition(types.RunStateBudgetExceeded); err != nil {
+					dlog.L().Info("budget.enforce.skipped",
+						"run", r.ID,
+						"reason", err.Error(),
+						"actual_usd", live.Value,
+						"budget_usd", budget)
+					return
+				}
+				r.setCost(live)
 				if logWriter != nil {
 					fmt.Fprintf(logWriter, "[dispatcher] budget exceeded: $%.4f > $%.2f (overshoot $%.4f) — terminating\n",
 						live.Value, budget, overshoot)
@@ -355,12 +429,9 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter
 					"budget_usd", budget,
 					"overshoot_usd", overshoot,
 					"confidence", string(live.Confidence))
-				if err := r.Transition(types.RunStateBudgetExceeded); err == nil {
-					r.setCost(live)
-					if termErr := e.adapter.Terminate(context.Background(), handle); termErr != nil {
-						dlog.L().Error("budget.terminate.failed",
-							"run", r.ID, "err", termErr.Error())
-					}
+				if termErr := e.adapter.Terminate(context.Background(), handle); termErr != nil {
+					dlog.L().Error("budget.terminate.failed",
+						"run", r.ID, "err", termErr.Error())
 				}
 				return
 			}

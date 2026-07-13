@@ -225,17 +225,7 @@ var validTransitions = map[types.RunState][]types.RunState{
 		types.RunStateCollectingArtifacts,
 		types.RunStateExecutionFailed,
 		types.RunStateBudgetExceeded,
-		types.RunStateDetached,
 		types.RunStateStopping,
-	},
-	types.RunStateDetached: {
-		types.RunStateReconnecting,
-		types.RunStateCleaningUp,
-	},
-	types.RunStateReconnecting: {
-		types.RunStateRunning,
-		types.RunStateDetached,
-		types.RunStateCleaningUp,
 	},
 	types.RunStateStopping: {
 		types.RunStateCleaningUp,

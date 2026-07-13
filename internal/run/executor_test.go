@@ -38,6 +38,9 @@ type mockAdapter struct {
 	executeErr     error
 	statusResult   types.RunState
 	statusErr      error
+	statusSequence []types.RunState // when set, Status returns successive elements (clamped to last)
+	statusCalls    int
+	terminateCalls int
 	cleanupResult  *adapter.CleanupResult
 	cleanupErr     error
 	cleanupCalls   int
@@ -75,6 +78,14 @@ func (m *mockAdapter) Execute(_ context.Context, _ *types.Plan) (*adapter.RunHan
 	return &adapter.RunHandle{ID: "mock-handle", TargetID: m.id, State: "opaque"}, nil
 }
 func (m *mockAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.RunState, error) {
+	m.statusCalls++
+	if len(m.statusSequence) > 0 {
+		idx := m.statusCalls - 1
+		if idx >= len(m.statusSequence) {
+			idx = len(m.statusSequence) - 1
+		}
+		return m.statusSequence[idx], m.statusErr
+	}
 	return m.statusResult, m.statusErr
 }
 func (m *mockAdapter) Logs(_ context.Context, _ *adapter.RunHandle, w io.Writer) error {
@@ -84,7 +95,10 @@ func (m *mockAdapter) Logs(_ context.Context, _ *adapter.RunHandle, w io.Writer)
 func (m *mockAdapter) Artifacts(_ context.Context, _ *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
 	return nil, nil
 }
-func (m *mockAdapter) Terminate(_ context.Context, _ *adapter.RunHandle) error { return nil }
+func (m *mockAdapter) Terminate(_ context.Context, _ *adapter.RunHandle) error {
+	m.terminateCalls++
+	return nil
+}
 func (m *mockAdapter) Cleanup(_ context.Context, _ *adapter.RunHandle) (*adapter.CleanupResult, error) {
 	m.cleanupCalls++
 	return m.cleanupResult, m.cleanupErr
@@ -233,6 +247,76 @@ func TestExecutor_PanicRecovery(t *testing.T) {
 	})
 	assert.Equal(t, types.RunStateExecutionFailed, r.GetState())
 	assert.Contains(t, r.Error, "panic")
+}
+
+// TestExecutor_PollsUntilTerminal covers the durable-adapter contract: a
+// poll-based Status (cloud VM / k8s) returns Running until the workload
+// finishes. The executor must keep polling instead of tearing the run down on
+// the first Running reading.
+func TestExecutor_PollsUntilTerminal(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	mock := newMockAdapter()
+	mock.statusSequence = []types.RunState{
+		types.RunStateRunning,
+		types.RunStateRunning,
+		types.RunStateCompleted,
+	}
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateCompleted, r.GetState())
+	assert.GreaterOrEqual(t, mock.statusCalls, 3, "executor must poll Status until terminal, not tear down on first Running")
+}
+
+// TestExecutor_PollRespectsContextCancel: a workload that never terminates must
+// stop polling when the context is canceled, and cleanup must still run.
+func TestExecutor_PollRespectsContextCancel(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	mock := newMockAdapter()
+	mock.statusResult = types.RunStateRunning // never terminal
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	err := exec.Execute(ctx, r, io.Discard)
+	assert.Error(t, err)
+	assert.True(t, mock.cleanupCalls > 0, "cleanup must run when polling is canceled")
+}
+
+// TestExecutor_PollRespectsMaxDuration: a workload that never terminates must be
+// terminated and reported failed once MaxDuration elapses.
+func TestExecutor_PollRespectsMaxDuration(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	mock := newMockAdapter()
+	mock.statusResult = types.RunStateRunning // never terminal
+	exec := NewExecutor(mock)
+	p := executorTestPlan()
+	p.Constraints.MaxDuration = 15 * time.Millisecond
+	r := NewRun(p)
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.True(t, mock.terminateCalls > 0, "workload must be terminated when MaxDuration elapses")
+	assert.True(t, mock.cleanupCalls > 0, "cleanup must run after MaxDuration timeout")
 }
 
 func TestExecutor_ApprovalDenied(t *testing.T) {
