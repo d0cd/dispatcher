@@ -2,6 +2,8 @@ package cloudvm
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -9,6 +11,31 @@ import (
 
 	"github.com/d0cd/dispatcher/internal/adapter"
 )
+
+// A transient failure deleting a BILLING satellite (OS disk / public IP) must be
+// retried and, if it persists, surfaced — otherwise teardown silently leaks an
+// untagged disk that bills forever and gc can't reap.
+func TestAzureDeleteAssociated_RetriesAndSurfacesBillingLeak(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	diskCalls := 0
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "delete") && strings.Contains(joined, "osdisk") {
+			diskCalls++
+			return nil, fmt.Errorf("Too many requests (throttled)") // transient, persistent
+		}
+		return []byte("{}"), nil
+	}
+	a := &AzureProvider{resourceGroup: "rg"}
+	err := a.deleteAssociatedResources(context.Background(), azureVMResources{
+		nicIDs: []string{"/nics/n1"}, publicIPs: []string{"/ips/p1"},
+		osDiskID: "/disks/osdisk", vnets: []string{"/vnets/v1"},
+	})
+	require.Error(t, err, "a persistently-failing OS disk delete must surface, not be swallowed")
+	assert.Contains(t, err.Error(), "osdisk")
+	assert.Greater(t, diskCalls, 1, "the transient disk delete must be retried")
+}
 
 // azResponses drives the runCLI seam for az. It matches on the leading argv
 // tokens so a test can canned-respond per subcommand (vm show, nic show, etc.).

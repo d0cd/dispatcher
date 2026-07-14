@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -325,4 +326,21 @@ func TestProviderBaseRates(t *testing.T) {
 	assert.Greater(t, providerBaseRate(ProviderAzure), 0.0)
 	assert.Greater(t, providerBaseRate(ProviderHetzner), 0.0)
 	assert.Less(t, providerBaseRate(ProviderHetzner), providerBaseRate(ProviderAWS))
+}
+
+// rsync exits 23 (partial transfer) when a declared but optional output wasn't
+// produced by the workload — that must be classified so Artifacts can skip it
+// instead of reporting a spurious error.
+func TestRsyncExitCode(t *testing.T) {
+	assert.Equal(t, 23, rsyncExitCode(execCommandExit(t, 23)), "rsync partial-transfer code must be recognized")
+	assert.Equal(t, 1, rsyncExitCode(execCommandExit(t, 1)), "a real failure keeps its own exit code")
+	assert.Equal(t, -1, rsyncExitCode(exec.Command("dispatcher-no-such-binary-xyz").Run()),
+		"a non-exit error (binary missing) is not an exit code")
+}
+
+func execCommandExit(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	require.Error(t, err)
+	return err
 }

@@ -286,8 +286,7 @@ func (a *AzureProvider) DestroyVM(ctx context.Context, vmID string) error {
 		return fmt.Errorf("az vm delete failed: %w", err)
 	}
 
-	a.deleteAssociatedResources(ctx, assoc)
-	return nil
+	return a.deleteAssociatedResources(ctx, assoc)
 }
 
 func (a *AzureProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {

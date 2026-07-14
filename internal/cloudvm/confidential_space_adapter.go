@@ -102,6 +102,15 @@ func (a *ConfidentialSpaceAdapter) ID() string { return a.targetID }
 func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*confidentialRunState, error) {
 	w := p.Workload
 
+	// Fail closed on GPU, as the plain adapter does: Confidential Space forces a
+	// CPU-only SEV SKU and has no GPU inventory, so a GPU workload reaching here
+	// (e.g. a hand-forced target bypassing feasibility) must be refused rather
+	// than silently run CPU-only on a costly confidential VM. InstanceType is
+	// unset on this path, so this refuses whenever the workload requires a GPU.
+	if err := validateGPUInstance(w, ""); err != nil {
+		return nil, err
+	}
+
 	payload, err := buildConfidentialPayload(w)
 	if err != nil {
 		return nil, fmt.Errorf("build workload payload: %w", err)
@@ -147,6 +156,12 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 		}
 		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// Reap the agent-port firewall too — DestroyVM only deletes the instance,
+		// so an error after provisioning would otherwise leak the per-run rule
+		// (mirrors Cleanup and createConfidentialSpaceVM's own teardown).
+		if fw, ok := d.provider.(agentFirewaller); ok {
+			_ = fw.deleteAgentFirewall(cctx, agentFirewallName(vm.ID))
+		}
 		_ = d.provider.DestroyVM(cctx, vm.ID)
 	}()
 

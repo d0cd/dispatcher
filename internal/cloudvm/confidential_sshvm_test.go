@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -80,6 +81,56 @@ func TestExecuteSSHConfidential_HappyPath(t *testing.T) {
 	assert.Equal(t, []byte("SECRET=sshvm\n"), got.DotEnv, "the .env is delivered sealed")
 	assert.NotEmpty(t, got.SourceTarGz, "the source is delivered sealed")
 	assert.Equal(t, 1, provider.VMCount(), "the VM stays up until Cleanup")
+}
+
+// A confidential SSH-VM (SEV-SNP CVM / Nitro parent) must install the same
+// self-destruct watchdog the regular cloud path does: it is the only backstop
+// against an unbounded bill if the dispatcher CLI is killed mid-run. The TTL
+// must honor the plan's WatchdogTTL.
+func TestExecuteSSHConfidential_InstallsWatchdog(t *testing.T) {
+	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+
+	provider := NewMockProvider(ProviderAzure)
+	deps := sshConfidentialDeps{
+		provider:   provider,
+		startAgent: func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
+		waitReady:  func(context.Context, string) error { return nil },
+		verify:     cannedVerify(attest.AttestationResult{Verified: true, Measurement: "pcr-11", ChannelKey: []byte("k")}, nil),
+	}
+	plan := sshConfTestPlan(t, "run-wd", []string{"true"})
+	plan.Constraints.WatchdogTTL = 15 * time.Minute
+
+	_, err := executeSSHConfidential(context.Background(), deps, plan, "dispatcher-cvm-job")
+	require.NoError(t, err)
+	ud := provider.LastCreateOpts.UserData
+	assert.Contains(t, ud, "dispatcher-watchdog.service", "confidential VM must install the self-destruct watchdog backstop")
+	assert.Contains(t, ud, "900", "watchdog deadline must honor the plan's WatchdogTTL (15m = 900s)")
+}
+
+// Backstop mirroring the plain adapter's validateGPUInstance guard: the
+// confidential SSH-VM path forces a CPU-only CVM SKU, so a GPU workload that
+// reaches it (e.g. a hand-forced target bypassing feasibility) must be refused
+// BEFORE provisioning — never silently run CPU-only on an expensive CVM.
+func TestExecuteSSHConfidential_RefusesGPUWorkload(t *testing.T) {
+	// Stub the exchange to SUCCEED so the only path to an error (and to VMCount 0)
+	// is the GPU guard refusing before provisioning — not a downstream failure
+	// whose deferred teardown would coincidentally leave VMCount at 0.
+	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+
+	provider := NewMockProvider(ProviderAWS)
+	deps := sshConfidentialDeps{
+		provider:     provider,
+		confidential: "sev-snp",
+		startAgent:   func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
+		waitReady:    func(context.Context, string) error { return nil },
+		verify:       cannedVerify(attest.AttestationResult{Verified: true, ChannelKey: []byte("k")}, nil),
+	}
+	plan := sshConfTestPlan(t, "run-gpu", []string{"true"})
+	plan.Workload.Requirements.GPU = types.GPURequirement{Required: true, Model: "a100"}
+
+	_, err := executeSSHConfidential(context.Background(), deps, plan, "dispatcher-snp-job")
+	require.Error(t, err)
+	assert.Equal(t, 0, provider.VMCount(), "must refuse before provisioning a CPU-only confidential VM")
 }
 
 // TestExecuteSSHConfidential_ThreadsEnclaveShape confirms the generalized VM shape

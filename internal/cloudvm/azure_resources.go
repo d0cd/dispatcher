@@ -129,17 +129,52 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) (azu
 // then the OS disk, then the VNet. The VNet delete is best-effort and last: it
 // succeeds only for a per-run VNet the departing VM emptied, and harmlessly
 // fails (dependency in use) for a VNet still shared by other resources.
-func (a *AzureProvider) deleteAssociatedResources(ctx context.Context, r azureVMResources) {
-	ordered := append([]string{}, r.nicIDs...)
-	ordered = append(ordered, r.publicIPs...)
-	ordered = append(ordered, r.nsgs...)
+func (a *AzureProvider) deleteAssociatedResources(ctx context.Context, r azureVMResources) error {
+	// Each delete retries transient failures — a single throttle/503 at this step
+	// is exactly what would otherwise permanently leak an untagged billing
+	// satellite. Failure of a BILLING satellite (OS disk / public IP) is surfaced
+	// with its resource id so the operator can delete it by hand: by the time we
+	// get here the VM is already gone, so neither a DestroyVM retry (its
+	// gatherVMResources `az vm show` now fails) nor `dispatcher gc` (these
+	// satellites are untagged, hence not dispatcher-owned) can reclaim it.
+	// NIC/NSG/VNet are best-effort (free, or the shared-VNet delete harmlessly
+	// fails when still in use).
+	type item struct {
+		id      string
+		billing bool
+	}
+	var items []item
+	for _, id := range r.nicIDs {
+		items = append(items, item{id, false})
+	}
+	for _, id := range r.publicIPs {
+		items = append(items, item{id, true})
+	}
+	for _, id := range r.nsgs {
+		items = append(items, item{id, false})
+	}
 	if r.osDiskID != "" {
-		ordered = append(ordered, r.osDiskID)
+		items = append(items, item{r.osDiskID, true})
 	}
-	ordered = append(ordered, r.vnets...)
-	for _, id := range ordered {
-		_, _ = runCLI(ctx, "az", "resource", "delete", "--ids", id)
+	for _, id := range r.vnets {
+		items = append(items, item{id, false})
 	}
+
+	var leaked []string
+	for _, it := range items {
+		id := it.id
+		err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+			_, e := runCLI(ctx, "az", "resource", "delete", "--ids", id)
+			return e
+		})
+		if err != nil && it.billing {
+			leaked = append(leaked, id)
+		}
+	}
+	if len(leaked) > 0 {
+		return fmt.Errorf("azure teardown could not delete billing resources; they keep billing, are untagged, and cannot be auto-reaped (VM already deleted) — delete by hand: %s", strings.Join(leaked, ", "))
+	}
+	return nil
 }
 
 // ListResources enumerates billable Azure resources in the resource group for

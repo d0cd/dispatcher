@@ -18,7 +18,7 @@ func verifyConfidential(_ context.Context, provider ProviderID, _ *VMInfo, _, _ 
 		return nil, nil
 	}
 	if c.Attestation == "off" {
-		return &attest.AttestationResult{Verified: false, Verdict: "attestation off — provisioned TEE without verification (N4)"}, nil
+		return &attest.AttestationResult{Verified: false, Verdict: "attestation off — provisioned TEE without verification"}, nil
 	}
 	return nil, fmt.Errorf("confidential attestation required on %s but this SSH-VM path has no verifier; a confidential adapter should have handled it", provider)
 }

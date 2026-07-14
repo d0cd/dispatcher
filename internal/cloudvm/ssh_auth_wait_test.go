@@ -37,4 +37,5 @@ func TestWaitForSSHAuth_TimesOut(t *testing.T) {
 	err := WaitForSSHAuth(context.Background(), &CloudVMState{IP: "1.2.3.4"}, 30*time.Millisecond)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "authenticated SSH")
+	assert.Contains(t, err.Error(), "publickey", "timeout must retain the actionable SSH failure")
 }

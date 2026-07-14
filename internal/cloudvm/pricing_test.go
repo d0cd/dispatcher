@@ -68,6 +68,27 @@ func TestHetznerFetcher_ParseWithLocationFilter(t *testing.T) {
 	assert.InDelta(t, 0.007, instances[0].PricePerHour, 1e-6, "location filter should pin to fsn1")
 }
 
+func TestHetznerFetcher_LocationFilterExcludesUnavailableTypes(t *testing.T) {
+	raw := []byte(`[
+		{
+			"name": "cx53", "cores": 16, "memory": 32.0, "architecture": "x86", "deprecated": false,
+			"prices": [{"location": "hel1", "price_hourly": {"gross": "0.0561000000"}}],
+			"locations": [{"name": "hel1", "available": false, "recommended": false}]
+		},
+		{
+			"name": "cpx62", "cores": 16, "memory": 32.0, "architecture": "x86", "deprecated": false,
+			"prices": [{"location": "hel1", "price_hourly": {"gross": "0.2452000000"}}],
+			"locations": [{"name": "hel1", "available": true, "recommended": true}]
+		}
+	]`)
+
+	instances, err := parseHetznerServerTypes(raw, "hel1")
+	require.NoError(t, err)
+	require.Len(t, instances, 1)
+	assert.Equal(t, "cpx62", instances[0].Name,
+		"a price row is not proof that a retired type can still be provisioned")
+}
+
 func TestHetznerFetcher_ParseEmpty(t *testing.T) {
 	instances, err := parseHetznerServerTypes([]byte(`[]`), "")
 	require.NoError(t, err)

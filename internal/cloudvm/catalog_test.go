@@ -121,3 +121,21 @@ func TestCatalog_CrossProviderGPUComparison(t *testing.T) {
 	}
 	assert.GreaterOrEqual(t, len(providers), 2, "T4 should be available from at least 2 providers")
 }
+
+// Every GPU model a builtin target advertises must be served by a catalog
+// instance for that provider, or the planner prices it off the rate card and
+// mis-ranks it.
+func TestCatalog_ServesAdvertisedGPUModels(t *testing.T) {
+	cat := NewCatalog()
+	cases := []struct {
+		provider ProviderID
+		model    string
+	}{
+		{ProviderAWS, "a100"}, {ProviderGCP, "h100"},
+		{ProviderGCP, "a100"}, {ProviderAzure, "a100"},
+	}
+	for _, c := range cases {
+		got := cat.FindCheapestForProvider(c.provider, InstanceRequirements{GPUCount: 1, GPUModel: c.model})
+		assert.NotEmptyf(t, got, "%s must offer a %s instance in the catalog", c.provider, c.model)
+	}
+}

@@ -15,6 +15,10 @@ type InstanceType struct {
 	GPUModel     string     `json:"gpuModel,omitempty"`
 	PricePerHour float64    `json:"pricePerHour"` // USD
 	Arch         string     `json:"arch"`         // x86_64 or arm64
+	// Confidential marks a memory-encrypted (SEV-SNP / TDX) SKU. These are a
+	// separate, pricier bucket: a confidential workload must be priced on one,
+	// and a plain workload must never be.
+	Confidential bool `json:"confidential,omitempty"`
 }
 
 // InstanceRequirements describes what a workload needs.
@@ -24,6 +28,9 @@ type InstanceRequirements struct {
 	GPUCount    int
 	GPUModel    string // "" means any
 	Arch        string // "" means any
+	// Confidential requires a memory-encrypted SKU (and excludes one otherwise),
+	// so the estimate matches the CVM SKU the provider actually launches.
+	Confidential bool
 }
 
 // Catalog holds instance types across providers.
@@ -61,6 +68,12 @@ func (c *Catalog) FindCheapest(req InstanceRequirements) []InstanceType {
 			continue
 		}
 		if req.GPUModel != "" && !strings.EqualFold(inst.GPUModel, req.GPUModel) {
+			continue
+		}
+		// Confidential SKUs are a separate bucket: only a confidential requirement
+		// may match them, and it may match nothing else — otherwise a plain run is
+		// priced on a CVM, or a confidential run is under-priced on a plain SKU.
+		if req.Confidential != inst.Confidential {
 			continue
 		}
 		if req.Arch != "" && inst.Arch != req.Arch {

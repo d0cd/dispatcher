@@ -299,10 +299,6 @@ func awsTagSpec(resourceType string, tags map[string]string) string {
 	return fmt.Sprintf("ResourceType=%s,Tags=[%s]", resourceType, strings.Join(pairs, ","))
 }
 
-// awsCreateSSHSecurityGroup creates a security group in the region's default VPC
-// admitting inbound SSH from cidr, and returns its group id. The group carries
-// the run's dispatcher tags so gc can recognize and reap a leaked one, and is
-// deleted on teardown (or if run-instances fails).
 // awsClientToken returns a stable idempotency token for run-instances, derived
 // from the per-run tag (the plan id) or the VM name. Stable across a create's
 // retries and unique per run, so AWS dedupes a retried create to one instance.
@@ -314,6 +310,10 @@ func awsClientToken(opts VMOptions) string {
 	return opts.Name
 }
 
+// awsCreateSSHSecurityGroup creates a security group in the region's default VPC
+// admitting inbound SSH from cidr, and returns its group id. The group carries
+// the run's dispatcher tags so gc can recognize and reap a leaked one, and is
+// deleted on teardown (or if run-instances fails).
 func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string, tags map[string]string) (string, error) {
 	out, err := runCLI(ctx, "aws", "ec2", "describe-vpcs", "--region", region,
 		"--filters", "Name=isDefault,Values=true", "--query", "Vpcs[0].VpcId", "--output", "text")

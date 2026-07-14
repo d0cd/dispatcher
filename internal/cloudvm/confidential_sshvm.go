@@ -47,12 +47,29 @@ type sshConfidentialDeps struct {
 func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types.Plan, vmName string) (*confidentialRunState, error) {
 	w := p.Workload
 
+	// Fail closed on GPU, exactly as the plain adapter does (validateGPUInstance):
+	// this path forces a CPU-only CVM SKU and has no confidential GPU inventory, so
+	// a GPU workload that reaches here (e.g. a hand-forced target bypassing
+	// feasibility) must be refused rather than silently run CPU-only on a costly VM.
+	if err := validateGPUInstance(w, d.instanceType); err != nil {
+		return nil, err
+	}
+
 	payload, err := buildConfidentialPayload(w)
 	if err != nil {
 		return nil, fmt.Errorf("build workload payload: %w", err)
 	}
 
 	region := p.Constraints.Region
+	// Install the self-destruct watchdog, exactly as the regular cloud path does:
+	// if the dispatcher CLI is killed mid-run (SIGKILL/OOM/power loss) this is the
+	// only thing that stops an expensive confidential (possibly GPU) VM from
+	// billing indefinitely. Launch measurement covers firmware/image, not
+	// post-boot user-data, so this does not affect attestation.
+	ttl := DefaultWatchdogTTL
+	if p.Constraints.WatchdogTTL > 0 {
+		ttl = p.Constraints.WatchdogTTL
+	}
 	opts := VMOptions{
 		Name:               vmName,
 		Region:             region,
@@ -63,6 +80,7 @@ func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types
 		SecureBootDisabled: d.secureBootOff,
 		SSHKeyPath:         d.sshPubKey,
 		SSHUser:            d.sshUser,
+		UserData:           WatchdogCloudInit(ttl),
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",

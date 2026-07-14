@@ -92,6 +92,30 @@ func TestExecuteConfidentialSpace_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, provider.VMCount(), "the VM stays up until Cleanup")
 }
 
+// The GCP Confidential Space path forces a CPU-only SEV SKU (n2d-standard-2), so
+// a GPU workload reaching it must be refused before provisioning — never run
+// CPU-only on a confidential VM that can't do the job.
+func TestExecuteConfidentialSpace_RefusesGPUWorkload(t *testing.T) {
+	stubCSVerify(t, attest.AttestationResult{Verified: true, ChannelKey: []byte("k")}, nil)
+	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+
+	provider := NewMockProvider(ProviderGCP)
+	deps := csDeps{
+		provider: provider,
+		buildImage: func(context.Context, types.WorkloadSpec) (string, string, error) {
+			return "us-docker.pkg.dev/p/r@" + csTestDigest, csTestDigest, nil
+		},
+		baseURL:   func(*VMInfo) string { return "http://10.0.0.1:8443" },
+		waitReady: func(context.Context, string) error { return nil },
+	}
+	plan := csTestPlan(t, "run-gpu", []string{"true"})
+	plan.Workload.Requirements.GPU = types.GPURequirement{Required: true, Model: "a100"}
+
+	_, err := executeConfidentialSpace(context.Background(), deps, plan)
+	require.Error(t, err)
+	assert.Equal(t, 0, provider.VMCount(), "must refuse before provisioning a CPU-only confidential VM")
+}
+
 // TestExecuteConfidentialSpace_UnverifiedTearsDown is the security gate: when
 // attestation does not verify, nothing is sealed or run and the VM is torn down.
 func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
@@ -118,6 +142,30 @@ func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, ran, "a workload must never run on an unverified TEE")
 	assert.Equal(t, 0, provider.VMCount(), "the VM must be torn down on attestation rejection")
+}
+
+// A run that fails after provisioning must reap the agent-port firewall too, not
+// just the VM — otherwise every post-provision failure (incl. attestation
+// rejection) leaks a per-run firewall rule.
+func TestExecuteConfidentialSpace_UnverifiedReapsFirewall(t *testing.T) {
+	stubCSVerify(t, attest.AttestationResult{Verified: false, Verdict: "digest mismatch"}, nil)
+	stubExchange(t, nil, agent.Result{}, nil)
+
+	provider := &firewallMockProvider{MockProvider: NewMockProvider(ProviderGCP)}
+	deps := csDeps{
+		provider: provider,
+		buildImage: func(context.Context, types.WorkloadSpec) (string, string, error) {
+			return "ref@" + csTestDigest, csTestDigest, nil
+		},
+		baseURL:    func(*VMInfo) string { return "http://10.0.0.1:8443" },
+		waitReady:  func(context.Context, string) error { return nil },
+		egressCIDR: func(context.Context) (string, error) { return "1.2.3.4/32", nil },
+	}
+
+	_, err := executeConfidentialSpace(context.Background(), deps, csTestPlan(t, "run-fw", []string{"true"}))
+	require.Error(t, err)
+	assert.Equal(t, 0, provider.VMCount(), "the VM must be torn down")
+	assert.NotEmpty(t, provider.deletedFirewall, "the agent firewall must be reaped on a post-provision failure")
 }
 
 // TestExecuteConfidentialSpace_BuildFailureNoVM: a failed image build must not

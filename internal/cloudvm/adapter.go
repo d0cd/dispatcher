@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -330,6 +331,14 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 		dlog.L().Info("cloudvm.cloudinit_done", "run", p.Metadata.ID, "vm_id", vmInfo.ID)
 	}
 
+	// Execute does not return a durable handle until source upload and workload
+	// startup finish. The normal executor heartbeat cannot renew the VM watchdog
+	// before then, so a large rsync can outlive the TTL and make a correctly
+	// supervised VM shut itself down mid-transfer. Maintain the lease during
+	// this setup window, then hand renewal back to the executor with the handle.
+	stopSetupWatchdog := maintainSetupWatchdog(ctx, state, ttl)
+	defer stopSetupWatchdog()
+
 	// Rsync source to VM
 	if err := rsyncToVM(ctx, state, w.Source.Path); err != nil {
 		dlog.L().Error("cloudvm.rsync.failed",
@@ -355,6 +364,39 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 		TargetID: a.targetID,
 		State:    state,
 	}, nil
+}
+
+func maintainSetupWatchdog(ctx context.Context, state *CloudVMState, ttl time.Duration) context.CancelFunc {
+	renewCtx, cancel := context.WithCancel(ctx)
+	interval := setupWatchdogInterval(ttl)
+	go func() {
+		// Renew immediately so the setup phase gets a full TTL rather than the
+		// remainder of the boot-time lease.
+		if _, err := ExtendWatchdogViaSSH(renewCtx, state, ttl); err != nil && renewCtx.Err() == nil {
+			dlog.L().Warn("cloudvm.setup_watchdog_renew_failed", "vm_id", state.VMID, "err", err.Error())
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := ExtendWatchdogViaSSH(renewCtx, state, ttl); err != nil && renewCtx.Err() == nil {
+					dlog.L().Warn("cloudvm.setup_watchdog_renew_failed", "vm_id", state.VMID, "err", err.Error())
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
+func setupWatchdogInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	return interval
 }
 
 func (a *CloudVMAdapter) Status(ctx context.Context, h *adapter.RunHandle) (types.RunState, error) {
@@ -499,9 +541,6 @@ func (a *CloudVMAdapter) Artifacts(ctx context.Context, h *adapter.RunHandle) ([
 			continue
 		}
 
-		// `--safe-links` blocks symlinks pointing outside the tree (workload
-		// can't plant /etc/shadow). `--protect-args` blocks remote-shell
-		// re-tokenization of paths.
 		// `--safe-links` blocks rsync from following symlinks that point
 		// outside the transferred tree (defense against a workload planting
 		// a symlink to /etc/shadow in outputs/). `--protect-args` disables
@@ -519,7 +558,12 @@ func (a *CloudVMAdapter) Artifacts(ctx context.Context, h *adapter.RunHandle) ([
 			"-az", "--safe-links", "--protect-args",
 			"-e", eArg, remoteSrc, localDest)
 		if err := cmd.Run(); err != nil {
-			// Exit 23 = partial transfer (workload didn't produce path); skip.
+			// rsync exit 23 = partial transfer: a declared but optional output the
+			// workload didn't produce. That's not a failure — skip it without
+			// recording an error; any other exit code is a real transfer failure.
+			if rsyncExitCode(err) == 23 {
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("rsync %s: %w", out, err)
 			}
@@ -540,6 +584,16 @@ func (a *CloudVMAdapter) Artifacts(ctx context.Context, h *adapter.RunHandle) ([
 	}
 
 	return refs, firstErr
+}
+
+// rsyncExitCode returns the process exit code from a failed rsync exec, or -1 if
+// the error isn't a process exit (e.g. rsync not found, context cancelled).
+func rsyncExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 func (a *CloudVMAdapter) Terminate(ctx context.Context, h *adapter.RunHandle) error {
@@ -755,13 +809,45 @@ func rsyncToVM(ctx context.Context, state *CloudVMState, sourcePath string) erro
 	}
 
 	dest := fmt.Sprintf("%s@%s:%s/", state.SSHUser, state.IP, state.RemoteDir)
-	eArg, err := sshWrapperArg(state)
+	rsyncArgs, err := rsyncUploadArgs(state, sourcePath, dest)
 	if err != nil {
 		return err
 	}
-	rsyncArgs := []string{"-az", "--delete", "--progress", "--protect-args", "-e", eArg}
+
+	var lastErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		cmd := exec.CommandContext(ctx, "rsync", rsyncArgs...)
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			if rsyncExitCode(err) != 255 || attempt == 4 {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "rsync transport interrupted; resuming partial transfer (attempt %d/4)\n", attempt+1)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * 5 * time.Second):
+		}
+	}
+	return fmt.Errorf("rsync failed: %w", lastErr)
+}
+
+func rsyncUploadArgs(state *CloudVMState, sourcePath, dest string) ([]string, error) {
+	eArg, err := sshWrapperArg(state)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{
+		"-az", "--delete", "--progress", "--protect-args",
+		"--partial", "--append-verify", "-e", eArg,
+	}
 	for _, ex := range []string{".git", "node_modules", ".venv", "venv", "__pycache__", ".dispatcher"} {
-		rsyncArgs = append(rsyncArgs, "--exclude", ex)
+		args = append(args, "--exclude", ex)
 	}
 	// .dispatchignore patterns starting with `-` would be parsed by rsync
 	// as flags (--include, --delete-after, ...) — option injection.
@@ -771,16 +857,9 @@ func rsyncToVM(ctx context.Context, state *CloudVMState, sourcePath string) erro
 			fmt.Fprintf(os.Stderr, "warning: ignoring .dispatchignore pattern %q (starts with -)\n", p)
 			continue
 		}
-		rsyncArgs = append(rsyncArgs, "--exclude", p)
+		args = append(args, "--exclude", p)
 	}
-	rsyncArgs = append(rsyncArgs, sourcePath+"/", dest)
-	cmd := exec.CommandContext(ctx, "rsync", rsyncArgs...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("rsync failed: %w", err)
-	}
-	return nil
+	return append(args, sourcePath+"/", dest), nil
 }
 
 func startWorkloadOnVM(ctx context.Context, state *CloudVMState, w types.WorkloadSpec) error {

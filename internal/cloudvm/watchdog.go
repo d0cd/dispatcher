@@ -96,7 +96,13 @@ func sshCmdArgs(state *CloudVMState, remoteCmd string) []string {
 		args = append(args, "-o", "UserKnownHostsFile=/dev/null")
 	}
 	args = append(args, "-o", "ConnectTimeout=10")
+	args = append(args, "-o", "ServerAliveInterval=15")
+	args = append(args, "-o", "ServerAliveCountMax=6")
 	if state.SSHKeyPath != "" {
+		// -i adds an identity but does not stop ssh-agent identities from being
+		// offered first. A busy agent can hit sshd's MaxAuthTries before the
+		// per-run key, yielding "Too many authentication failures".
+		args = append(args, "-o", "IdentitiesOnly=yes")
 		args = append(args, "-i", state.SSHKeyPath)
 	}
 	port := state.SSHPort

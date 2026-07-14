@@ -41,11 +41,12 @@ func (h *HetznerFetcher) Fetch(ctx context.Context) ([]InstanceType, error) {
 // hcloudServerType matches the subset of `hcloud server-type list -o json`
 // output we care about.
 type hcloudServerType struct {
-	Name         string  `json:"name"`
-	Cores        int     `json:"cores"`
-	Memory       float64 `json:"memory"`
-	Architecture string  `json:"architecture"`
-	Deprecated   bool    `json:"deprecated"`
+	Name         string           `json:"name"`
+	Cores        int              `json:"cores"`
+	Memory       float64          `json:"memory"`
+	Architecture string           `json:"architecture"`
+	Deprecated   bool             `json:"deprecated"`
+	Locations    []hcloudLocation `json:"locations"`
 	Prices       []struct {
 		Location    string `json:"location"`
 		PriceHourly struct {
@@ -62,10 +63,10 @@ func parseHetznerServerTypes(raw []byte, location string) ([]InstanceType, error
 
 	var instances []InstanceType
 	for _, t := range types {
-		if t.Deprecated {
+		if t.Deprecated || !hetznerTypeAvailable(t.Locations, location) {
 			continue
 		}
-		price, ok := cheapestHetznerPrice(t.Prices, location)
+		price, ok := cheapestHetznerPrice(t.Prices, t.Locations, location)
 		if !ok || !isPlausibleHourlyPrice(price) {
 			continue
 		}
@@ -81,15 +82,43 @@ func parseHetznerServerTypes(raw []byte, location string) ([]InstanceType, error
 	return instances, nil
 }
 
+type hcloudLocation struct {
+	Name      string `json:"name"`
+	Available bool   `json:"available"`
+}
+
+func hetznerTypeAvailable(locations []hcloudLocation, scope string) bool {
+	// Older hcloud versions and parser fixtures omit this field; in that case
+	// retain the historical price-row behavior. Current hcloud output supplies
+	// it, allowing us to avoid recommending retired/unavailable SKUs.
+	if len(locations) == 0 {
+		return true
+	}
+	for _, location := range locations {
+		if location.Available && (scope == "" || location.Name == scope) {
+			return true
+		}
+	}
+	return false
+}
+
 func cheapestHetznerPrice(prices []struct {
 	Location    string `json:"location"`
 	PriceHourly struct {
 		Gross string `json:"gross"`
 	} `json:"price_hourly"`
-}, scope string) (float64, bool) {
+}, locations []hcloudLocation, scope string) (float64, bool) {
+	availabilityKnown := len(locations) > 0
+	available := make(map[string]bool, len(locations))
+	for _, location := range locations {
+		available[location.Name] = location.Available
+	}
 	best := -1.0
 	for _, p := range prices {
 		if scope != "" && p.Location != scope {
+			continue
+		}
+		if availabilityKnown && !available[p.Location] {
 			continue
 		}
 		v, err := strconv.ParseFloat(p.PriceHourly.Gross, 64)

@@ -6,6 +6,7 @@ import (
 	"net"
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,7 +17,11 @@ var sshAuthPollInterval = 5 * time.Second
 // sshProbe runs a no-op authenticated SSH to confirm the key is accepted. A
 // seam so the readiness retry is testable without a live host.
 var sshProbe = func(ctx context.Context, state *CloudVMState) error {
-	return exec.CommandContext(ctx, "ssh", sshCmdArgs(state, "true")...).Run()
+	out, err := exec.CommandContext(ctx, "ssh", sshCmdArgs(state, "true")...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // WaitForSSHAuth blocks until an *authenticated* SSH connection succeeds, or
@@ -29,15 +34,18 @@ func WaitForSSHAuth(ctx context.Context, state *CloudVMState, timeout time.Durat
 	deadline := time.After(timeout)
 	ticker := time.NewTicker(sshAuthPollInterval)
 	defer ticker.Stop()
+	var lastErr error
 	for {
 		if err := sshProbe(ctx, state); err == nil {
 			return nil
+		} else {
+			lastErr = err
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline:
-			return fmt.Errorf("timeout waiting for authenticated SSH to %s after %s", state.IP, timeout)
+			return fmt.Errorf("timeout waiting for authenticated SSH to %s after %s (last error: %v)", state.IP, timeout, lastErr)
 		case <-ticker.C:
 		}
 	}

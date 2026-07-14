@@ -279,12 +279,6 @@ func uploadHetznerSSHKey(ctx context.Context, name, pubKeyPath string) error {
 	return nil
 }
 
-// cleanupHetznerSSHKeysForVM removes the dispatcher-uploaded SSH key
-// associated with a VM. The key is named "dispatcher-<run-id>"; we find
-// the right one by listing keys with the dispatcher label and matching
-// against the VM's run-id label.
-//
-
 func (h *HetznerProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {
 	if err := validateLabels(tags); err != nil {
 		return nil, fmt.Errorf("hetzner selector: %w", err)

@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-// Per-run firewall support (finding S7). When VMOptions.AllowSSHFrom is a
+// Per-run firewall support. When VMOptions.AllowSSHFrom is a
 // non-empty CIDR, supported providers attach a least-privilege firewall that
 // permits inbound SSH (TCP 22) only from that range. Providers that do not yet
 // implement this reject a non-empty value rather than silently ignoring it.
