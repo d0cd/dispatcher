@@ -79,8 +79,6 @@ func parseSNPReport(b []byte) (*snpReport, error) {
 	}, nil
 }
 
-// verifySNPSignature checks the firmware's ECDSA-P384/SHA-384 signature over the
-// signed prefix using the VCEK public key (R3 — bind to the hardware root).
 // claims projects the report onto the provider-agnostic Claims the policy
 // engine consumes. SEV-SNP has no separate "sev" mode in a SNP report.
 func (r *snpReport) claims() Claims {
@@ -94,6 +92,8 @@ func (r *snpReport) claims() Claims {
 	}
 }
 
+// verifySNPSignature checks the firmware's ECDSA-P384/SHA-384 signature over the
+// signed prefix using the VCEK public key, binding the report to the hardware root.
 func verifySNPSignature(r *snpReport, vcek *x509.Certificate) error {
 	if r.sigAlgo != snpSigAlgoECDSAP384SHA384 {
 		return fmt.Errorf("snp report uses unsupported signature algorithm %d", r.sigAlgo)

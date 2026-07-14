@@ -234,6 +234,13 @@ func azureSNPCheckRevocation(vcek, ask *x509.Certificate, roots []*x509.Certific
 	if !signed {
 		return fmt.Errorf("snp revocation: ASK CRL is not signed by a pinned AMD root")
 	}
+	// Freshness: the KDS transport is untrusted, so an attacker who can serve the
+	// CRL can also replay an older, still-validly-signed pre-revocation list. A
+	// stale/expired NextUpdate must be rejected (fail closed) or replay defeats
+	// revocation.
+	if crl.NextUpdate.IsZero() || time.Now().After(crl.NextUpdate) {
+		return fmt.Errorf("snp revocation: ASK CRL is stale (nextUpdate %s) — refusing a possibly-replayed pre-revocation list", crl.NextUpdate.Format(time.RFC3339))
+	}
 	for _, e := range crl.RevokedCertificateEntries {
 		if e.SerialNumber.Cmp(vcek.SerialNumber) == 0 {
 			return fmt.Errorf("snp revocation: the VCEK has been revoked by AMD")

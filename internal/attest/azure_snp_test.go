@@ -80,14 +80,20 @@ func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, e
 // the shape azureSNPCheckRevocation fetches from AMD KDS in production.
 func arkSignedCRL(t *testing.T, ch snpChain, revoked ...*big.Int) []byte {
 	t.Helper()
+	return arkSignedCRLUntil(t, ch, time.Now().Add(time.Hour), revoked...)
+}
+
+// arkSignedCRLUntil is arkSignedCRL with a chosen NextUpdate (for freshness tests).
+func arkSignedCRLUntil(t *testing.T, ch snpChain, nextUpdate time.Time, revoked ...*big.Int) []byte {
+	t.Helper()
 	var entries []x509.RevocationListEntry
 	for _, s := range revoked {
 		entries = append(entries, x509.RevocationListEntry{SerialNumber: s, RevocationTime: time.Now().Add(-time.Hour)})
 	}
 	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
 		Number:                    big.NewInt(1),
-		ThisUpdate:                time.Now().Add(-time.Hour),
-		NextUpdate:                time.Now().Add(time.Hour),
+		ThisUpdate:                nextUpdate.Add(-2 * time.Hour),
+		NextUpdate:                nextUpdate,
 		RevokedCertificateEntries: entries,
 	}, ch.ark, ch.arkKey)
 	require.NoError(t, err)
@@ -364,6 +370,13 @@ func TestAzureSNPCheckRevocation(t *testing.T) {
 		azureSNPCRLGetter = func(string) ([]byte, error) { return nil, assert.AnError }
 		t.Cleanup(func() { azureSNPCRLGetter = prev })
 		require.Error(t, azureSNPCheckRevocation(ch.vcek, ch.ask, roots))
+	})
+
+	t.Run("rejects a stale (expired) CRL — replay defense", func(t *testing.T) {
+		installCRL(t, arkSignedCRLUntil(t, ch, time.Now().Add(-time.Minute))) // NextUpdate in the past
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "stale")
 	})
 
 	t.Run("fails closed when the ASK has no CRL distribution point", func(t *testing.T) {

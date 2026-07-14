@@ -46,7 +46,7 @@ func TestConfidentialAgent_AttestBindsChannelKey(t *testing.T) {
 	require.NotEmpty(t, ev.channelKey, "agent must return its channel public key")
 
 	// The token must satisfy the full bound policy (nonce + channel key).
-	_, err = verifyCSToken(ev.token, keys, CSPolicy{
+	_, _, err = verifyCSToken(ev.token, keys, CSPolicy{
 		Nonce: nonce, ImageDigests: []string{csDigest}, ChannelKey: ev.channelKey,
 	})
 	require.NoError(t, err, "attest token must bind this run's nonce and the agent's channel key")
@@ -70,7 +70,7 @@ func TestConfidentialExchange_SealedRoundTrip(t *testing.T) {
 	// 1. Attest + verify through the real attester (generates its own nonce).
 	att := &csAttester{keys: keys, fetch: csEndpointFetch(srv.URL)}
 	res, err := att.Verify(context.Background(),
-		types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}})
+		types.ConfidentialRequirement{Required: true, Type: "sev", Measurements: []string{csDigest}})
 	require.NoError(t, err)
 	require.True(t, res.Verified, res.Verdict)
 	require.NotEmpty(t, res.ChannelKey, "a verified result must carry the bound channel key to seal to")

@@ -146,6 +146,12 @@ func pinARKAndCheckRevocation(pc *trust.ProductCerts, productLine string) error 
 	if err := crl.CheckSignatureFrom(ark); err != nil {
 		return fmt.Errorf("ASVK CRL is not signed by the pinned ARK: %w", err)
 	}
+	// Freshness: the CRL is fetched over an untrusted transport, so a stale but
+	// still-validly-signed pre-revocation list could be replayed. Reject an
+	// expired/zero NextUpdate (fail closed) so replay can't mask a revocation.
+	if crl.NextUpdate.IsZero() || time.Now().After(crl.NextUpdate) {
+		return fmt.Errorf("ASVK CRL is stale (nextUpdate %s) — refusing a possibly-replayed pre-revocation list", crl.NextUpdate.Format(time.RFC3339))
+	}
 	for _, e := range crl.RevokedCertificateEntries {
 		if e.SerialNumber.Cmp(pc.Asvk.SerialNumber) == 0 {
 			return fmt.Errorf("the ASVK has been revoked by AMD")

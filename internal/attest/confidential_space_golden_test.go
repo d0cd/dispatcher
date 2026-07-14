@@ -55,7 +55,7 @@ func TestGolden_CSToken(t *testing.T) {
 	nonce, err := hex.DecodeString(nonceHex)
 	require.NoError(t, err)
 
-	digest, err := verifyCSToken(token, jwkRSAKeys(t, jwks), CSPolicy{
+	digest, _, err := verifyCSToken(token, jwkRSAKeys(t, jwks), CSPolicy{
 		Nonce: nonce, ImageDigests: []string{wantDigest},
 	})
 	require.NoError(t, err, "a real Google-signed CS token must verify (confirms signature + claim names + eat_nonce binding + image digest)")
