@@ -15,7 +15,8 @@ runs/
 
 # Local env files — may hold real secrets (.env.example is the tracked template)
 .env
-.env.local
+.env.*
+!.env.example
 
 # Local-only editor/agent config
 .claude/settings.local.json

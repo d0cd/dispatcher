@@ -21,7 +21,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/go-jose/go-jose/v3 v3.0.3 // indirect
+	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
 	github.com/google/go-attestation v0.6.0 // indirect
 	github.com/google/go-configfs-tsm v0.3.3-0.20240919001351-b4b5b84fdcbc // indirect
 	github.com/google/go-tdx-guest v0.3.2-0.20241009005452-097ee70d0843 // indirect
