@@ -160,8 +160,6 @@ func (p *Planner) Plan(ctx context.Context, path string, constraints types.PlanC
 	return nil, fmt.Errorf("planner exceeded maximum turns (%d)", p.maxTurns)
 }
 
-// DeterministicPlan runs the same tool pipeline without an LLM.
-// Useful as a fallback or when no API key is configured.
 // withinBudget reports whether a cost estimate is confirmably within a budget.
 // A zero/negative budget means "no cap" (always true). A nil or unknown-confidence
 // estimate cannot be confirmed within a budget and fails — a $0 "unknown" must
@@ -194,6 +192,8 @@ func costLess(a, b *types.CostEstimate) bool {
 	return av < bv
 }
 
+// DeterministicPlan runs the same tool pipeline without an LLM — a fallback for
+// when no API key is configured.
 func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraints types.PlanConstraints) (*PlanResult, error) {
 	if err := p.tools.SetWorkloadRoot(path); err != nil {
 		return nil, fmt.Errorf("scope workload: %w", err)

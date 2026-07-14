@@ -65,12 +65,12 @@ func EstimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudv
 		// rate card so we degrade gracefully instead of surfacing Unknown.
 	}
 	est := estimateFromRateCard(spec, t)
-	// Resolve a GPU instance type from the static catalog even when live pricing
-	// is unavailable, so a GPU workload isn't refused offline for lack of a
-	// resolved instance. This fills in WHICH instance only — the price and
-	// confidence stay from the rate card so we don't pretend to know live prices.
-	if t.Kind == types.TargetKindCloudVM && spec.Requirements.GPU.Required && est.InstanceType == "" {
-		est.InstanceType = staticGPUInstance(spec, t)
+	// Even when live pricing is unavailable, provisioning must remain pinned to
+	// a static-catalog instance that satisfies CPU, memory, GPU and architecture.
+	// Otherwise provider defaults can violate the plan (Hetzner defaults to a
+	// tiny ARM VM). This fills in WHICH instance only; price stays low-confidence.
+	if t.Kind == types.TargetKindCloudVM && est.InstanceType == "" {
+		est.InstanceType = staticInstance(spec, t)
 	}
 	return est
 }
@@ -78,7 +78,7 @@ func EstimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudv
 // staticGPUInstance resolves the cheapest static-catalog instance matching the
 // workload's GPU requirement for the target's provider, or "" if none exists
 // (e.g. an unrecognized model, or a provider with no GPU SKU).
-func staticGPUInstance(spec types.WorkloadSpec, t types.TargetConfig) string {
+func staticInstance(spec types.WorkloadSpec, t types.TargetConfig) string {
 	provider, ok := rateCardToProvider(t.Capabilities.Accounting.RateCard)
 	if !ok {
 		return ""
@@ -269,7 +269,9 @@ func rateCardToProvider(card string) (cloudvm.ProviderID, bool) {
 
 func requirementsFromSpec(spec types.WorkloadSpec) cloudvm.InstanceRequirements {
 	req := cloudvm.InstanceRequirements{
-		MinVCPUs: parseCPU(spec.Requirements.CPU),
+		MinVCPUs:     parseCPU(spec.Requirements.CPU),
+		Arch:         spec.Requirements.Arch,
+		Confidential: spec.Requirements.Confidential.Required,
 	}
 	if mem := parseMemoryGB(spec.Requirements.Memory); mem > 0 {
 		req.MinMemoryGB = mem
@@ -303,10 +305,9 @@ func durationLabel(hours float64) string {
 	return fmt.Sprintf("%.0fh", hours)
 }
 
-// roundCents rounds to four decimal places (1/100 of a cent) so the stored
-// value preserves sub-cent runs — a 90-second cax11 run at €0.005/h is
-// real money to track, even if it displays as <$0.01. Whole-cent truncation
-// (the previous behavior) was silently zeroing every cheap Hetzner run.
+// roundCents rounds to four decimal places (1/100 of a cent) so the stored value
+// preserves sub-cent runs — a 90-second cax11 run at €0.005/h is real money to
+// track even though it displays as <$0.01, which a whole-cent round would zero.
 func roundCents(v float64) float64 { return float64(int(v*10000)) / 10000 }
 
 func parseCPU(cpu string) int {

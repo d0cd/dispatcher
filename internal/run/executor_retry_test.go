@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,27 +20,52 @@ import (
 // the shared mock a FailureReporter, which would change other tests).
 type retryAdapter struct {
 	*mockAdapter
-	statusSeq      []types.RunState
-	idx            int
-	failure        adapter.FailureDetails
-	execCount      int
-	failOnExec     int // if >0, the Nth Execute returns an error
-	cleanedHandles []string
+	statusSeq       []types.RunState
+	idx             int
+	failure         adapter.FailureDetails
+	execCount       int
+	failOnExec      int           // if >0, the Nth Execute returns an error
+	lingerRunning   bool          // once statusSeq is exhausted, keep reporting Running (until terminated)
+	reprovisionWait time.Duration // the retry's Execute blocks this long (models a slow re-provision)
+	cleanedHandles  []string
+	terminated      atomic.Bool
+	termHandle      string // ID of the handle passed to Terminate
 }
 
 func (m *retryAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.RunState, error) {
+	if m.terminated.Load() {
+		return types.RunStateExecutionFailed, nil
+	}
 	if m.idx < len(m.statusSeq) {
 		s := m.statusSeq[m.idx]
 		m.idx++
 		return s, nil
 	}
+	if m.lingerRunning {
+		return types.RunStateRunning, nil
+	}
 	return types.RunStateCompleted, nil
+}
+
+func (m *retryAdapter) Terminate(_ context.Context, h *adapter.RunHandle) error {
+	m.termHandle = h.ID
+	m.terminated.Store(true)
+	return nil
+}
+
+// Artifacts returns a single ref named for the handle it was collected from, so
+// a test can prove which handle's outputs ended up on the run record.
+func (m *retryAdapter) Artifacts(_ context.Context, h *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
+	return []adapter.ArtifactRef{{Name: h.ID}}, nil
 }
 
 func (m *retryAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	m.execCount++
 	if m.failOnExec == m.execCount {
 		return nil, fmt.Errorf("re-provision failed")
+	}
+	if m.execCount > 1 && m.reprovisionWait > 0 {
+		time.Sleep(m.reprovisionWait) // model a slow re-provision so the sampler can tick mid-window
 	}
 	h, err := m.mockAdapter.Execute(ctx, p)
 	if h != nil {
@@ -107,6 +133,91 @@ func TestExecutor_TransientRetrySucceeds(t *testing.T) {
 	// leaks and keeps billing.
 	assert.Contains(t, m.cleanedHandles, "handle-1", "leaked first handle must be cleaned up on retry")
 	assert.Contains(t, m.cleanedHandles, "handle-2", "final handle must be cleaned up")
+}
+
+// After a transient-failure retry succeeds, the run's artifacts must come from
+// the re-provisioned handle (handle-2), not the torn-down first attempt — the
+// first VM is gone, so collecting from it would yield stale or empty outputs.
+func TestExecutor_TransientRetry_CollectsArtifactsFromNewHandle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	m := &retryAdapter{
+		mockAdapter: newMockAdapter(),
+		statusSeq:   []types.RunState{types.RunStateExecutionFailed, types.RunStateCompleted},
+		failure:     adapter.FailureDetails{OOMKilled: true},
+	}
+	ex := NewExecutor(m)
+	r := NewRun(executorTestPlan())
+	r.Plan.Constraints.RetryTransientFailures = true
+
+	require.NoError(t, ex.Execute(context.Background(), r, io.Discard))
+	require.Len(t, r.Artifacts, 1)
+	assert.Equal(t, "handle-2", r.Artifacts[0].Name,
+		"artifacts must be collected from the re-provisioned handle, not the destroyed first attempt")
+}
+
+// The cost sampler must keep enforcing the budget across a transient-failure
+// retry: the run stays in Running through the retry, so a budget breach on the
+// re-provisioned handle still trips BudgetExceeded and terminates that handle.
+func TestExecutor_TransientRetry_BudgetEnforcedOnNewHandle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prev := SetCostSampleInterval(5 * time.Millisecond)
+	defer func() { SetCostSampleInterval(prev) }()
+	prevPoll := SetStatusPollInterval(2 * time.Millisecond)
+	defer func() { SetStatusPollInterval(prevPoll) }()
+
+	m := &retryAdapter{
+		mockAdapter:   newMockAdapter(),
+		statusSeq:     []types.RunState{types.RunStateExecutionFailed},
+		failure:       adapter.FailureDetails{OOMKilled: true},
+		lingerRunning: true, // the re-provisioned handle stays Running so the sampler can trip
+	}
+	ex := NewExecutor(m)
+	r := NewRun(executorTestPlan())
+	r.Plan.Constraints.RetryTransientFailures = true
+	r.Plan.Constraints.MaxEstimatedCostUSD = 0.0001
+	// Backstop: if budget enforcement is broken the lingering handle never
+	// terminates, so cap the run so the test fails fast instead of hanging.
+	r.Plan.Constraints.MaxDuration = 3 * time.Second
+	r.Plan.Recommendation.EstimatedCost = types.CostEstimate{Value: 100, Currency: "USD", Confidence: types.ConfidenceHigh}
+
+	require.Error(t, ex.Execute(context.Background(), r, io.Discard))
+	assert.Equal(t, types.RunStateBudgetExceeded, r.GetState(),
+		"budget must still be enforced during the retry (run stays Running)")
+	assert.Equal(t, "handle-2", m.termHandle,
+		"the re-provisioned handle, not the first attempt, must be terminated")
+}
+
+// During a transient-failure retry the OLD cost sampler must be stopped before
+// the (slow) re-provision, not after. Otherwise a budget breach that lands in
+// the re-provision window trips BudgetExceeded on the already-destroyed first
+// handle, burns the run's only Running->BudgetExceeded transition, and leaves
+// the re-provisioned VM running uncapped. The terminate must hit the NEW handle.
+func TestExecutor_TransientRetry_BudgetNotBypassedDuringReprovision(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prev := SetCostSampleInterval(5 * time.Millisecond)
+	defer func() { SetCostSampleInterval(prev) }()
+	prevPoll := SetStatusPollInterval(2 * time.Millisecond)
+	defer func() { SetStatusPollInterval(prevPoll) }()
+
+	m := &retryAdapter{
+		mockAdapter:     newMockAdapter(),
+		statusSeq:       []types.RunState{types.RunStateExecutionFailed},
+		failure:         adapter.FailureDetails{OOMKilled: true},
+		lingerRunning:   true,
+		reprovisionWait: 120 * time.Millisecond, // sampler ticks many times mid-reprovision
+	}
+	ex := NewExecutor(m)
+	r := NewRun(executorTestPlan())
+	r.Plan.Constraints.RetryTransientFailures = true
+	r.Plan.Constraints.MaxEstimatedCostUSD = 0.00001 // already over budget by the first tick
+	r.Plan.Constraints.MaxDuration = 3 * time.Second
+	r.Plan.Recommendation.EstimatedCost = types.CostEstimate{Value: 100, Currency: "USD", Confidence: types.ConfidenceHigh}
+
+	require.Error(t, ex.Execute(context.Background(), r, io.Discard))
+	assert.Equal(t, types.RunStateBudgetExceeded, r.GetState())
+	assert.Equal(t, "handle-2", m.termHandle,
+		"budget kill must terminate the re-provisioned handle, not the destroyed first attempt")
 }
 
 func TestExecutor_NoRetryWhenOptInDisabled(t *testing.T) {

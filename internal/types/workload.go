@@ -47,11 +47,16 @@ type GPURequirement struct {
 type ResourceRequirements struct {
 	CPU    string         `yaml:"cpu,omitempty" json:"cpu,omitempty"`
 	Memory string         `yaml:"memory,omitempty" json:"memory,omitempty"`
+	Arch   string         `yaml:"arch,omitempty" json:"arch,omitempty"`
 	GPU    GPURequirement `yaml:"gpu" json:"gpu"`
 	// Confidential, when Required, demands a TEE-backed VM (hardware-encrypted
 	// memory: AMD SEV/SEV-SNP, Intel TDX). Only confidential-capable
 	// targets/instances offering the requested Type are feasible.
 	Confidential ConfidentialRequirement `yaml:"confidential,omitempty" json:"confidential,omitempty"`
+	// Sandbox, when true, requires an isolated target (container- or VM-level
+	// isolation, not a bare host process). It filters targets by their isolation
+	// capability rather than replacing the detected workload kind.
+	Sandbox bool `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
 }
 
 // ConfidentialRequirement describes a workload's confidential-computing demand.

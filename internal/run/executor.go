@@ -44,6 +44,25 @@ func saveRun(r *Run) {
 	}
 }
 
+// collectArtifacts transitions the run to CollectingArtifacts and retrieves the
+// declared outputs from the given handle (crash dumps on failure, real outputs
+// on success). Best-effort: a nil handle or a failed transition/collection is a
+// no-op so cleanup still runs. Called exactly once per run, from the branch that
+// knows which handle actually ran.
+func (e *Executor) collectArtifacts(ctx context.Context, r *Run, handle *adapter.RunHandle, logWriter io.Writer) {
+	if handle == nil {
+		return
+	}
+	if tErr := r.Transition(types.RunStateCollectingArtifacts); tErr != nil {
+		return
+	}
+	if artifacts, aErr := e.adapter.Artifacts(ctx, handle); aErr == nil {
+		r.Artifacts = artifacts
+	} else if logWriter != nil {
+		fmt.Fprintf(logWriter, "[dispatcher] warning: artifact collection failed: %v\n", aErr)
+	}
+}
+
 // Execute runs the full lifecycle with guaranteed cleanup and panic recovery.
 func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) (err error) {
 	defer func() {
@@ -113,6 +132,14 @@ func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) (er
 		return err
 	}
 
+	// Persist the (non-terminal) run record BEFORE provisioning. adapter.Execute
+	// tags the VM with this run's plan id and then blocks for the whole provision
+	// + run (minutes-to-hours for confidential runs). A concurrent `dispatcher gc`
+	// keys its active-run protection off persisted records by plan id, so without
+	// this write the live VM has no record, is misclassified as an orphan, and is
+	// reaped mid-run.
+	saveRun(r)
+
 	handle, err := e.adapter.Execute(ctx, r.Plan)
 	if err != nil {
 		r.SetError(types.RunStateExecutionFailed, err)
@@ -162,7 +189,8 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	}()
 
 	stopSampler := e.startCostSampler(ctx, r, handle, logWriter)
-	defer stopSampler()
+	// Call through the variable so a retry that restarts the sampler is honored.
+	defer func() { stopSampler() }()
 
 	// Stream logs (non-fatal)
 	if logWriter != nil {
@@ -177,17 +205,11 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	// we must poll rather than tear the run down on the first reading.
 	state, err := e.waitForTerminal(ctx, handle, r.Plan.Constraints.MaxDuration)
 
-	// Collect artifacts BEFORE we transition to a terminal state — even on
-	// failure. Crash dumps and partial outputs are usually exactly what the
-	// user wants; losing them to cleanup defeats the point. Failure is
-	// logged but non-fatal so cleanup still runs.
-	if tErr := r.Transition(types.RunStateCollectingArtifacts); tErr == nil {
-		if artifacts, aErr := e.adapter.Artifacts(ctx, handle); aErr == nil {
-			r.Artifacts = artifacts
-		} else if logWriter != nil {
-			fmt.Fprintf(logWriter, "[dispatcher] warning: artifact collection failed: %v\n", aErr)
-		}
-	}
+	// NOTE: we stay in Running (do NOT transition to CollectingArtifacts) until
+	// after any transient-failure retry resolves, so the cost sampler can still
+	// trip the budget on the re-provisioned VM (BudgetExceeded is legal only from
+	// Running). Artifacts are collected per-branch below, from whichever handle
+	// actually ran — crash dumps on failure, real outputs on (retry) success.
 
 	// Capture failure details from the adapter if it supports rich reporting.
 	// Always do this — we want the data on the run record for diagnose, even
@@ -199,6 +221,7 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	}
 
 	if err != nil {
+		e.collectArtifacts(ctx, r, handle, logWriter) // crash dumps
 		r.SetError(types.RunStateExecutionFailed, err)
 		return fmt.Errorf("status check failed: %w", err)
 	}
@@ -219,6 +242,13 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 			}
 			r.RetryCount++
 			r.Failure = adapter.FailureDetails{}
+			// Stop the original sampler BEFORE teardown/re-provision. It captured
+			// the now-doomed first handle and the run is still Running, so a budget
+			// breach during the (tens-of-seconds) re-provision window would trip
+			// BudgetExceeded on the destroyed handle and burn the run's only
+			// Running->BudgetExceeded transition — leaving the retry VM uncapped.
+			// A fresh sampler is armed on the new handle once Execute succeeds.
+			stopSampler()
 			// Tear down the failed attempt's resources before re-provisioning.
 			// The retry overwrites r.Handle, so without this the first
 			// attempt's VM/Job would be orphaned and keep billing until the
@@ -241,6 +271,9 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 				handle = retryHandle
 				r.Handle = retryHandle
 				_ = r.PersistHandle()
+				// Arm a fresh cost sampler on the NEW handle (the original was
+				// already stopped before teardown) so the retry VM stays capped.
+				stopSampler = e.startCostSampler(ctx, r, handle, logWriter)
 				// Wait for the new run. We deliberately don't re-stream logs
 				// here to keep the retry path narrow — the original log
 				// writer is closed.
@@ -259,10 +292,15 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 			}
 		}
 		if !retrySucceeded {
+			e.collectArtifacts(ctx, r, handle, logWriter) // crash dumps from the failed handle
 			r.SetError(types.RunStateExecutionFailed, fmt.Errorf("workload execution failed"))
 			return fmt.Errorf("workload execution failed")
 		}
 	}
+
+	// Success (first attempt or retry): collect outputs from the handle that
+	// actually completed — for a retry that's the re-provisioned VM.
+	e.collectArtifacts(ctx, r, handle, logWriter)
 
 	// Reconcile cost
 	if err := r.Transition(types.RunStateReconcilingCost); err == nil {

@@ -210,6 +210,38 @@ func TestApplyConfig_Command(t *testing.T) {
 	spec := &types.WorkloadSpec{}
 	ApplyConfig(spec, &DispatcherConfig{Command: []string{"python3", "train.py"}})
 	assert.Equal(t, []string{"python3", "train.py"}, spec.Command)
+	assert.Equal(t, types.WorkloadKindScript, spec.DetectedKind,
+		"an explicit command is an executable script workload even without detectable source")
+}
+
+func TestLoadAndApplyConfig_ResourceConstraints(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: compute\ncpu: 16\nmemory: 30G\narch: x86_64\n")
+
+	cfg, err := LoadConfig(dir)
+	require.NoError(t, err)
+	spec := &types.WorkloadSpec{}
+	ApplyConfig(spec, cfg)
+
+	assert.Equal(t, "16", spec.Requirements.CPU)
+	assert.Equal(t, "30G", spec.Requirements.Memory)
+	assert.Equal(t, "x86_64", spec.Requirements.Arch)
+}
+
+func TestConfig_RejectsInvalidResourceConstraints(t *testing.T) {
+	for name, body := range map[string]string{
+		"cpu":    "cpu: zero\n",
+		"memory": "memory: lots\n",
+		"arch":   "arch: sparc\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "dispatcher.yaml", "name: bad\n"+body)
+			_, err := LoadConfig(dir)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), name)
+		})
+	}
 }
 
 func TestApplyConfig_GPU(t *testing.T) {
@@ -255,10 +287,15 @@ func TestApplyConfig_ServiceNoDuplicate(t *testing.T) {
 	assert.Equal(t, 1, count)
 }
 
+// sandbox is an isolation requirement, not a workload kind: it must set the
+// Sandbox requirement (so feasibility can gate process-only targets) while
+// leaving the detected kind intact — otherwise a sandboxed script would be
+// misclassified and mis-planned.
 func TestApplyConfig_Sandbox(t *testing.T) {
 	spec := &types.WorkloadSpec{DetectedKind: types.WorkloadKindScript}
 	ApplyConfig(spec, &DispatcherConfig{Sandbox: true})
-	assert.Equal(t, types.WorkloadKindSandbox, spec.DetectedKind)
+	assert.Equal(t, types.WorkloadKindScript, spec.DetectedKind, "sandbox must not overwrite the detected kind")
+	assert.True(t, spec.Requirements.Sandbox, "sandbox must set the isolation requirement")
 }
 
 func TestApplyConfig_Nil(t *testing.T) {

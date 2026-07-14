@@ -104,10 +104,44 @@ func TestCheckFeasibility_GPUModel(t *testing.T) {
 	target.Capabilities.Resources.GPU.Models = []string{"t4", "a100", "h100"}
 	assert.True(t, CheckFeasibility(target, w).Feasible)
 
+	// Case-insensitive: an uppercase model must match a lowercase catalog entry
+	// (the pricing layer matches with EqualFold — feasibility must agree).
+	w.Requirements.GPU.Model = "H100"
+	target.Capabilities.Resources.GPU.Models = []string{"t4", "a100", "h100"}
+	assert.True(t, CheckFeasibility(target, w).Feasible, "GPU model match must be case-insensitive")
+
 	// No model pinned → any GPU-capable target is fine.
 	w.Requirements.GPU.Model = ""
 	target.Capabilities.Resources.GPU.Models = []string{"t4"}
 	assert.True(t, CheckFeasibility(target, w).Feasible)
+}
+
+// A workload requiring BOTH confidential and GPU must be infeasible everywhere:
+// dispatcher's confidential backends provision CPU-only CVMs (no confidential GPU
+// SKU exists), so a target advertising GPU and confidential independently would
+// otherwise be recommended and then silently drop the GPU requirement at run time.
+func TestCheckFeasibility_ConfidentialGPUUnsupported(t *testing.T) {
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindGPUJob,
+		Requirements: types.ResourceRequirements{
+			GPU:          types.GPURequirement{Required: true, Model: "a100"},
+			Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp"},
+		},
+	}
+	target := types.TargetConfig{
+		ID:      "aws-vm",
+		Enabled: true,
+		Capabilities: types.Capabilities{
+			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindGPUJob},
+			Resources: types.ResourceCapability{
+				GPU:          types.GPUCapability{Supported: true, Models: []string{"t4", "a10g", "a100"}},
+				Confidential: types.ConfidentialCapability{Supported: true, Types: []string{"sev-snp"}},
+			},
+		},
+	}
+	res := CheckFeasibility(target, w)
+	assert.False(t, res.Feasible, "confidential + GPU must be infeasible (no confidential GPU backend)")
+	assert.Contains(t, joinReasons(res), "confidential")
 }
 
 func joinReasons(r FeasibilityResult) string {
@@ -204,4 +238,28 @@ func TestRegistryListOrder(t *testing.T) {
 func TestRuntimeForTarget(t *testing.T) {
 	assert.Equal(t, "local-docker", RuntimeForTarget(types.TargetConfig{Kind: types.TargetKindDocker}))
 	assert.Equal(t, "kubernetes-deployment", RuntimeForTarget(types.TargetConfig{Kind: types.TargetKindKubernetes}))
+}
+
+// sandbox: true is an isolation requirement — feasible on isolated targets
+// (container/vm), infeasible on a process-only target (the documented feature
+// must not brick the workload).
+func TestCheckFeasibility_Sandbox(t *testing.T) {
+	registry := NewRegistry()
+	registry.LoadBuiltins()
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{Sandbox: true},
+	}
+
+	docker, _ := registry.Get("local-docker")
+	assert.True(t, CheckFeasibility(docker, w).Feasible, "container isolation satisfies sandbox")
+
+	fc, ok := registry.Get("firecracker-vm")
+	require.True(t, ok)
+	assert.True(t, CheckFeasibility(fc, w).Feasible, "vm isolation satisfies sandbox")
+
+	local, _ := registry.Get("local-process")
+	res := CheckFeasibility(local, w)
+	assert.False(t, res.Feasible, "process-only isolation must not satisfy sandbox")
+	assert.Contains(t, joinReasons(res), "sandbox")
 }

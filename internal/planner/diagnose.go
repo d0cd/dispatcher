@@ -214,7 +214,7 @@ func deterministicRecommendation(i RunInspection) string {
 		return "Either raise --max-cost or pick a cheaper target."
 	case "provisioning-failed":
 		return "Verify CLI credentials and quotas for the target's provider, then rerun."
-	case "running", "detached":
+	case "running":
 		return "Run is still active — wait, or use dispatcher status to monitor."
 	case "completed":
 		return "No action needed."
@@ -227,7 +227,7 @@ func severityForState(s interface{}) string {
 	switch str {
 	case "completed":
 		return "info"
-	case "running", "detached", "reconnecting":
+	case "running":
 		return "info"
 	case "budget-exceeded":
 		return "warning"

@@ -63,7 +63,9 @@ type PlanConstraints struct {
 	// AllowSSHFrom, when set to a CIDR (e.g. 203.0.113.4/32), attaches a
 	// per-run firewall to the provisioned cloud VM allowing inbound SSH only
 	// from that range. Empty = no per-run firewall (provider defaults apply).
-	// Supported on Hetzner and GCP; other providers reject a non-empty value.
+	// Implemented at the provider level on Hetzner and AWS (per-run SG), and the
+	// CLI accepts --allow-ssh-from for both; GCP, Azure, Lima, and Kubernetes
+	// reject a non-empty value.
 	AllowSSHFrom string `yaml:"allowSshFrom,omitempty" json:"allowSshFrom,omitempty"`
 }
 

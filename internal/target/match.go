@@ -30,7 +30,7 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 		gpu := t.Capabilities.Resources.GPU
 		if !gpu.Supported {
 			reasons = append(reasons, "GPU required but target does not support GPU")
-		} else if m := w.Requirements.GPU.Model; m != "" && len(gpu.Models) > 0 && !inSlice(gpu.Models, m) {
+		} else if m := w.Requirements.GPU.Model; m != "" && len(gpu.Models) > 0 && !offersGPUModel(gpu.Models, m) {
 			reasons = append(reasons, "GPU model "+m+" not offered by target (offers: "+strings.Join(gpu.Models, ", ")+")")
 		}
 	}
@@ -43,12 +43,25 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 		} else if c.Type != "" && c.Type != "any" && !inSlice(conf.Types, c.Type) {
 			reasons = append(reasons, "confidential type "+c.Type+" not offered by target (offers: "+strings.Join(conf.Types, ", ")+")")
 		}
+		// Confidential and GPU together are unsupported: every confidential backend
+		// provisions a CPU-only CVM (there is no confidential GPU SKU), so the run
+		// path would silently drop the GPU requirement. Fail closed at plan time
+		// rather than billing a confidential VM that can't run the GPU job.
+		if w.Requirements.GPU.Required {
+			reasons = append(reasons, "confidential GPU workloads are not supported (confidential backends provision CPU-only VMs)")
+		}
 		// A measured-boot profile is provider-specific — it may only run on the
 		// matching provider's target, so the plan can't recommend a cross-cloud
 		// target that would silently route to an unmeasured backend.
 		if req := RequiredTargetForProfile(c.Profile); req != "" && t.ID != req {
 			reasons = append(reasons, "confidential profile "+c.Profile+" requires target "+req)
 		}
+	}
+
+	// Sandbox requires isolation stronger than a bare host process (container or
+	// VM level), so a process-only target (local-process) is infeasible.
+	if w.Requirements.Sandbox && !offersIsolation(t.Capabilities.Isolation.Levels) {
+		reasons = append(reasons, "sandbox required but target only offers process-level isolation")
 	}
 
 	// Check service-specific requirements
@@ -77,6 +90,29 @@ func RequiredTargetForProfile(profile string) string {
 	default:
 		return ""
 	}
+}
+
+// offersIsolation reports whether a target provides isolation stronger than a
+// bare host process (container or VM level) — what a sandboxed workload needs.
+func offersIsolation(levels []string) bool {
+	for _, l := range levels {
+		if l != "" && !strings.EqualFold(l, "process") {
+			return true
+		}
+	}
+	return false
+}
+
+// offersGPUModel reports whether a target offers the requested GPU model,
+// case-insensitively — the pricing catalog matches models with EqualFold, so
+// feasibility must agree or `model: A100` is spuriously rejected.
+func offersGPUModel(models []string, m string) bool {
+	for _, x := range models {
+		if strings.EqualFold(x, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func supportsKind(supported []types.WorkloadKind, kind types.WorkloadKind) bool {

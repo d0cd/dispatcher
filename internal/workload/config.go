@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 // expanded — a bare $VAR (e.g. inside a shell command meant to expand on the
 // remote host) is left untouched.
 var envRefPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
+var resourceMemoryPattern = regexp.MustCompile(`(?i)^([0-9]+(?:\.[0-9]+)?)(?:g|gi|gb|m|mi|mb)?$`)
 
 // expandEnvRefs substitutes ${VAR} / ${VAR:-default} references in the raw
 // config against the process environment. An undefined ${VAR} with no default
@@ -48,6 +50,9 @@ type DispatcherConfig struct {
 	Name    string             `yaml:"name"`
 	Image   string             `yaml:"image,omitempty"`
 	Command []string           `yaml:"command,omitempty"`
+	CPU     string             `yaml:"cpu,omitempty"`
+	Memory  string             `yaml:"memory,omitempty"`
+	Arch    string             `yaml:"arch,omitempty"`
 	GPU     *DispatchGPUConfig `yaml:"gpu,omitempty"`
 	Service *DispatchService   `yaml:"service,omitempty"`
 	Sandbox bool               `yaml:"sandbox,omitempty"`
@@ -136,7 +141,7 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		dec.KnownFields(true)
 		var cfg DispatcherConfig
 		if err := dec.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, gpu, service, sandbox, confidential, shard, aggregate, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
+			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, cpu, memory, arch, gpu, service, sandbox, confidential, shard, aggregate, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
 		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate %s: %w", path, err)
@@ -151,6 +156,27 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 // durations, etc. Run by LoadConfig; callers constructing DispatcherConfig
 // programmatically can invoke it directly.
 func (c *DispatcherConfig) Validate() error {
+	if c.CPU != "" {
+		cpu, err := strconv.Atoi(strings.TrimSpace(c.CPU))
+		if err != nil || cpu <= 0 {
+			return fmt.Errorf("cpu must be a positive integer (got %q)", c.CPU)
+		}
+	}
+	if c.Memory != "" {
+		match := resourceMemoryPattern.FindStringSubmatch(strings.TrimSpace(c.Memory))
+		if len(match) == 0 {
+			return fmt.Errorf("memory must be a positive size such as 30G or 2048M (got %q)", c.Memory)
+		}
+		amount, err := strconv.ParseFloat(match[1], 64)
+		if err != nil || amount <= 0 {
+			return fmt.Errorf("memory must be positive (got %q)", c.Memory)
+		}
+	}
+	switch c.Arch {
+	case "", "x86_64", "arm64":
+	default:
+		return fmt.Errorf("arch %q is invalid (x86_64|arm64)", c.Arch)
+	}
 	if c.MaxCost < 0 {
 		return fmt.Errorf("maxCost must be non-negative (got %v)", c.MaxCost)
 	}
@@ -218,6 +244,19 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 
 	if len(cfg.Command) > 0 {
 		spec.Command = cfg.Command
+		if spec.DetectedKind == "" || spec.DetectedKind == types.WorkloadKindUnknown {
+			spec.DetectedKind = types.WorkloadKindScript
+		}
+	}
+
+	if cfg.CPU != "" {
+		spec.Requirements.CPU = cfg.CPU
+	}
+	if cfg.Memory != "" {
+		spec.Requirements.Memory = cfg.Memory
+	}
+	if cfg.Arch != "" {
+		spec.Requirements.Arch = cfg.Arch
 	}
 
 	if cfg.Image != "" {
@@ -294,7 +333,9 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 	}
 
 	if cfg.Sandbox {
-		spec.DetectedKind = types.WorkloadKindSandbox
+		// Sandbox is an isolation requirement, not a workload kind: keep the
+		// detected kind and let feasibility filter to isolated targets.
+		spec.Requirements.Sandbox = true
 	}
 
 	if len(cfg.Outputs) > 0 {

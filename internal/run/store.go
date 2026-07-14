@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -140,6 +141,39 @@ func atomicWriteLocked(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+var planIDPattern = regexp.MustCompile(`"planId"\s*:\s*"([^"]+)"`)
+
+// RecoverPlanID returns the plan id a run record references even when the record
+// can't be fully parsed (truncated/corrupt), so gc can still protect the run's
+// (possibly live) cloud resources — VMs are tagged with the plan id, not the run
+// id. Returns "" only if the plan id can't be recovered at all.
+func RecoverPlanID(id string) string {
+	if err := validateRunID(id); err != nil {
+		return ""
+	}
+	dir, err := StoreDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(dir, id+".json"))
+	if err != nil {
+		return ""
+	}
+	// Common case: a schema/field error, not truncation — a strict parse of just
+	// the plan id still works.
+	var rec struct {
+		PlanID string `json:"planId"`
+	}
+	if json.Unmarshal(data, &rec) == nil && rec.PlanID != "" {
+		return rec.PlanID
+	}
+	// Truncated/invalid JSON: recover the plan id lexically.
+	if m := planIDPattern.FindSubmatch(data); m != nil {
+		return string(m[1])
+	}
+	return ""
 }
 
 func LoadRecord(id string) (*RunRecord, error) {

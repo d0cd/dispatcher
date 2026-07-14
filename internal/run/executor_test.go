@@ -129,6 +129,41 @@ func executorTestPlan() *types.Plan {
 	}
 }
 
+// persistObserverAdapter records, at Execute time, whether a non-terminal run
+// record for this plan was already on disk — i.e. whether a concurrent gc's
+// active-run protection (keyed off PlanID, built from persisted records) would
+// have covered the VM Execute is about to provision.
+type persistObserverAdapter struct {
+	*mockAdapter
+	recordPersistedAtExecute bool
+}
+
+func (m *persistObserverAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
+	ids, _ := ListRecords()
+	for _, id := range ids {
+		if rec, err := LoadRecord(id); err == nil && rec.PlanID == p.Metadata.ID && !rec.State.IsTerminal() {
+			m.recordPersistedAtExecute = true
+		}
+	}
+	return m.mockAdapter.Execute(ctx, p)
+}
+
+// A concurrent `dispatcher gc` builds its active-run set from persisted records
+// and keys protection off PlanID. If the run record is not persisted until AFTER
+// adapter.Execute returns (which for a cloud/confidential run is the entire
+// provision + sealed run), gc sees no record for the live VM's plan id,
+// misclassifies the dispatcher-owned VM as an orphan, and destroys it mid-run.
+// A non-terminal record must therefore be on disk before Execute is called.
+func TestExecutor_PersistsRunRecordBeforeProvisioning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := &persistObserverAdapter{mockAdapter: newMockAdapter()}
+	ex := NewExecutor(m)
+	r := NewRun(executorTestPlan())
+	require.NoError(t, ex.Execute(context.Background(), r, io.Discard))
+	assert.True(t, m.recordPersistedAtExecute,
+		"a non-terminal run record must be persisted before adapter.Execute so a concurrent gc won't reap the live VM")
+}
+
 func TestExecutor_HappyPath(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)

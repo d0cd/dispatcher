@@ -288,7 +288,11 @@ func BuiltinTargets() []types.TargetConfig {
 					},
 					Confidential: types.ConfidentialCapability{
 						Supported: true,
-						Types:     []string{"sev", "sev-snp", "tdx"},
+						// dispatcher's GCP confidential path is Confidential Space, which
+						// provisions plain SEV — so a sev-snp/tdx request is rejected at
+						// plan time rather than silently downgraded (use azure-snp / aws
+						// for SEV-SNP). See internal/attest/confidential_space.go.
+						Types: []string{"sev"},
 					},
 				},
 				Networking: types.NetworkingCapability{
