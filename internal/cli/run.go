@@ -21,6 +21,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/plan"
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/shard"
+	"github.com/d0cd/dispatcher/internal/target"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -49,7 +50,7 @@ func init() {
 	runCmd.Flags().StringVar(&runFlags.target, "target", "", "run on a specific target")
 	runCmd.Flags().StringVar(&runFlags.optimize, "optimize", "cost", "optimize for: cost, speed")
 	runCmd.Flags().Float64Var(&runFlags.maxCost, "max-cost", 0, "maximum estimated cost in USD")
-	runCmd.Flags().StringVar(&runFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, h100:1)")
+	runCmd.Flags().StringVar(&runFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, a100:1)")
 	runCmd.Flags().StringVar(&runFlags.region, "region", "", "cloud region/zone to provision in and tear down from (e.g. eu-west-1, us-central1-a); overrides dispatcher.yaml region")
 	runCmd.Flags().StringVar(&runFlags.timeout, "timeout", "", "maximum run duration (e.g. 30m, 2h)")
 	runCmd.Flags().BoolVarP(&runFlags.yes, "yes", "y", false, "auto-approve all policy gates")
@@ -375,11 +376,8 @@ func adapterForPlan(ctx context.Context, p *types.Plan) (adapter.TargetAdapter, 
 	// or hand-forced plan must never silently fall through to a provider's
 	// unmeasured default backend.
 	if c := p.Workload.Requirements.Confidential; c.Required && c.Attestation != "off" && p.Recommendation != nil {
-		if c.Profile == "nitro" && p.Recommendation.Target != "aws-vm" {
-			return nil, fmt.Errorf("confidential.profile: nitro requires target aws-vm, but the plan selected %s", p.Recommendation.Target)
-		}
-		if c.Profile == "azure-snp" && p.Recommendation.Target != "azure-vm" {
-			return nil, fmt.Errorf("confidential.profile: azure-snp requires target azure-vm, but the plan selected %s", p.Recommendation.Target)
+		if req := target.RequiredTargetForProfile(c.Profile); req != "" && p.Recommendation.Target != req {
+			return nil, fmt.Errorf("confidential.profile: %s requires target %s, but the plan selected %s", c.Profile, req, p.Recommendation.Target)
 		}
 	}
 	switch {
@@ -394,6 +392,14 @@ func adapterForPlan(ctx context.Context, p *types.Plan) (adapter.TargetAdapter, 
 	case usesAWSConfidential(p):
 		return newAWSConfidentialAdapter(ctx)
 	default:
+		// A confidential run with attestation on MUST resolve to an attesting
+		// backend. If none of the predicates matched (e.g. an empty profile on a
+		// target that isn't one of the three cloud confidential backends), fail
+		// closed rather than silently using a plain, non-attesting adapter.
+		// `attestation: off` is the escape hatch and still uses the plain path.
+		if c := p.Workload.Requirements.Confidential; c.Required && c.Attestation != "off" && p.Recommendation != nil {
+			return nil, fmt.Errorf("confidential attestation required but target %q has no attesting backend", p.Recommendation.Target)
+		}
 		return adapterForTarget(p.Recommendation.Target)
 	}
 }

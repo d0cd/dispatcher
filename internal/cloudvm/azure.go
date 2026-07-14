@@ -235,7 +235,7 @@ func (a *AzureProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error)
 		"--output", "json",
 	)
 	if err != nil {
-		if isVMNotFound(err) {
+		if isVMNotFound(err, vmID) {
 			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
 		}
 		return nil, wrapExecError("az vm show", err)
@@ -268,7 +268,14 @@ func (a *AzureProvider) DestroyVM(ctx context.Context, vmID string) error {
 	// disk, NIC, public IP, and NSG behind — the disk and IP keep billing.
 	// Capture their ids before deleting the VM, then cascade-delete them in
 	// dependency order so teardown doesn't leak.
-	assoc := a.gatherVMResources(ctx, vmID)
+	assoc, err := a.gatherVMResources(ctx, vmID)
+	if err != nil {
+		// Deleting the VM now would orphan its untagged OS disk / NIC / public IP
+		// (gc can't reap them). Abort: the VM itself is dispatcher-tagged, so it
+		// survives and a later teardown or `dispatcher gc` reaps it together with
+		// its satellites via this cascade.
+		return fmt.Errorf("azure: could not enumerate VM %q satellite resources; aborting delete to avoid an untagged leak: %w", vmID, err)
+	}
 
 	if _, err := runCLI(ctx, "az", "vm", "delete",
 		"--resource-group", a.resourceGroup,

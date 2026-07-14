@@ -8,6 +8,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/run"
+	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // gc must flag ongoing cost that crosses the --warn-over threshold, so a leaked
@@ -35,6 +37,43 @@ func TestGC_CostWarningOverThreshold(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(stdout), &r))
 	assert.InDelta(t, 500.0, r.MonthlyUSD, 0.01, "total ongoing cost is reported")
 	assert.True(t, r.CostWarning, "cost over the threshold must set the warning flag")
+}
+
+// A cloud VM is tagged with the PLAN id (the adapter never sees the run id), so
+// gc must protect it while its run is still active — keying the guard on the run
+// id can never match the plan-id tag and would reap live VMs.
+func TestGC_DoesNotReapActiveRunTaggedWithPlanID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	p := &types.Plan{
+		Metadata:       types.PlanMetadata{ID: "plan_active"},
+		Recommendation: &types.Recommendation{Target: "hetzner-vm"},
+	}
+	r := run.NewRun(p)
+	require.NoError(t, r.Transition(types.RunStatePlanning))
+	require.NoError(t, r.Transition(types.RunStateValidated))
+	require.NoError(t, r.Transition(types.RunStatePreparing))
+	require.NoError(t, r.Transition(types.RunStateRunning)) // non-terminal → active
+	_, err := r.Save()
+	require.NoError(t, err)
+
+	f := &fakeGCAdapter{
+		id: "hetzner-vm",
+		resources: []adapter.ResourceInfo{{
+			ResourceID: "srv-live", Provider: "hetzner", RunID: p.Metadata.ID,
+			Tags: map[string]string{"dispatcher": "true", "dispatcher-run-id": p.Metadata.ID},
+		}},
+	}
+	withGCAdapter(t, f)
+
+	var runErr error
+	out := captureStdout(t, func() { _, _, runErr = executeCommand("--output", "json", "gc", "--dry-run") })
+	require.NoError(t, runErr)
+
+	var report gcReport
+	require.NoError(t, json.Unmarshal([]byte(out), &report))
+	assert.Equal(t, 0, report.Found, "a VM whose run is still active must not be an orphan")
 }
 
 func gcOrphanAdapter() *fakeGCAdapter {

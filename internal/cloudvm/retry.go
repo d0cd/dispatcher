@@ -60,7 +60,7 @@ func Retry(ctx context.Context, p RetryPolicy, classifier func(error) bool, op f
 // failures per DefaultRetry. label is used to wrap stderr so IsTransient can
 // classify on the CLI's actual complaint. Shared by every provider's CreateVM
 // so the retry/exec/error-wrap behavior stays identical across them.
-func retryCLIOutput(ctx context.Context, bin, label string, args ...string) ([]byte, error) {
+var retryCLIOutput = func(ctx context.Context, bin, label string, args ...string) ([]byte, error) {
 	var out []byte
 	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
 		var runErr error
@@ -108,12 +108,19 @@ func (e *cliError) Unwrap() error { return e.err }
 // exists (as opposed to a transient/auth failure). GetVM maps this to
 // State=Terminated,nil per the Provider contract; every other error propagates.
 // It matches on the CLI's stderr, now carried by cliError.
-func isVMNotFound(err error) bool {
+func isVMNotFound(err error, vmID string) bool {
 	if err == nil {
 		return false
 	}
 	s := strings.ToLower(err.Error())
-	for _, marker := range []string{"not found", "notfound", "does not exist", "could not be found", "404"} {
+	// Key off the VM id: a not-found that doesn't name this VM is about something
+	// else (a missing CLI binary → "executable file not found"; a wrong resource
+	// group → "resource group 'X' could not be found") and must NOT be read as the
+	// VM being gone — that would stop teardown and leak a live, billing VM.
+	if vmID != "" && !strings.Contains(s, strings.ToLower(vmID)) {
+		return false
+	}
+	for _, marker := range []string{"not found", "notfound", "does not exist", "could not be found"} {
 		if strings.Contains(s, marker) {
 			return true
 		}

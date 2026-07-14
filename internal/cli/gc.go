@@ -81,6 +81,9 @@ before running for real, especially with long-lived state directories.`,
 		if err != nil {
 			return fmt.Errorf("cannot enumerate run records; refusing to GC (could destroy live runs): %w", err)
 		}
+		// Cloud VMs are tagged with the PLAN id (the adapter is handed a Plan, not
+		// a run), so res.RunID is a plan id — protect by plan id, not the run
+		// record's own id, or the guard never matches and gc reaps live VMs.
 		activeRuns := map[string]bool{}
 		unreadableRuns := map[string]bool{}
 		for _, id := range runIDs {
@@ -89,7 +92,7 @@ before running for real, especially with long-lived state directories.`,
 			case err != nil:
 				unreadableRuns[id] = true
 			case !rec.State.IsTerminal():
-				activeRuns[id] = true
+				activeRuns[rec.PlanID] = true
 			}
 		}
 

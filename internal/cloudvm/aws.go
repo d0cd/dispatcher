@@ -154,6 +154,13 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--tag-specifications", tagSpec,
 		"--output", "json",
 	}
+	// run-instances has no name uniqueness, so a transient error after the
+	// instance is created would make the retry provision a SECOND instance. A
+	// stable per-run client token makes the create idempotent — a retry returns
+	// the already-created instance instead of duplicating it.
+	if token := awsClientToken(opts); token != "" {
+		args = append(args, "--client-token", token)
+	}
 
 	args = append(args, confArgs...)
 
@@ -296,6 +303,17 @@ func awsTagSpec(resourceType string, tags map[string]string) string {
 // admitting inbound SSH from cidr, and returns its group id. The group carries
 // the run's dispatcher tags so gc can recognize and reap a leaked one, and is
 // deleted on teardown (or if run-instances fails).
+// awsClientToken returns a stable idempotency token for run-instances, derived
+// from the per-run tag (the plan id) or the VM name. Stable across a create's
+// retries and unique per run, so AWS dedupes a retried create to one instance.
+// AWS caps client tokens at 64 ASCII chars; the plan id / name are well under.
+func awsClientToken(opts VMOptions) string {
+	if id := opts.Tags["dispatcher-run-id"]; id != "" {
+		return id
+	}
+	return opts.Name
+}
+
 func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string, tags map[string]string) (string, error) {
 	out, err := runCLI(ctx, "aws", "ec2", "describe-vpcs", "--region", region,
 		"--filters", "Name=isDefault,Values=true", "--query", "Vpcs[0].VpcId", "--output", "text")
@@ -385,7 +403,7 @@ func (a *AWSProvider) getVMInRegion(ctx context.Context, vmID, region string) (*
 		"--output", "json",
 	)
 	if err != nil {
-		if isVMNotFound(err) {
+		if isVMNotFound(err, vmID) {
 			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
 		}
 		return nil, wrapExecError("aws ec2 describe-instances", err)

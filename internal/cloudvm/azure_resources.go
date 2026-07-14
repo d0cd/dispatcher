@@ -39,14 +39,28 @@ type azureVMResources struct {
 }
 
 // gatherVMResources reads a VM's associated resource ids (OS disk, NICs, and via
-// each NIC its public IP and NSG). Best-effort: any failure yields whatever was
-// found so teardown still deletes the VM.
-func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) azureVMResources {
+// each NIC its public IP and NSG). The top-level enumeration is retried and
+// returns an error on persistent failure — these ids are the only handle on
+// Azure's untagged satellites, so the caller must not delete the VM without them.
+// The per-NIC drill-down is best-effort (a missed IP is one leaked address, not
+// the whole cascade).
+func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) (azureVMResources, error) {
 	var out azureVMResources
-	raw, err := runCLI(ctx, "az", "vm", "show",
-		"--resource-group", a.resourceGroup, "--name", vmID, "--output", "json")
+	// Retry the enumeration: the disk/NIC/IP ids captured here are the ONLY way
+	// teardown can reap Azure's auto-created (untagged) satellites, so a single
+	// transient `az vm show` must not cause a permanent leak.
+	var raw []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		o, e := runCLI(ctx, "az", "vm", "show",
+			"--resource-group", a.resourceGroup, "--name", vmID, "--output", "json")
+		if e != nil {
+			return wrapExecError("az vm show", e)
+		}
+		raw = o
+		return nil
+	})
 	if err != nil {
-		return out
+		return out, err
 	}
 	var vm struct {
 		StorageProfile struct {
@@ -63,7 +77,7 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) azur
 		} `json:"networkProfile"`
 	}
 	if err := json.Unmarshal(raw, &vm); err != nil {
-		return out
+		return out, fmt.Errorf("parse az vm show: %w", err)
 	}
 	out.osDiskID = vm.StorageProfile.OsDisk.ManagedDisk.ID
 	for _, ni := range vm.NetworkProfile.NetworkInterfaces {
@@ -107,7 +121,7 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) azur
 			out.nsgs = append(out.nsgs, nic.NetworkSecurityGroup.ID)
 		}
 	}
-	return out
+	return out, nil
 }
 
 // deleteAssociatedResources deletes a VM's satellites in dependency order: NICs

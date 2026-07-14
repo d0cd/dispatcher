@@ -17,6 +17,12 @@ func azResponses(match func(args []string) ([]byte, bool)) func(string, ...strin
 		if body, ok := match(args); ok {
 			return body, nil
 		}
+		// `show` returns a JSON object, `list` an array. Default the unmatched
+		// shape so teardown's gatherVMResources (az vm show) parses it instead of
+		// aborting the delete to avoid an untagged-satellite leak.
+		if len(args) >= 2 && args[1] == "show" {
+			return []byte("{}"), nil
+		}
 		return []byte("[]"), nil
 	}
 }

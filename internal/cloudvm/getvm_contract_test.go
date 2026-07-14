@@ -34,6 +34,23 @@ func TestGetVM_NotFoundIsTerminated(t *testing.T) {
 	}
 }
 
+// isVMNotFound must key off the VM id, so a not-found for something else — a
+// missing CLI binary or a wrong resource group — is NOT misread as the VM being
+// gone (which would stop teardown and leak a live, billing VM).
+func TestIsVMNotFound_RequiresTheVMID(t *testing.T) {
+	// Real VM not-found (names the VM) → true.
+	assert.True(t, isVMNotFound(errors.New("The Resource 'vm-1' was not found"), "vm-1"))
+	assert.True(t, isVMNotFound(errors.New(`jobs.batch "vm-1" not found`), "vm-1"))
+	// Wrong resource group (names the RG, not the VM) → false.
+	assert.False(t, isVMNotFound(errors.New("Resource group 'other-rg' could not be found."), "vm-1"))
+	// Missing CLI binary → false (does not name the VM).
+	assert.False(t, isVMNotFound(errors.New(`exec: "az": executable file not found in $PATH`), "vm-1"))
+	// A different VM's not-found → false.
+	assert.False(t, isVMNotFound(errors.New("instance 'vm-2' not found"), "vm-1"))
+	// A transient error → false.
+	assert.False(t, isVMNotFound(errors.New("ServiceUnavailable: rate limited"), "vm-1"))
+}
+
 // A transient/auth error is NOT proof the VM is gone; every provider must
 // propagate it rather than silently reporting Terminated.
 func TestGetVM_TransientErrorPropagates(t *testing.T) {

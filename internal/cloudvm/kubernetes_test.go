@@ -1,6 +1,7 @@
 package cloudvm
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"testing"
@@ -112,4 +113,32 @@ func TestBuildJobManifest_NoGPUResourcesWhenNotRequired(t *testing.T) {
 	opts := VMOptions{Name: "j", Image: "ubuntu", Command: "echo hi"}
 
 	assert.NotContains(t, k.buildJobManifest(opts.Name, opts.Image, opts), "nvidia.com/gpu")
+}
+
+// A transient kubectl error must NOT be reported as a completed Job — the old
+// behavior mapped any error to Terminated, which K8sAdapter.Status turned into a
+// silent success (killing the still-running Job). It must propagate.
+func TestK8sGetVM_TransientErrorPropagates(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	runCLI = func(context.Context, string, ...string) ([]byte, error) {
+		return nil, fmt.Errorf("Unable to connect to the server: dial tcp: i/o timeout")
+	}
+	k := NewKubernetesProvider("default")
+	_, err := k.GetVM(context.Background(), "job-x")
+	require.Error(t, err, "a transient kubectl error must propagate, not report the Job gone")
+}
+
+// A vanished (NotFound) Job is not a success — it must not map to Terminated
+// (which Status treats as Completed).
+func TestK8sGetVM_VanishedJobIsNotSuccess(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	runCLI = func(context.Context, string, ...string) ([]byte, error) {
+		return nil, fmt.Errorf(`Error from server (NotFound): jobs.batch "job-x" not found`)
+	}
+	k := NewKubernetesProvider("default")
+	vm, err := k.GetVM(context.Background(), "job-x")
+	require.NoError(t, err)
+	assert.NotEqual(t, VMStateTerminated, vm.State, "a vanished Job must not be reported as a successful completion")
 }

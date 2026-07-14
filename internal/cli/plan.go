@@ -37,7 +37,7 @@ func init() {
 	planCmd.Flags().StringVar(&planFlags.target, "target", "", "evaluate a specific target")
 	planCmd.Flags().StringVar(&planFlags.optimize, "optimize", "cost", "optimize for: cost, speed")
 	planCmd.Flags().Float64Var(&planFlags.maxCost, "max-cost", 0, "maximum estimated cost in USD")
-	planCmd.Flags().StringVar(&planFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, h100:1)")
+	planCmd.Flags().StringVar(&planFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, a100:1)")
 	planCmd.Flags().BoolVar(&planFlags.ai, "ai", false, "use AI planner (requires LLM backend)")
 }
 

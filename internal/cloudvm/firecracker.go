@@ -258,6 +258,9 @@ func (f *FirecrackerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VM
 		_ = f.teardown(ctx, id)
 		return nil, fmt.Errorf("launch firecracker: %w", err)
 	}
+	// Start has duplicated the fd into the child (its stdout/stderr); the parent's
+	// copy is redundant now, so close it to avoid leaking one fd per microVM.
+	logf.Close()
 
 	return &VMInfo{
 		ID:        id,
