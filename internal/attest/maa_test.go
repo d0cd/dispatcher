@@ -32,6 +32,22 @@ const (
 
 var maaNonce = bytes.Repeat([]byte{0xC3}, 32)
 
+// Baseline per-component SVNs carried by validMAAClaims, and the packed reported
+// TCB they reconstruct to. Chosen non-trivial so a minTCB with any component one
+// higher must be rejected.
+const (
+	maaBootloaderSVN = 4
+	maaTEESVN        = 2
+	maaSNPFwSVN      = 20
+	maaMicrocodeSVN  = 115
+)
+
+// packTCB lays out per-component SVNs exactly as the SEV-SNP REPORTED_TCB u64
+// does (and as tcbComponentsGTE reads): bootloader@0, TEE@8, SNP@48, microcode@56.
+func packTCB(bootloader, tee, snp, microcode uint8) uint64 {
+	return uint64(bootloader) | uint64(tee)<<8 | uint64(snp)<<48 | uint64(microcode)<<56
+}
+
 // validMAAClaims builds a token in the real MAA CVM shape: SEV-SNP facts nested
 // under x-ms-isolation-tee, the binding nonce echoed in the top-level
 // x-ms-runtime.client-payload (base64).
@@ -51,6 +67,10 @@ func validMAAClaims() map[string]any {
 			"x-ms-compliance-status":          "azure-compliant-cvm",
 			"x-ms-sevsnpvm-is-debuggable":     false,
 			"x-ms-sevsnpvm-launchmeasurement": maaMeasurement,
+			"x-ms-sevsnpvm-bootloader-svn":    maaBootloaderSVN,
+			"x-ms-sevsnpvm-tee-svn":           maaTEESVN,
+			"x-ms-sevsnpvm-snpfw-svn":         maaSNPFwSVN,
+			"x-ms-sevsnpvm-microcode-svn":     maaMicrocodeSVN,
 		},
 	}
 }
@@ -212,25 +232,67 @@ func TestAzureAttester_RejectsUnboundToken(t *testing.T) {
 	assert.Contains(t, res.Verdict, "nonce")
 }
 
-// The MAA token carries no reported-TCB claim, so the MAA path cannot enforce a
-// minTCB floor. It must fail closed (loudly) when one is configured rather than
-// silently ignore it — the sibling direct-SNP paths enforce minTCB, and a silent
-// no-op here would run a workload on under-TCB silicon the operator meant to reject.
-func TestAzureAttester_MinTCBFailsClosed(t *testing.T) {
+// The MAA token carries the per-component SEV-SNP SVNs, so the MAA path enforces
+// a minTCB floor by reconstructing the reported TCB from them: a run whose floor
+// every component meets is accepted; a floor with any component above the token's
+// SVNs is a verdict (rejected), not ignored.
+func TestVerifyMAAToken_EnforcesMinTCB(t *testing.T) {
+	key, keys := maaSigningKey(t)
+
+	// A floor at exactly the token's SVNs → accepted.
+	atFloor := maaPolicy()
+	atFloor.MinTCB = packTCB(maaBootloaderSVN, maaTEESVN, maaSNPFwSVN, maaMicrocodeSVN)
+	_, err := verifyMAAToken(mintJWT(t, "maa1", "RS256", key, validMAAClaims()), keys, atFloor)
+	require.NoError(t, err, "a token meeting every component floor must verify")
+
+	// A floor one microcode SVN above the token → rejected.
+	tooHigh := maaPolicy()
+	tooHigh.MinTCB = packTCB(maaBootloaderSVN, maaTEESVN, maaSNPFwSVN, maaMicrocodeSVN+1)
+	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, validMAAClaims()), keys, tooHigh)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TCB", "a below-floor component must name TCB")
+
+	// A token missing the SVN claims can't prove its TCB, so any positive floor
+	// fails closed.
+	noSVNs := validMAAClaims()
+	tee := noSVNs["x-ms-isolation-tee"].(map[string]any)
+	for _, k := range []string{"x-ms-sevsnpvm-bootloader-svn", "x-ms-sevsnpvm-tee-svn", "x-ms-sevsnpvm-snpfw-svn", "x-ms-sevsnpvm-microcode-svn"} {
+		delete(tee, k)
+	}
+	floor := maaPolicy()
+	floor.MinTCB = packTCB(1, 0, 0, 0)
+	_, err = verifyMAAToken(mintJWT(t, "maa1", "RS256", key, noSVNs), keys, floor)
+	require.Error(t, err, "a token without SVN claims must fail a positive minTCB closed")
+}
+
+// End-to-end through the attester: minTCB is now enforced on the MAA path (no
+// longer a blanket fail-closed) — met floors verify, unmet floors are rejected.
+func TestAzureAttester_EnforcesMinTCB(t *testing.T) {
 	key, keys := maaSigningKey(t)
 	channelKey := bytes.Repeat([]byte{0x9A}, 32)
-	att := &azureAttester{keys: keys, issuer: maaIssuer,
-		fetch: func(_ context.Context, nonce []byte) (maaEvidence, error) {
-			c := validMAAClaims()
-			c["x-ms-runtime"].(map[string]any)["client-payload"].(map[string]any)["nonce"] =
-				base64.StdEncoding.EncodeToString(agent.MAABindingNonce(nonce, channelKey))
-			return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}, MinTCB: 7}
+	attWith := func() *azureAttester {
+		return &azureAttester{keys: keys, issuer: maaIssuer,
+			fetch: func(_ context.Context, nonce []byte) (maaEvidence, error) {
+				c := validMAAClaims()
+				c["x-ms-runtime"].(map[string]any)["client-payload"].(map[string]any)["nonce"] =
+					base64.StdEncoding.EncodeToString(agent.MAABindingNonce(nonce, channelKey))
+				return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
+			}}
+	}
+	base := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}}
 
-	_, err := att.Verify(context.Background(), req)
-	require.Error(t, err, "minTCB set on the MAA path must fail closed, not be ignored")
-	assert.Contains(t, err.Error(), "minTCB")
+	met := base
+	met.MinTCB = packTCB(maaBootloaderSVN, maaTEESVN, maaSNPFwSVN, maaMicrocodeSVN)
+	res, err := attWith().Verify(context.Background(), met)
+	require.NoError(t, err)
+	assert.True(t, res.Verified, "a met minTCB floor verifies on the MAA path")
+
+	unmet := base
+	unmet.MinTCB = packTCB(maaBootloaderSVN, maaTEESVN, maaSNPFwSVN+1, maaMicrocodeSVN)
+	res, err = attWith().Verify(context.Background(), unmet)
+	require.NoError(t, err)
+	assert.False(t, res.Verified, "an unmet minTCB floor is rejected, not ignored")
+	assert.Contains(t, res.Verdict, "TCB")
 }
 
 func TestAzureAttester_NotReadyAndNoFetch(t *testing.T) {

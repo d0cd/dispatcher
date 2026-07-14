@@ -182,8 +182,8 @@ the TEE. This closes the host-relay gap the raw SSH channel leaves open.
   can't verify AWS at all.
 - **Azure — MAA:** wire MAA **JWKS fetch + pinning** to the trusted MAA instance;
   add **`exp`/`nbf` and `iss`** checks to `verifyMAAToken` (defense-in-depth on
-  top of the nonce binding); wire per-component TCB (MAA reports SVNs, so the
-  current `TCB=0` rejects any positive `minTCB`).
+  top of the nonce binding); per-component TCB is wired — the verifier recombines
+  the token's SVN claims into the reported TCB and enforces `minTCB`.
 
 ## Small hardening (independent of the above, cheap now)
 
@@ -221,7 +221,7 @@ container-based execution path (CS is container-shaped, no SSH), wiring the
 3. **AWS raw SEV-SNP + VLEK** — ✅ agent (`/dev/sev-guest`), pinned image + measurement
    capture, `VLEK→ASK→ARK` path; plus a measured Nitro Enclaves backend (`profile: nitro`).
 4. **Azure MAA** — ✅ guest-attestation agent, JWKS pin + `exp`/`iss`; plus a measured
-   direct-SNP backend (`profile: azure-snp`, PCR11). Per-component TCB mapping remains.
+   direct-SNP backend (`profile: azure-snp`, PCR11). Per-component TCB mapping wired.
 5. Cheap hardening folded in as each path landed.
 
 The remaining honest caveat is narrow: on the *standard* AWS SEV-SNP / Azure MAA

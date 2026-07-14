@@ -1,6 +1,6 @@
 # Spec: Confidential computing (secure jobs)
 
-**Status:** Implemented end-to-end on all three clouds — provisioning + verifier cores + pinned ARK/AWS roots + the in-TEE measured agent and live evidence fetch. The raw SEV-SNP report parser is golden-validated against a report captured on GCP hardware (GCP's own run path uses Confidential Space). Residual: on the standard AWS SEV-SNP / Azure MAA paths the scp'd agent isn't in the launch measurement (the measured `profile` backends and GCP Confidential Space close it). Cert revocation is enforced on the AMD-cert-chain paths (AWS, Azure `profile: azure-snp`) via the AMD KDS CRL; MAA per-component TCB mapping remains.
+**Status:** Implemented end-to-end on all three clouds — provisioning + verifier cores + pinned ARK/AWS roots + the in-TEE measured agent and live evidence fetch. The raw SEV-SNP report parser is golden-validated against a report captured on GCP hardware (GCP's own run path uses Confidential Space). Residual: on the standard AWS SEV-SNP / Azure MAA paths the scp'd agent isn't in the launch measurement (the measured `profile` backends and GCP Confidential Space close it). Cert revocation is enforced on the AMD-cert-chain paths (AWS, Azure `profile: azure-snp`) via the AMD KDS CRL, and the MAA path enforces `minTCB` by recombining the token's per-component SVN claims.
 **Related:** [ROADMAP](ROADMAP.md) → "Confidential computing (secure jobs)".
 
 Run a workload on a TEE-backed VM (hardware-encrypted memory) so the cloud
@@ -99,7 +99,7 @@ edit by hand. TestMatrix_DocInSync fails if this drifts from the code. -->
 | Channel-key binding (sealed only to the attested key) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Debug disabled | ✓ | ✓ | ✓ | ✓ | n/a |
 | Migration disabled | n/a | ✓ | ✓ | ✓ | n/a |
-| Minimum TCB / firmware floor | fail-closed | fail-closed | ✓ | ✓ | n/a |
+| Minimum TCB / firmware floor | fail-closed | ✓ | ✓ | ✓ | n/a |
 | Certificate revocation | n/a | n/a | ✓ | ✓ | n/a |
 | Attestation agent folded into the measured boot | ✓ | ✗ | ✓ | ✗ | ✓ |
 
@@ -111,7 +111,7 @@ edit by hand. TestMatrix_DocInSync fails if this drifts from the code. -->
 - **GCP CS — Certificate revocation:** delegated to the Google Confidential Space service; dispatcher validates no AMD cert chain locally
 - **GCP CS — Attestation agent folded into the measured boot:** the measured container image is the workload
 - **Azure MAA — Migration disabled:** verified via the x-ms-sevsnpvm-migration-allowed token claim
-- **Azure MAA — Minimum TCB / firmware floor:** no reported TCB in the token, so a run that sets minTCB is rejected — use profile: azure-snp
+- **Azure MAA — Minimum TCB / firmware floor:** reconstructed from the token's per-component SEV-SNP SVN claims and compared per component
 - **Azure MAA — Certificate revocation:** delegated to the Azure MAA service; dispatcher validates no AMD cert chain locally
 - **Azure MAA — Attestation agent folded into the measured boot:** the standard path scp's the agent; measured only when a custom measured image + PCR pins are configured
 - **Azure SNP — Measurement/identity on exact allowlist (empty fails closed):** PCR11 (the UKI carrying the agent), pinned
@@ -191,7 +191,7 @@ malicious genuinely-SEV-SNP image.
 | R2 | `REPORT_DATA` commits an **in-TEE-generated** channel key (not a host-injectable one) | channel binding (G3) |
 | R3 | Verify full cert chain to the vendor root | report is genuine hardware (G1) |
 | R4 | Check certificate revocation (AMD KDS CRL / MAA keys) | revoked platforms rejected — enforced on the AMD-cert-chain paths (AWS SEV-SNP, Azure `profile: azure-snp`); delegated to the cloud service on GCP CS / MAA; n/a on Nitro (ephemeral certs) — see the matrix |
-| R5 | Enforce a minimum reported TCB/firmware version | reject out-of-date silicon (G2) — raw-report paths; the MAA path fails closed when `minTCB` is set |
+| R5 | Enforce a minimum reported TCB/firmware version | reject out-of-date silicon (G2) — the raw-report paths and the MAA path (recombined from per-component SVN claims); GCP CS has no reported TCB, so it fails closed when `minTCB` is set |
 | R6 | Require `policy.debug == false`, `policy.migration == false` | a debuggable/migratable VM isn't confidential (G2) — verified on every SEV-SNP path (AWS, Azure MAA, azure-snp); n/a on Nitro/CS |
 | R7 | Measurement ∈ **exact allowlist** of known-good vendor confidential images | host can't boot a malicious image (G2) |
 | R8 | TEE type in report == requested type | a `tdx` job isn't silently SEV (G1) |
@@ -303,10 +303,11 @@ warned.
   guest agent implemented; ✅ **AWS VLEK** — AWS masks the chip id and signs with VLEK
   not VCEK, so verification uses a `VLEK→ASVK→ARK` path (via go-sev-guest; ARK/ASK-Milan
   roots match).
-- **MAA TCB mapping** — MAA reports per-component SVNs, not one TCB, so the MAA path
-  can't compare against `minTCB`. Rather than silently ignore it, the MAA attester
-  **fails closed** when `minTCB` is set (use `profile: azure-snp` for a measured
-  direct-SNP run that enforces it); mapping the per-component SVNs is future work.
+- **MAA TCB mapping** — MAA reports per-component SVNs rather than one packed TCB,
+  so the MAA attester recombines the `x-ms-sevsnpvm-{bootloader,tee,snpfw,microcode}-svn`
+  claims into the SEV-SNP `REPORTED_TCB` layout and compares it per component against
+  `minTCB` (identical to the direct-SNP paths). A token missing those claims yields 0,
+  failing any positive floor closed.
 - **Revocation** (R4) — enforced on the AMD-cert-chain paths (AWS SEV-SNP and Azure
   `profile: azure-snp`): the ARK-signed CRL at the ASK's AMD KDS distribution point,
   fail-closed if unreachable. Delegated to the cloud service on GCP CS / Azure MAA;
@@ -331,7 +332,7 @@ provisions encrypted memory with no proof (N4).
 | ✅ | Audit surfacing in `status`/`diagnose` (R13) | usability + audit |
 | 1 | Provision hardening: pinned vendor images, confidential disk + warn, policy bits | safe, known launch |
 | 2 | In-TEE agent evidence fetch: nonce + ephemeral in-TEE key, `REPORT_DATA=H(N‖key)` (vendor-image agent, measured); flips attesters to ready | bound, fresh evidence |
-| ~ | Format bind + revocation: GCP SEV-SNP layout confirmed on a real capture ✅; MAA claims ✅, AWS **VLEK** path ✅, AMD KDS CRL revocation (AWS + azure-snp) ✅; remaining — MAA per-component TCB | live trust |
+| ~ | Format bind + revocation: GCP SEV-SNP layout confirmed on a real capture ✅; MAA claims ✅, AWS **VLEK** path ✅, AMD KDS CRL revocation (AWS + azure-snp) ✅; MAA per-component TCB ✅ | live trust |
 | 4 | Channel binding: trust the channel key only after R2 verifies; wrap secrets to it (R9) | no MITM/relay |
 
 Each verifier core is unit-tested against synthetic evidence; the binary/claim

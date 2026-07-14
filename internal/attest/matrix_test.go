@@ -79,20 +79,32 @@ func TestMatrix_GroundedInCode(t *testing.T) {
 	weak.TCB = 0x01
 	assert.Error(t, applyPolicy(weak, pol.withMinTCB(0xFF)), "matrix says the TCB floor is enforced on the applyPolicy paths")
 
-	// The Azure MAA path can't read a TCB, so the matrix marks minTCB fail-closed:
-	// a run that sets minTCB must be rejected (not silently ignored).
-	assert.Equal(t, FailClosed, cellFor(t, "azure-maa", ControlMinTCB))
+	// The Azure MAA path reconstructs the reported TCB from the token's
+	// per-component SVN claims, so the matrix marks minTCB enforced: a met floor
+	// verifies and an unmet floor is rejected (not silently ignored).
+	assert.Equal(t, Enforced, cellFor(t, "azure-maa", ControlMinTCB))
 	key, keys := maaSigningKey(t)
 	ck := bytes.Repeat([]byte{0x9A}, 32)
-	att := &azureAttester{keys: keys, issuer: maaIssuer,
-		fetch: func(_ context.Context, n []byte) (maaEvidence, error) {
-			c := validMAAClaims()
-			c["x-ms-runtime"].(map[string]any)["client-payload"].(map[string]any)["nonce"] =
-				base64.StdEncoding.EncodeToString(agent.MAABindingNonce(n, ck))
-			return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: ck}, nil
-		}}
-	_, err := att.Verify(context.Background(), types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}, MinTCB: 7})
-	require.Error(t, err, "azure-maa minTCB must fail closed, matching the matrix")
+	maaAtt := func() *azureAttester {
+		return &azureAttester{keys: keys, issuer: maaIssuer,
+			fetch: func(_ context.Context, n []byte) (maaEvidence, error) {
+				c := validMAAClaims()
+				c["x-ms-runtime"].(map[string]any)["client-payload"].(map[string]any)["nonce"] =
+					base64.StdEncoding.EncodeToString(agent.MAABindingNonce(n, ck))
+				return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: ck}, nil
+			}}
+	}
+	base := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}}
+	metReq := base
+	metReq.MinTCB = packTCB(maaBootloaderSVN, maaTEESVN, maaSNPFwSVN, maaMicrocodeSVN)
+	metRes, err := maaAtt().Verify(context.Background(), metReq)
+	require.NoError(t, err)
+	assert.True(t, metRes.Verified, "a met minTCB floor verifies, matching the enforced matrix cell")
+	unmetReq := base
+	unmetReq.MinTCB = packTCB(maaBootloaderSVN, maaTEESVN, maaSNPFwSVN, maaMicrocodeSVN+1)
+	unmetRes, err := maaAtt().Verify(context.Background(), unmetReq)
+	require.NoError(t, err)
+	assert.False(t, unmetRes.Verified, "an unmet minTCB floor is rejected, matching the enforced matrix cell")
 
 	// The GCP Confidential Space path also can't read a TCB, so it fail-closes on
 	// minTCB (no silent ignore) — matching the matrix.

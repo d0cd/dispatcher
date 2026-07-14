@@ -38,6 +38,13 @@ type maaToken struct {
 		LaunchMeasurement string `json:"x-ms-sevsnpvm-launchmeasurement"`
 		IsDebuggable      bool   `json:"x-ms-sevsnpvm-is-debuggable"`
 		MigrationAllowed  bool   `json:"x-ms-sevsnpvm-migration-allowed"`
+		// Per-component SEV-SNP SVNs (confirmed against a real captured token).
+		// MAA breaks the REPORTED_TCB tuple out into these named claims; recombining
+		// them (reportedTCB) lets the MAA path enforce a minTCB floor.
+		BootloaderSVN uint8 `json:"x-ms-sevsnpvm-bootloader-svn"`
+		TEESVN        uint8 `json:"x-ms-sevsnpvm-tee-svn"`
+		SNPFwSVN      uint8 `json:"x-ms-sevsnpvm-snpfw-svn"`
+		MicrocodeSVN  uint8 `json:"x-ms-sevsnpvm-microcode-svn"`
 	} `json:"x-ms-isolation-tee"`
 	// Measured-boot facts from the vTPM (the AMD SEV-SNP launch measurement above
 	// covers only the CVM firmware, not the OS/agent). MAA attests PCRs 0–7; PCR4
@@ -57,6 +64,18 @@ type MAAPolicy struct {
 	PCRs map[int]string
 	// RequireSecureBoot rejects a token unless the vTPM reports secure boot on.
 	RequireSecureBoot bool
+	// MinTCB is the minimum acceptable reported TCB, compared per component against
+	// the SVNs the token carries. Zero disables the floor.
+	MinTCB uint64
+}
+
+// maaReportedTCB recombines MAA's per-component SVN claims into the same packed
+// u64 the SEV-SNP REPORTED_TCB uses (bootloader@0, TEE@8, SNP@48, microcode@56),
+// so tcbComponentsGTE compares it against minTCB identically to the direct-SNP
+// paths. A token missing the SVN claims yields 0, which fails any positive floor.
+func maaReportedTCB(tee maaToken) uint64 {
+	t := tee.IsolationTEE
+	return uint64(t.BootloaderSVN) | uint64(t.TEESVN)<<8 | uint64(t.SNPFwSVN)<<48 | uint64(t.MicrocodeSVN)<<56
 }
 
 // verifyMAAToken verifies an Azure MAA CVM token against the pinned MAA signing
@@ -119,6 +138,14 @@ func verifyMAAToken(token string, keys map[string]crypto.PublicKey, p MAAPolicy)
 		return "", fmt.Errorf("maa launch measurement %q is not on the allowlist", tee.LaunchMeasurement)
 	}
 
+	// TCB floor: a reported TCB below the operator minimum is running
+	// known-vulnerable firmware. MAA breaks the tuple into per-component SVN
+	// claims; recombine and compare per component (a token without them yields 0,
+	// failing any positive floor closed).
+	if !tcbComponentsGTE(maaReportedTCB(t), p.MinTCB) {
+		return "", fmt.Errorf("maa reported TCB has a component below the minimum %d", p.MinTCB)
+	}
+
 	// Measured-boot enforcement (closes the agent-not-measured caveat): the SEV-SNP
 	// launch measurement above proves genuine Azure CVM firmware but not the OS or
 	// agent. The pinned PCRs — chiefly PCR4, the boot application (UKI) carrying the
@@ -178,13 +205,6 @@ func (a *azureAttester) Verify(ctx context.Context, req types.ConfidentialRequir
 	if a.fetch == nil {
 		return AttestationResult{}, fmt.Errorf("azure attester has no evidence fetch wired")
 	}
-	// The MAA token exposes no reported-TCB claim, so this path cannot enforce a
-	// minTCB floor. Fail closed rather than silently ignore the control the
-	// operator configured; the measured direct-SNP path (profile: azure-snp) reads
-	// the raw report and enforces minTCB.
-	if req.MinTCB > 0 {
-		return AttestationResult{}, fmt.Errorf("minTCB cannot be enforced on the Azure MAA path (the token carries no reported TCB); use profile: azure-snp for a measured direct-SNP run that enforces minTCB")
-	}
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return AttestationResult{}, fmt.Errorf("generate attestation nonce: %w", err)
@@ -201,6 +221,7 @@ func (a *azureAttester) Verify(ctx context.Context, req types.ConfidentialRequir
 		Measurements:      req.Measurements,
 		PCRs:              a.mb.PCRs,
 		RequireSecureBoot: a.mb.RequireSecureBoot,
+		MinTCB:            req.MinTCB,
 	})
 	if err != nil {
 		// A token that fails verification is a verdict (abort the run), not a
