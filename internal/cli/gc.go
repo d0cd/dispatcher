@@ -83,14 +83,22 @@ before running for real, especially with long-lived state directories.`,
 		}
 		// Cloud VMs are tagged with the PLAN id (the adapter is handed a Plan, not
 		// a run), so res.RunID is a plan id — protect by plan id, not the run
-		// record's own id, or the guard never matches and gc reaps live VMs.
+		// record's own id, or the guard never matches and gc reaps live VMs. A
+		// corrupt record is protected too: recover its plan id from the raw file,
+		// and if even that fails, refuse to reap any run-scoped resource (a
+		// destroy is irreversible; the record could belong to a live run).
 		activeRuns := map[string]bool{}
 		unreadableRuns := map[string]bool{}
+		unrecoverable := false
 		for _, id := range runIDs {
 			rec, err := run.LoadRecord(id)
 			switch {
 			case err != nil:
-				unreadableRuns[id] = true
+				if pid := run.RecoverPlanID(id); pid != "" {
+					unreadableRuns[pid] = true
+				} else {
+					unrecoverable = true
+				}
 			case !rec.State.IsTerminal():
 				activeRuns[rec.PlanID] = true
 			}
@@ -144,6 +152,15 @@ before running for real, especially with long-lived state directories.`,
 				}
 				if activeRuns[res.RunID] {
 					continue // active run, not an orphan
+				}
+				if unrecoverable {
+					// A run record couldn't be read AND its plan id couldn't be
+					// recovered, so this run-scoped resource might belong to it.
+					// Fail closed — never risk destroying a live run's VM.
+					if !asJSON {
+						red.Fprintf(os.Stderr, "  Skipping %s: a run record is unreadable and its plan id is unrecoverable; refusing to destroy any run-scoped resource. Remove the corrupt record to allow GC.\n", res.ResourceID)
+					}
+					continue
 				}
 				if unreadableRuns[res.RunID] {
 					if !asJSON {

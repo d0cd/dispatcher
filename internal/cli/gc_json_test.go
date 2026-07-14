@@ -2,6 +2,8 @@ package cli
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -149,4 +151,35 @@ func TestGC_JSON_RequiresDryRunOrForce(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dry-run")
 	assert.Empty(t, f.destroyed, "nothing destroyed when the intent is ambiguous")
+}
+
+// A corrupt run record whose plan id is still recoverable must protect its VM
+// (the record could belong to a live run) — gc recovers the plan id from the raw
+// file rather than reaping the resource.
+func TestGC_ProtectsCorruptRecordVMByRecoveredPlanID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	dir, err := run.StoreDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	// Truncated record (crash mid-write) — unparseable, but planId is recoverable.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "run_corrupt.json"),
+		[]byte(`{"id":"run_corrupt","planId":"plan_corrupt","state":"run`), 0o600))
+
+	f := &fakeGCAdapter{
+		id: "hetzner-vm",
+		resources: []adapter.ResourceInfo{{
+			ResourceID: "srv-corrupt", Provider: "hetzner", RunID: "plan_corrupt",
+			Tags: map[string]string{"dispatcher": "true", "dispatcher-run-id": "plan_corrupt"},
+		}},
+	}
+	withGCAdapter(t, f)
+
+	var runErr error
+	out := captureStdout(t, func() { _, _, runErr = executeCommand("--output", "json", "gc", "--dry-run") })
+	require.NoError(t, runErr)
+	var report gcReport
+	require.NoError(t, json.Unmarshal([]byte(out), &report))
+	assert.Equal(t, 0, report.Found, "a corrupt record's VM must be protected, not reaped")
 }

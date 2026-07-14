@@ -16,8 +16,7 @@ import (
 // The measured Azure SNP and AWS Nitro backends are selected by
 // confidential.profile in dispatcher.yaml. This walks the real config surface
 // (yaml → LoadConfig/ApplyConfig → plan.Build) and asserts the run dispatcher's
-// selectors fire — the path the audit found unreachable because the profile
-// discriminator did not exist end to end.
+// profile selectors fire end to end.
 // The confidential block signals requirement by presence; confidentialBody is
 // its indented fields.
 func buildConfidentialPlan(t *testing.T, target, confidentialBody string) *types.Plan {

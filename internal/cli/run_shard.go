@@ -86,6 +86,13 @@ func clonePlanForShard(base *types.Plan, a shard.Assignment) *types.Plan {
 		env[k] = v
 	}
 	p.Workload.Env = env
+	// Give each shard a distinct identity: cloud provisioning derives the VM name
+	// from the workload name and the per-run SSH key path + gc tag from the plan
+	// id, so without a per-shard suffix a count-mode cloud fan-out collides (all
+	// shards share one VM name and one key path, and shards 2..N fail).
+	suffix := fmt.Sprintf("-s%d", a.Index)
+	p.Metadata.ID = base.Metadata.ID + suffix
+	p.Workload.Name = base.Workload.Name + suffix
 	return &p
 }
 

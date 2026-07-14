@@ -130,3 +130,19 @@ func TestClonePlanForShard_SetsEnvWithoutMutatingBase(t *testing.T) {
 	_, mutated := base.Workload.Env["SHARD_INDEX"]
 	assert.False(t, mutated, "the base plan's env must not be mutated by a shard clone")
 }
+
+// Cloud provisioning derives the VM name from the workload name and the SSH key
+// path + gc tag from the plan id, so shards must get distinct values or a
+// count-mode cloud fan-out collides (same VM name / one key path).
+func TestClonePlanForShard_DistinctIdentityPerShard(t *testing.T) {
+	base := shardPlan(types.ShardSpec{Count: 3})
+	base.Metadata.ID = "plan_abc"
+	base.Workload.Name = "trainer"
+
+	s0 := clonePlanForShard(base, shard.Assignment{Index: 0, Count: 3})
+	s1 := clonePlanForShard(base, shard.Assignment{Index: 1, Count: 3})
+	assert.NotEqual(t, s0.Metadata.ID, s1.Metadata.ID, "shards must get distinct plan ids (key path / tag)")
+	assert.NotEqual(t, s0.Workload.Name, s1.Workload.Name, "shards must get distinct workload names (VM name)")
+	assert.Equal(t, "plan_abc", base.Metadata.ID, "the base plan id must not be mutated")
+	assert.Equal(t, "trainer", base.Workload.Name, "the base workload name must not be mutated")
+}

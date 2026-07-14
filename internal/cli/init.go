@@ -91,8 +91,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	switch spec.DetectedKind {
-	case types.WorkloadKindSandbox:
-		cfg.Sandbox = true
 	case types.WorkloadKindService:
 		cfg.MaxCost = 20
 	default:

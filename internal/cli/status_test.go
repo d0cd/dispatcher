@@ -53,7 +53,7 @@ func TestStatus_RendersAttestation(t *testing.T) {
 func TestStatus_RendersUnverifiedAttestation(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	id := persistTerminalRunWithState(t,
-		`{"attestation":{"verified":false,"verdict":"attestation off — provisioned TEE without verification (N4)"}}`)
+		`{"attestation":{"verified":false,"verdict":"attestation off — provisioned TEE without verification"}}`)
 	var err error
 	out := captureStdout(t, func() { err = runStatusByID(id) })
 	require.NoError(t, err)

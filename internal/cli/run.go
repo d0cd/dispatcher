@@ -76,6 +76,18 @@ func parseOptimize(s string) (types.OptimizeGoal, error) {
 	}
 }
 
+// perRunFirewallSupported reports whether the target's provider implements the
+// per-run SSH firewall (VMOptions.AllowSSHFrom). Only these targets accept
+// --allow-ssh-from; the rest reject it rather than silently ignore it.
+func perRunFirewallSupported(target string) bool {
+	switch target {
+	case "hetzner-vm", "aws-vm":
+		return true
+	default:
+		return false
+	}
+}
+
 func runRun(cmd *cobra.Command, args []string) error {
 	raw := "."
 	if len(args) > 0 {
@@ -141,7 +153,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	dim := color.New(color.Faint)
 
 	bold.Fprintln(os.Stderr, "Planning...")
-	catalog := loadLiveCatalog(os.Stderr)
+	catalog := loadLiveCatalogScoped(os.Stderr, constraints.TargetName, constraints.Region)
 	p, err := plan.Build(path, constraints, catalog)
 	if err != nil {
 		return fmt.Errorf("plan failed: %w", err)
@@ -156,10 +168,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no recommendation in plan")
 	}
 
-	// Per-run firewall is only implemented for Hetzner; fail before creating a
-	// run/VM rather than deep inside provisioning.
-	if runFlags.allowSSHFrom != "" && p.Recommendation.Target != "hetzner-vm" {
-		return fmt.Errorf("--allow-ssh-from is only supported on hetzner-vm; recommended target is %s — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
+	// Reject --allow-ssh-from for targets whose provider doesn't implement a
+	// per-run firewall, failing before creating a run/VM rather than deep inside
+	// provisioning (or silently ignoring the requested restriction).
+	if runFlags.allowSSHFrom != "" && !perRunFirewallSupported(p.Recommendation.Target) {
+		return fmt.Errorf("--allow-ssh-from is not supported on %s (only hetzner-vm and aws-vm implement a per-run SSH firewall) — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
 	}
 
 	// Show summary
