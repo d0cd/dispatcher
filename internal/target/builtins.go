@@ -370,10 +370,11 @@ func BuiltinTargets() []types.TargetConfig {
 				Resources: types.ResourceCapability{
 					CPU:    true,
 					Memory: true,
-					GPU: types.GPUCapability{
-						Supported: true,
-						Models:    []string{"a100"},
-					},
+					// Hetzner Cloud has no GPU server type (see the cloudvm catalog and
+					// rate card, which carry no Hetzner GPU SKU). Advertising one would
+					// let the planner price a GPU workload CPU-only and recommend a
+					// target that run then refuses to provision.
+					GPU: types.GPUCapability{Supported: false},
 				},
 				Networking: types.NetworkingCapability{
 					PublicEndpoint:   true,

@@ -51,8 +51,9 @@ var rateCards = map[string]RateCard{
 // For cloud-vm targets, when catalog is non-nil and contains pricing for the
 // target's provider, the estimate is derived from the cheapest matching
 // instance. When catalog is nil or has no data for the provider, cloud-vm
-// targets return ConfidenceUnknown — we won't pretend to know cloud prices
-// without live data.
+// targets fall back to the static rate card at ConfidenceLow (with a
+// "fallback: live pricing unavailable" assumption) — degrading gracefully
+// rather than surfacing Unknown.
 //
 // Non-cloud targets always use static rate cards.
 func EstimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudvm.Catalog) types.CostEstimate {
@@ -198,6 +199,10 @@ func EstimateCostWithHistory(spec types.WorkloadSpec, t types.TargetConfig, hist
 		// flagged unschedulable and refused.
 		scaled := scaleEstimateToHours(spec, t, catalog, hours)
 		scaled.InstanceType = base.InstanceType
+		// Carry forward the confidence EstimateCost computed (ConfidenceLow for
+		// GPU jobs / cloud rate-card fallbacks); scaleEstimateToHours hardcodes
+		// Medium. A real bump only comes from ConfidenceForTarget (≥3 samples) below.
+		scaled.Confidence = base.Confidence
 		scaled.Assumptions = append(scaled.Assumptions,
 			fmt.Sprintf("based on historical median runtime of %s", histDuration.Round(time.Second)))
 		base = scaled

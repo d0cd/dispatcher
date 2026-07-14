@@ -280,8 +280,10 @@ func SendDecision(runID string, decision Decision, decider string) error {
 	return nil
 }
 
-// ListPending returns run IDs with an open approval gate. Stale sockets
-// from crashed runs are cleaned up as a side effect.
+// ListPending returns the run ids of approval gates whose sockets are still
+// alive, GC'ing crashed sockets and non-socket leftovers along the way. It
+// pings rather than blank-closing so the gate server doesn't mistake a probe
+// for a malformed decide.
 func ListPending() ([]string, error) {
 	dir, err := state.Subdir("approvals")
 	if err != nil {

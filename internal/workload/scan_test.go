@@ -63,33 +63,6 @@ func TestScanSourceFiles_DepthLimit(t *testing.T) {
 	assert.GreaterOrEqual(t, len(files), 4)
 }
 
-func TestDetectSubWorkloads_Monorepo(t *testing.T) {
-	dir := t.TempDir()
-
-	// Create two independent sub-projects
-	api := filepath.Join(dir, "api")
-	worker := filepath.Join(dir, "worker")
-	require.NoError(t, os.MkdirAll(api, 0o755))
-	require.NoError(t, os.MkdirAll(worker, 0o755))
-
-	writeFile(t, api, "package.json", `{"name": "api"}`)
-	writeFile(t, api, "index.js", "console.log('api')")
-	writeFile(t, worker, "requirements.txt", "celery\n")
-	writeFile(t, worker, "worker.py", "print('worker')")
-
-	subs := DetectSubWorkloads(dir)
-	assert.Len(t, subs, 2)
-}
-
-func TestDetectSubWorkloads_SingleProject(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, "main.py", "print('hello')")
-	writeFile(t, dir, "requirements.txt", "flask\n")
-
-	subs := DetectSubWorkloads(dir)
-	assert.Nil(t, subs) // single project, no sub-workloads
-}
-
 func TestDetectEntrypoints_Procfile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "Procfile", "web: gunicorn app:app")

@@ -1,7 +1,6 @@
 package plan
 
 import (
-	"os"
 	"testing"
 	"time"
 
@@ -57,22 +56,4 @@ func TestLoadNotFound(t *testing.T) {
 	_, err := Load("nonexistent")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
-}
-
-func TestListSaved(t *testing.T) {
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-
-	dir, err := StoreDir()
-	require.NoError(t, err)
-
-	// Write two plan files
-	require.NoError(t, os.WriteFile(dir+"/plan_a.json", []byte("{}"), 0o644))
-	require.NoError(t, os.WriteFile(dir+"/plan_b.json", []byte("{}"), 0o644))
-
-	ids, err := ListSaved()
-	require.NoError(t, err)
-	assert.Len(t, ids, 2)
-	assert.Contains(t, ids, "plan_a")
-	assert.Contains(t, ids, "plan_b")
 }

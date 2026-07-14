@@ -31,21 +31,22 @@ func TestSaveRunLogsFailure(t *testing.T) {
 
 // mockAdapter is a configurable adapter for executor testing.
 type mockAdapter struct {
-	id             string
-	validateErr    error
-	validateResult types.ValidationResult
-	prepareErr     error
-	executeErr     error
-	statusResult   types.RunState
-	statusErr      error
-	statusSequence []types.RunState // when set, Status returns successive elements (clamped to last)
-	statusCalls    int
-	terminateCalls int
-	cleanupResult  *adapter.CleanupResult
-	cleanupErr     error
-	cleanupCalls   int
-	executePanic   bool
-	executed       bool // set true on Execute; used to assert non-invocation
+	id               string
+	validateErr      error
+	validateResult   types.ValidationResult
+	prepareErr       error
+	executeErr       error
+	statusResult     types.RunState
+	statusErr        error
+	statusErrsThenOK int              // return a transient error for the first N Status calls, then statusResult
+	statusSequence   []types.RunState // when set, Status returns successive elements (clamped to last)
+	statusCalls      int
+	terminateCalls   int
+	cleanupResult    *adapter.CleanupResult
+	cleanupErr       error
+	cleanupCalls     int
+	executePanic     bool
+	executed         bool // set true on Execute; used to assert non-invocation
 }
 
 func newMockAdapter() *mockAdapter {
@@ -79,6 +80,9 @@ func (m *mockAdapter) Execute(_ context.Context, _ *types.Plan) (*adapter.RunHan
 }
 func (m *mockAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.RunState, error) {
 	m.statusCalls++
+	if m.statusErrsThenOK > 0 && m.statusCalls <= m.statusErrsThenOK {
+		return types.RunStateExecutionFailed, fmt.Errorf("transient status error #%d", m.statusCalls)
+	}
 	if len(m.statusSequence) > 0 {
 		idx := m.statusCalls - 1
 		if idx >= len(m.statusSequence) {
@@ -187,9 +191,30 @@ func TestExecutor_ExecuteFailure(t *testing.T) {
 	assert.Equal(t, types.RunStateExecutionFailed, r.GetState())
 }
 
+// A single transient Status error while polling must NOT tear down a healthy
+// run — the executor tolerates a bounded number of consecutive transient errors.
+func TestExecutor_ToleratesTransientStatusErrors(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	mock := newMockAdapter()
+	mock.statusErrsThenOK = 3 // three transient blips, then the workload is done
+	mock.statusResult = types.RunStateCompleted
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.NoError(t, err, "transient status errors must be tolerated, not terminal")
+	assert.Equal(t, types.RunStateCompleted, r.GetState())
+}
+
 func TestExecutor_StatusFailure_CleanupStillRuns(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
 
 	mock := newMockAdapter()
 	mock.statusErr = fmt.Errorf("status check failed")
@@ -241,10 +266,14 @@ func TestExecutor_PanicRecovery(t *testing.T) {
 	exec := NewExecutor(mock)
 	r := NewRun(executorTestPlan())
 
-	// Should NOT panic — executor recovers
+	// Should NOT panic — executor recovers — but must surface the crash as an
+	// error so the caller (and process exit code) doesn't mistake it for success.
+	var err error
 	assert.NotPanics(t, func() {
-		_ = exec.Execute(context.Background(), r, io.Discard)
+		err = exec.Execute(context.Background(), r, io.Discard)
 	})
+	require.Error(t, err, "a recovered panic must be returned as an error, not nil")
+	assert.Contains(t, err.Error(), "panic")
 	assert.Equal(t, types.RunStateExecutionFailed, r.GetState())
 	assert.Contains(t, r.Error, "panic")
 }

@@ -13,6 +13,26 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
+// Count-mode shards share the same workload name and plan id, so the container
+// name must incorporate the shard index — otherwise concurrent shards collide on
+// one --name and all but the first fail "container name already in use".
+func TestDockerContainerName_ShardIndexDisambiguates(t *testing.T) {
+	w := types.WorkloadSpec{Name: "trainer"}
+
+	plain := dockerContainerName(w, "plan_abc")
+	assert.Equal(t, "dispatcher-trainer-plan_abc", plain, "no shard: name is unchanged")
+
+	w0 := w
+	w0.Env = map[string]string{"SHARD_INDEX": "0"}
+	w1 := w
+	w1.Env = map[string]string{"SHARD_INDEX": "1"}
+	n0 := dockerContainerName(w0, "plan_abc")
+	n1 := dockerContainerName(w1, "plan_abc")
+	assert.NotEqual(t, n0, n1, "distinct shards must get distinct container names")
+	assert.Contains(t, n0, "0")
+	assert.Contains(t, n1, "1")
+}
+
 // A workload with a .env but no resolvable image must not orphan its plaintext
 // env temp file: Execute returns an error before a dockerState is created, so
 // nothing else will ever clean it up.

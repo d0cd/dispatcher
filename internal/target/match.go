@@ -37,16 +37,16 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 
 	// Check confidential-computing requirements
 	if c := w.Requirements.Confidential; c.Required {
-		cap := t.Capabilities.Resources.Confidential
-		if !cap.Supported {
+		conf := t.Capabilities.Resources.Confidential
+		if !conf.Supported {
 			reasons = append(reasons, "confidential computing required but target does not support it")
-		} else if c.Type != "" && c.Type != "any" && !inSlice(cap.Types, c.Type) {
-			reasons = append(reasons, "confidential type "+c.Type+" not offered by target (offers: "+strings.Join(cap.Types, ", ")+")")
+		} else if c.Type != "" && c.Type != "any" && !inSlice(conf.Types, c.Type) {
+			reasons = append(reasons, "confidential type "+c.Type+" not offered by target (offers: "+strings.Join(conf.Types, ", ")+")")
 		}
 		// A measured-boot profile is provider-specific — it may only run on the
 		// matching provider's target, so the plan can't recommend a cross-cloud
 		// target that would silently route to an unmeasured backend.
-		if req := requiredTargetForProfile(c.Profile); req != "" && t.ID != req {
+		if req := RequiredTargetForProfile(c.Profile); req != "" && t.ID != req {
 			reasons = append(reasons, "confidential profile "+c.Profile+" requires target "+req)
 		}
 	}
@@ -66,9 +66,9 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 	}
 }
 
-// requiredTargetForProfile maps a measured-boot confidential profile to the
+// RequiredTargetForProfile maps a measured-boot confidential profile to the
 // only target ID it can run on. Empty profile (the standard backend) returns "".
-func requiredTargetForProfile(profile string) string {
+func RequiredTargetForProfile(profile string) string {
 	switch profile {
 	case "nitro":
 		return "aws-vm"

@@ -351,7 +351,7 @@ func (l *LocalAdapter) Cleanup(_ context.Context, _ *RunHandle) (*CleanupResult,
 
 // localState carries the running command and its log-pipe plumbing. mu
 // serializes Logs()/Status() so a concurrent caller can't read outR after
-// Status() has closed it (the race the audit flagged).
+// Status() has closed it.
 type localState struct {
 	mu         sync.Mutex
 	cmd        *exec.Cmd

@@ -403,3 +403,16 @@ func TestPlanner_ProseBackendKeepsExplanationOnly(t *testing.T) {
 	assert.Nil(t, result.Recommendation)
 	assert.Empty(t, result.Alternatives)
 }
+
+// A pinned --target must be honored by the deterministic fallback, not silently
+// replaced by the cheapest feasible target (matching plan.Build's pin behavior).
+func TestDeterministicPlan_HonorsTargetName(t *testing.T) {
+	tools, dir := setupTestEnv(t)
+	planner := NewPlanner(nil, tools)
+
+	result, err := planner.DeterministicPlan(context.Background(), dir,
+		types.PlanConstraints{OptimizeFor: types.OptimizeCost, TargetName: "hetzner-vm"})
+	require.NoError(t, err)
+	require.NotNil(t, result.Recommendation)
+	assert.Equal(t, "hetzner-vm", result.Recommendation.Target, "the pinned --target must be recommended, not the cheapest")
+}

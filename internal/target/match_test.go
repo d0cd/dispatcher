@@ -5,6 +5,7 @@ import (
 
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCheckFeasibility_Confidential(t *testing.T) {
@@ -152,6 +153,27 @@ func TestCheckFeasibility_GPUJobRejectsCPUOnly(t *testing.T) {
 	assert.True(t, result.Feasible)
 }
 
+// Hetzner Cloud has no GPU server type (the catalog and rate card both say so),
+// so a GPU workload must be infeasible on hetzner-vm — otherwise the planner
+// prices it CPU-only and recommends a target that run will refuse to provision.
+func TestCheckFeasibility_HetznerRejectsGPU(t *testing.T) {
+	registry := NewRegistry()
+	registry.LoadBuiltins()
+
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindGPUJob,
+		Requirements: types.ResourceRequirements{
+			GPU: types.GPURequirement{Required: true, Count: 1},
+		},
+	}
+
+	hetzner, ok := registry.Get("hetzner-vm")
+	require.True(t, ok)
+	result := CheckFeasibility(hetzner, w)
+	assert.False(t, result.Feasible, "hetzner-vm has no GPU SKU and must reject GPU workloads")
+	assert.Contains(t, result.Reasons[0], "GPU")
+}
+
 func TestCheckFeasibility_DisabledTarget(t *testing.T) {
 	t.Run("disabled target is not feasible", func(t *testing.T) {
 		disabled := types.TargetConfig{
@@ -174,7 +196,8 @@ func TestRegistryListOrder(t *testing.T) {
 	assert.Equal(t, "local-docker", targets[1].ID)
 	assert.Equal(t, "lima-vm", targets[2].ID)
 	assert.Equal(t, "ssh", targets[3].ID)
-	assert.Equal(t, "firecracker-vm", targets[9].ID)
+	assert.Equal(t, "kubernetes", targets[4].ID)
+	assert.Equal(t, "firecracker-vm", targets[5].ID)
 	assert.Len(t, targets, 10)
 }
 

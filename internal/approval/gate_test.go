@@ -215,28 +215,6 @@ func TestSendDecision_NoGate(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestListPending_AliveAndStale(t *testing.T) {
-	newTestState(t)
-	g, err := NewGate("run_alive", nil)
-	require.NoError(t, err)
-	defer g.Close()
-
-	// Plant a stale socket file by creating one and closing it without
-	// keeping a listener.
-	sockDir, err := socketPath("run_stale")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(sockDir, []byte("stale"), 0o600))
-
-	pending, err := ListPending()
-	require.NoError(t, err)
-	assert.Contains(t, pending, "run_alive")
-	assert.NotContains(t, pending, "run_stale")
-
-	// Stale file should have been removed.
-	_, statErr := os.Stat(sockDir)
-	assert.True(t, os.IsNotExist(statErr), "stale socket should have been cleaned up")
-}
-
 func TestGate_InvalidRunID(t *testing.T) {
 	newTestState(t)
 	cases := []string{"", "../etc/passwd", "run/../escape", "run\\with\\backslash"}
@@ -272,4 +250,26 @@ func TestGate_ConcurrentProbesDoNotConsume(t *testing.T) {
 	rec, err := g.Wait(ctx, nil)
 	require.NoError(t, err)
 	assert.Equal(t, DecisionApproved, rec.Decision)
+}
+
+func TestListPending_AliveAndStale(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_alive", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	// Plant a stale socket file by creating one and closing it without
+	// keeping a listener.
+	sockDir, err := socketPath("run_stale")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(sockDir, []byte("stale"), 0o600))
+
+	pending, err := ListPending()
+	require.NoError(t, err)
+	assert.Contains(t, pending, "run_alive")
+	assert.NotContains(t, pending, "run_stale")
+
+	// Stale file should have been removed.
+	_, statErr := os.Stat(sockDir)
+	assert.True(t, os.IsNotExist(statErr), "stale socket should have been cleaned up")
 }

@@ -32,12 +32,24 @@ func main() {
 	vport := flag.Uint("vsock-port", 8443, "enclave vsock port")
 	flag.Parse()
 
+	// Fail loud on a mis-configured CID/port rather than binding and then failing
+	// opaquely per-connection in vsock.Dial. CID < 3 is reserved (0=hypervisor,
+	// 1=local, 2=host); a real enclave CID is >= 3.
+	if *cid < 3 {
+		log.Fatalf("invalid enclave CID %d (must be >= 3; from nitro-cli describe-enclaves)", *cid)
+	}
+	if *vport == 0 || *vport > 65535 {
+		log.Fatalf("invalid vsock port %d (must be 1-65535)", *vport)
+	}
+
 	l, err := net.Listen("tcp", *tcpAddr)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Close the listener on SIGINT/SIGTERM so Accept returns and we drain.
+	// Close the listener on SIGINT/SIGTERM so Accept returns and the loop exits.
+	// In-flight bridges are not drained (the channel is untrusted and dispatcher
+	// initiates teardown); the process exits once Accept returns.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() { <-ctx.Done(); _ = l.Close() }()

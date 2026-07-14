@@ -23,6 +23,7 @@ type retryAdapter struct {
 	idx            int
 	failure        adapter.FailureDetails
 	execCount      int
+	failOnExec     int // if >0, the Nth Execute returns an error
 	cleanedHandles []string
 }
 
@@ -37,6 +38,9 @@ func (m *retryAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.Ru
 
 func (m *retryAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
 	m.execCount++
+	if m.failOnExec == m.execCount {
+		return nil, fmt.Errorf("re-provision failed")
+	}
 	h, err := m.mockAdapter.Execute(ctx, p)
 	if h != nil {
 		// Distinct id per provisioning so a leaked prior handle is detectable.
@@ -52,6 +56,34 @@ func (m *retryAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adap
 
 func (m *retryAdapter) FailureDetails(_ *adapter.RunHandle) adapter.FailureDetails {
 	return m.failure
+}
+
+// When the retry's re-provision Execute fails, the already-cleaned old handle
+// must not be cleaned a second time (r.Handle is dropped after the pre-retry
+// cleanup) — a second DestroyVM on a non-idempotent provider would spuriously
+// fail teardown.
+func TestExecutor_TransientRetry_ExecuteFails_NoDoubleClean(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	m := &retryAdapter{
+		mockAdapter: newMockAdapter(),
+		statusSeq:   []types.RunState{types.RunStateExecutionFailed},
+		failure:     adapter.FailureDetails{OOMKilled: true},
+		failOnExec:  2, // the retry's re-provision fails
+	}
+	ex := NewExecutor(m)
+	r := NewRun(executorTestPlan())
+	r.Plan.Constraints.RetryTransientFailures = true
+
+	require.Error(t, ex.Execute(context.Background(), r, io.Discard))
+	// handle-1 was cleaned once (before the retry); it must NOT be cleaned again.
+	count := 0
+	for _, h := range m.cleanedHandles {
+		if h == "handle-1" {
+			count++
+		}
+	}
+	assert.Equal(t, 1, count, "the old handle must be cleaned exactly once, not double-destroyed")
 }
 
 func TestExecutor_TransientRetrySucceeds(t *testing.T) {

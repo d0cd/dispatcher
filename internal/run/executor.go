@@ -45,11 +45,11 @@ func saveRun(r *Run) {
 }
 
 // Execute runs the full lifecycle with guaranteed cleanup and panic recovery.
-func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) error {
+func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) (err error) {
 	defer func() {
 		if rec := recover(); rec != nil {
-			r.SetError(types.RunStateExecutionFailed,
-				fmt.Errorf("executor panic: %v", rec))
+			err = fmt.Errorf("executor panic: %v", rec)
+			r.SetError(types.RunStateExecutionFailed, err)
 			saveRun(r)
 			e.attemptCleanup(context.Background(), r)
 		}
@@ -212,7 +212,8 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 		retrySucceeded := false
 		if r.Plan.Constraints.RetryTransientFailures &&
 			kind == adapter.FailureTransient &&
-			r.RetryCount == 0 {
+			r.RetryCount == 0 &&
+			!r.GetState().IsTerminal() { // don't re-provision a run the sampler already killed (BudgetExceeded)
 			if logWriter != nil {
 				fmt.Fprintf(logWriter, "[dispatcher] retrying transient failure once\n")
 			}
@@ -225,6 +226,11 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 			if _, cErr := e.adapter.Cleanup(context.Background(), handle); cErr != nil {
 				dlog.L().Warn("retry.cleanup.failed", "run", r.ID, "err", cErr.Error())
 			}
+			// The old handle is destroyed; drop it so a failed re-provision below
+			// doesn't leave the deferred cleanup running Cleanup on it a second
+			// time. Restored to the new handle only when Execute succeeds.
+			handle = nil
+			r.Handle = nil
 			// A retry is a fresh run from the adapter's perspective. The
 			// previous handle is dead; ask the adapter for a new one. Cloud
 			// VM re-provisioning lives behind adapter.Execute, so this path
@@ -281,6 +287,12 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 // poll-based durable adapters (cloud VM, k8s) return RunStateRunning until the
 // workload finishes. On a maxDuration timeout the workload is terminated and
 // reported failed; the watchdog is only a backstop for a crashed CLI.
+// maxConsecutiveStatusErrors bounds how many transient Status failures the poll
+// loop tolerates before giving up. At the default 3s interval this is ~15s of
+// blips — enough to ride out a brief provider/network hiccup without stranding a
+// run, short enough to surface a genuinely broken connection.
+const maxConsecutiveStatusErrors = 5
+
 func (e *Executor) waitForTerminal(ctx context.Context, handle *adapter.RunHandle, maxDuration time.Duration) (types.RunState, error) {
 	var deadline <-chan time.Time
 	if maxDuration > 0 {
@@ -289,13 +301,26 @@ func (e *Executor) waitForTerminal(ctx context.Context, handle *adapter.RunHandl
 		deadline = timer.C
 	}
 
+	// A Status error means "couldn't determine" (a dropped packet, an API 500, a
+	// transient ssh failure), not "the workload failed". Tolerate a bounded number
+	// of consecutive errors so a single blip during a multi-hour poll doesn't tear
+	// down a healthy VM; only a real terminal state (or a sustained failure) ends
+	// the run. The counter resets on any successful Status.
+	consecutiveErrs := 0
 	for {
 		state, err := e.adapter.Status(ctx, handle)
 		if err != nil {
-			return state, err
-		}
-		if state != types.RunStateRunning {
-			return state, nil
+			consecutiveErrs++
+			if consecutiveErrs >= maxConsecutiveStatusErrors {
+				return state, fmt.Errorf("status check failed %d times in a row: %w", consecutiveErrs, err)
+			}
+			dlog.L().Warn("status.transient_error",
+				"handle", handle.ID, "consecutive", consecutiveErrs, "err", err.Error())
+		} else {
+			consecutiveErrs = 0
+			if state != types.RunStateRunning {
+				return state, nil
+			}
 		}
 
 		select {

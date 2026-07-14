@@ -106,11 +106,22 @@ func dockerImageLabel(ctx context.Context, tag, label string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// dockerContainerName derives the --name for a run. It appends the shard index
+// when present so count-mode shards (which share the workload name and plan id)
+// get distinct names on a shared docker daemon instead of colliding on one.
+func dockerContainerName(w types.WorkloadSpec, planID string) string {
+	name := fmt.Sprintf("dispatcher-%s-%s", SanitizeName(w.Name), planID)
+	if idx, ok := w.Env["SHARD_INDEX"]; ok {
+		name += "-s" + SanitizeName(idx)
+	}
+	return name
+}
+
 func (d *DockerAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, error) {
 	w := p.Workload
 	var args []string
 
-	containerName := fmt.Sprintf("dispatcher-%s-%s", SanitizeName(w.Name), p.Metadata.ID)
+	containerName := dockerContainerName(w, p.Metadata.ID)
 
 	args = append(args, "run", "--name", containerName, "--rm")
 

@@ -38,6 +38,11 @@ func TestEstimateCostWithHistory_PreservesGPUInstanceType(t *testing.T) {
 
 	assert.Equal(t, "g4dn.xlarge", est.InstanceType,
 		"the resolved GPU instance must survive the history/scaling path")
+	// One historical run is below the ≥3-sample bar for a confidence bump, so the
+	// GPU/rate-card ConfidenceLow that EstimateCost assigned must be preserved —
+	// not silently inflated to Medium by the scaling path.
+	assert.Equal(t, types.ConfidenceLow, est.Confidence,
+		"a single historical run must not inflate a GPU estimate's confidence")
 }
 
 type stubFetcher struct {

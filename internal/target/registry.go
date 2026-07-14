@@ -1,6 +1,8 @@
 package target
 
 import (
+	"sort"
+
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -28,18 +30,24 @@ func (r *Registry) Get(id string) (types.TargetConfig, bool) {
 // List returns all targets in deterministic order.
 func (r *Registry) List() []types.TargetConfig {
 	// Return in a stable order
-	order := []string{"local-process", "local-docker", "lima-vm", "ssh", "kubernetes", "hetzner-vm", "aws-vm", "gcp-vm", "azure-vm"}
+	order := []string{"local-process", "local-docker", "lima-vm", "ssh", "kubernetes", "firecracker-vm", "hetzner-vm", "aws-vm", "gcp-vm", "azure-vm"}
 	var result []types.TargetConfig
 	for _, id := range order {
 		if t, ok := r.targets[id]; ok {
 			result = append(result, t)
 		}
 	}
-	// Append any targets not in the predefined order
-	for id, t := range r.targets {
+	// Append any targets not in the predefined order, sorted by id so map
+	// iteration order can't make List() nondeterministic.
+	var extra []string
+	for id := range r.targets {
 		if !inSlice(order, id) {
-			result = append(result, t)
+			extra = append(extra, id)
 		}
+	}
+	sort.Strings(extra)
+	for _, id := range extra {
+		result = append(result, r.targets[id])
 	}
 	return result
 }

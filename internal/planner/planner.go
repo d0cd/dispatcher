@@ -230,6 +230,11 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 	var feasible []scored
 
 	for _, ev := range evals {
+		// Honor a pinned --target: consider only that target, so the fallback
+		// planner doesn't silently recommend a cheaper one (matching plan.Build).
+		if constraints.TargetName != "" && ev.TargetID != constraints.TargetName {
+			continue
+		}
 		if !ev.Feasible {
 			reason := "not feasible"
 			if len(ev.Reasons) > 0 {
@@ -262,6 +267,9 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 
 	if len(feasible) == 0 {
 		result.Explanation = "No feasible targets found for this workload."
+		if constraints.TargetName != "" {
+			result.Explanation = fmt.Sprintf("Requested target %q is not feasible or exceeds the budget for this workload.", constraints.TargetName)
+		}
 		return &result, nil
 	}
 
