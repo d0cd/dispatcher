@@ -129,6 +129,26 @@ func TestVerifyCSToken_ChannelKeyBinding(t *testing.T) {
 	})
 }
 
+// The Confidential Space token carries no reported TCB, so the CS path cannot
+// enforce a minTCB floor. It must fail closed (loudly) when one is configured
+// rather than silently ignore it — mirroring the Azure MAA path.
+func TestCSAttester_MinTCBFailsClosed(t *testing.T) {
+	channelKey := bytes.Repeat([]byte{0x22}, 32)
+	sum := sha256.Sum256(channelKey)
+	key, keys := maaSigningKey(t)
+	att := &csAttester{keys: keys,
+		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
+			c := validCSClaims()
+			c["eat_nonce"] = []string{hex.EncodeToString(nonce), hex.EncodeToString(sum[:])}
+			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
+		}}
+	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}, MinTCB: 7}
+
+	_, err := att.Verify(context.Background(), req)
+	require.Error(t, err, "minTCB set on the GCP CS path must fail closed, not be ignored")
+	assert.Contains(t, err.Error(), "minTCB")
+}
+
 func TestCSAttester_BindsChannelKey(t *testing.T) {
 	channelKey := bytes.Repeat([]byte{0x22}, 32)
 	sum := sha256.Sum256(channelKey)

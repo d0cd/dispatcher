@@ -12,7 +12,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
+	"time"
 
 	legacytpm "github.com/google/go-tpm/legacy/tpm2"
 
@@ -33,15 +36,16 @@ import (
 
 // AzureSNPPolicy is what a measured Azure run demands of the evidence.
 type AzureSNPPolicy struct {
-	Roots []*x509.Certificate // pinned AMD ARK roots
-	Nonce []byte              // per-run challenge (freshness)
-	PCRs  map[int]string      // pinned PCR values (index → hex); PCR11 is the UKI
+	Roots  []*x509.Certificate // pinned AMD ARK roots
+	Nonce  []byte              // per-run challenge (freshness)
+	PCRs   map[int]string      // pinned PCR values (index → hex); PCR11 is the UKI
+	MinTCB uint64              // minimum acceptable reported TCB (0 = no floor)
 }
 
 // verifyAzureSNP verifies the full chain against a policy that pins the measured
 // PCRs, returning the PCR11 measurement + the bound channel key to seal to.
 func verifyAzureSNP(ev agent.AzureSNPEvidence, p AzureSNPPolicy) (measurement string, channelKey []byte, err error) {
-	pcrs, quoted, channelKey, err := verifyAzureSNPEvidence(ev, p.Roots, p.Nonce)
+	pcrs, quoted, channelKey, err := verifyAzureSNPEvidence(ev, p.Roots, p.Nonce, p.MinTCB)
 	if err != nil {
 		return "", nil, err
 	}
@@ -72,7 +76,7 @@ func verifyAzureSNP(ev agent.AzureSNPEvidence, p AzureSNPPolicy) (measurement st
 // channel key. Both the run-path attester (which compares to a pin) and capture
 // (which derives the value to pin) build on this, so a measurement is never pinned
 // or accepted without the same cryptographic proof.
-func verifyAzureSNPEvidence(ev agent.AzureSNPEvidence, roots []*x509.Certificate, nonce []byte) (pcrs map[uint32][]byte, quoted []int, channelKey []byte, err error) {
+func verifyAzureSNPEvidence(ev agent.AzureSNPEvidence, roots []*x509.Certificate, nonce []byte, minTCB uint64) (pcrs map[uint32][]byte, quoted []int, channelKey []byte, err error) {
 	// 1. Genuine SEV-SNP hardware: the report signature + cert chain to a pinned ARK.
 	rep, err := parseSNPReport(ev.SNPReport)
 	if err != nil {
@@ -91,6 +95,23 @@ func verifyAzureSNPEvidence(ev agent.AzureSNPEvidence, roots []*x509.Certificate
 	}
 	if err := verifySNPSignature(rep, vcek); err != nil {
 		return nil, nil, nil, fmt.Errorf("snp report signature: %w", err)
+	}
+	if err := azureSNPCheckRevocation(vcek, ask, roots); err != nil {
+		return nil, nil, nil, err
+	}
+
+	// 1b. Guest policy + TCB (matches applyPolicy on the raw/AWS SNP paths): a
+	// DEBUG guest lets the host read/write guest memory and forge the vTPM AK, and
+	// MIGRATE_MA permits a migration agent — both defeat the whole guarantee. A
+	// reported TCB below the operator minimum is running known-vulnerable firmware.
+	if rep.policy&snpPolicyDebug != 0 {
+		return nil, nil, nil, fmt.Errorf("snp report: debug is enabled (policy.debug must be off)")
+	}
+	if rep.policy&snpPolicyMigrateMA != 0 {
+		return nil, nil, nil, fmt.Errorf("snp report: migration agent is enabled (must be off)")
+	}
+	if !tcbComponentsGTE(rep.reportedTCB, minTCB) {
+		return nil, nil, nil, fmt.Errorf("snp report: reported TCB %d has a component below the minimum %d", rep.reportedTCB, minTCB)
 	}
 
 	// 2. REPORT_DATA binds the runtime data (its SHA-256 in the first 32 bytes), so
@@ -156,7 +177,9 @@ func CaptureAzureSNPMeasurement(ctx context.Context, baseURL string) (string, er
 
 // captureAzureSNPPCR11 verifies the evidence and returns its quoted PCR11.
 func captureAzureSNPPCR11(ev agent.AzureSNPEvidence, roots []*x509.Certificate, nonce []byte) (string, error) {
-	pcrs, quoted, _, err := verifyAzureSNPEvidence(ev, roots, nonce)
+	// minTCB=0 at capture (establishing the baseline), but debug/migrate are still
+	// rejected so a debuggable VM can't poison the pinned PCR11.
+	pcrs, quoted, _, err := verifyAzureSNPEvidence(ev, roots, nonce, 0)
 	if err != nil {
 		return "", fmt.Errorf("verify azure snp evidence: %w", err)
 	}
@@ -168,6 +191,58 @@ func captureAzureSNPPCR11(ev agent.AzureSNPEvidence, roots []*x509.Certificate, 
 		return "", fmt.Errorf("verified evidence carries no pcr11")
 	}
 	return hex.EncodeToString(v), nil
+}
+
+// azureSNPCRLGetter fetches a CRL by URL. A package-level seam so tests run
+// offline; production fetches the ARK-signed CRL from AMD KDS.
+var azureSNPCRLGetter = func(url string) ([]byte, error) {
+	resp, err := (&http.Client{Timeout: 15 * time.Second}).Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("CRL %s: %d", url, resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+}
+
+// azureSNPCheckRevocation fails closed if the VCEK or its ASK has been revoked by
+// AMD. The CRL is fetched from the ASK's distribution point (AMD KDS) and must
+// itself be signed by a pinned ARK. A missing distribution point or an
+// unreachable/invalid CRL is a rejection, not a pass — an attacker who can block
+// KDS must not be able to bypass revocation.
+func azureSNPCheckRevocation(vcek, ask *x509.Certificate, roots []*x509.Certificate) error {
+	if len(ask.CRLDistributionPoints) == 0 {
+		return fmt.Errorf("snp revocation: ASK has no CRL distribution point")
+	}
+	body, err := azureSNPCRLGetter(ask.CRLDistributionPoints[0])
+	if err != nil {
+		return fmt.Errorf("snp revocation: fetch ASK CRL: %w", err)
+	}
+	crl, err := x509.ParseRevocationList(body)
+	if err != nil {
+		return fmt.Errorf("snp revocation: parse ASK CRL: %w", err)
+	}
+	signed := false
+	for _, root := range roots {
+		if crl.CheckSignatureFrom(root) == nil {
+			signed = true
+			break
+		}
+	}
+	if !signed {
+		return fmt.Errorf("snp revocation: ASK CRL is not signed by a pinned AMD root")
+	}
+	for _, e := range crl.RevokedCertificateEntries {
+		if e.SerialNumber.Cmp(vcek.SerialNumber) == 0 {
+			return fmt.Errorf("snp revocation: the VCEK has been revoked by AMD")
+		}
+		if e.SerialNumber.Cmp(ask.SerialNumber) == 0 {
+			return fmt.Errorf("snp revocation: the ASK has been revoked by AMD")
+		}
+	}
+	return nil
 }
 
 func containsInt(s []int, v int) bool {
@@ -199,7 +274,7 @@ func NewAzureSNPAttester(pcrs map[int]string, baseURL string) Attester {
 	return &azureSNPAttester{roots: amdRoots, pcrs: pcrs, fetch: endpointAzureSNPFetch(baseURL)}
 }
 
-func (a *azureSNPAttester) Verify(ctx context.Context, _ types.ConfidentialRequirement) (AttestationResult, error) {
+func (a *azureSNPAttester) Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error) {
 	if a.fetch == nil {
 		return AttestationResult{}, fmt.Errorf("azure snp attester has no evidence fetch wired")
 	}
@@ -211,7 +286,7 @@ func (a *azureSNPAttester) Verify(ctx context.Context, _ types.ConfidentialRequi
 	if err != nil {
 		return AttestationResult{}, fmt.Errorf("fetch azure snp evidence: %w", err)
 	}
-	measurement, channelKey, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: a.roots, Nonce: nonce, PCRs: a.pcrs})
+	measurement, channelKey, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: a.roots, Nonce: nonce, PCRs: a.pcrs, MinTCB: req.MinTCB})
 	if err != nil {
 		return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
 	}

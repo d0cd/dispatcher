@@ -183,6 +183,12 @@ func (a *csAttester) Verify(ctx context.Context, req types.ConfidentialRequireme
 	if a.fetch == nil {
 		return AttestationResult{}, fmt.Errorf("cs attester has no evidence fetch wired")
 	}
+	// The Confidential Space token exposes no reported TCB, so this path cannot
+	// enforce a minTCB floor. Fail closed rather than silently ignore the control
+	// the operator configured (there is no measured-TCB backend on GCP today).
+	if req.MinTCB > 0 {
+		return AttestationResult{}, fmt.Errorf("minTCB cannot be enforced on the GCP Confidential Space path (the attestation token carries no reported TCB)")
+	}
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {
 		return AttestationResult{}, fmt.Errorf("generate attestation nonce: %w", err)

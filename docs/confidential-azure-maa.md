@@ -73,7 +73,7 @@ The assumed schema was wrong; a live capture corrected it:
 1. ✅ Verifier corrected + golden-validated against a real token (`verifyMAAToken`,
    nested schema, client-payload binding, `/certs` x5c keys; signatures on go-jose).
 2. ✅ In-TEE agent: the generalized HTTP sealed-exchange agent attesting via MAA
-   (`RunAzureAgent`, `cmd/dispatcher-attest-azure`) + `endpointMAAFetch`.
+   (`azureagent.RunAgent`, `cmd/dispatcher-attest-azure`) + `endpointMAAFetch`.
 3. ✅ MAA JWKS load + issuer pin (`LoadAzureMAAKeys`).
 4. ✅ Full-R9 sealing — reused directly (the agent runs the same sealed exchange).
 5. ✅ Orchestration core (`executeAzureConfidential`, verify-before-seal, unit-tested).

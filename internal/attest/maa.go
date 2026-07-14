@@ -37,6 +37,7 @@ type maaToken struct {
 		ComplianceStatus  string `json:"x-ms-compliance-status"` // "azure-compliant-cvm"
 		LaunchMeasurement string `json:"x-ms-sevsnpvm-launchmeasurement"`
 		IsDebuggable      bool   `json:"x-ms-sevsnpvm-is-debuggable"`
+		MigrationAllowed  bool   `json:"x-ms-sevsnpvm-migration-allowed"`
 	} `json:"x-ms-isolation-tee"`
 	// Measured-boot facts from the vTPM (the AMD SEV-SNP launch measurement above
 	// covers only the CVM firmware, not the OS/agent). MAA attests PCRs 0–7; PCR4
@@ -111,6 +112,9 @@ func verifyMAAToken(token string, keys map[string]crypto.PublicKey, p MAAPolicy)
 	if tee.IsDebuggable {
 		return "", fmt.Errorf("maa token reports a debuggable VM (debug must be off)")
 	}
+	if tee.MigrationAllowed {
+		return "", fmt.Errorf("maa token reports migration is allowed (must be off)")
+	}
 	if !measurementAllowed(tee.LaunchMeasurement, p.Measurements) {
 		return "", fmt.Errorf("maa launch measurement %q is not on the allowlist", tee.LaunchMeasurement)
 	}
@@ -173,6 +177,13 @@ type azureAttester struct {
 func (a *azureAttester) Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error) {
 	if a.fetch == nil {
 		return AttestationResult{}, fmt.Errorf("azure attester has no evidence fetch wired")
+	}
+	// The MAA token exposes no reported-TCB claim, so this path cannot enforce a
+	// minTCB floor. Fail closed rather than silently ignore the control the
+	// operator configured; the measured direct-SNP path (profile: azure-snp) reads
+	// the raw report and enforces minTCB.
+	if req.MinTCB > 0 {
+		return AttestationResult{}, fmt.Errorf("minTCB cannot be enforced on the Azure MAA path (the token carries no reported TCB); use profile: azure-snp for a measured direct-SNP run that enforces minTCB")
 	}
 	nonce := make([]byte, 32)
 	if _, err := rand.Read(nonce); err != nil {

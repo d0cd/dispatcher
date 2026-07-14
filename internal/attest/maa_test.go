@@ -142,6 +142,7 @@ func TestVerifyMAAToken_Rejects(t *testing.T) {
 		"not sevsnpvm":            {mutate: func(c map[string]any) { setTEE(c, "x-ms-attestation-type", "tdxvm") }, want: "sevsnpvm"},
 		"not compliant":           {mutate: func(c map[string]any) { setTEE(c, "x-ms-compliance-status", "non-compliant") }, want: "compliant"},
 		"debuggable":              {mutate: func(c map[string]any) { setTEE(c, "x-ms-sevsnpvm-is-debuggable", true) }, want: "debug"},
+		"migration allowed":       {mutate: func(c map[string]any) { setTEE(c, "x-ms-sevsnpvm-migration-allowed", true) }, want: "migration"},
 		"measurement not allowed": {policy: func(p *MAAPolicy) { p.Measurements = []string{"other"} }, want: "allowlist"},
 		"empty allowlist":         {policy: func(p *MAAPolicy) { p.Measurements = nil }, want: "allowlist"},
 		"no issuer pinned":        {policy: func(p *MAAPolicy) { p.Issuer = "" }, want: "issuer must be set"},
@@ -209,6 +210,27 @@ func TestAzureAttester_RejectsUnboundToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.Verified, "a token not binding this run's nonce+key is rejected")
 	assert.Contains(t, res.Verdict, "nonce")
+}
+
+// The MAA token carries no reported-TCB claim, so the MAA path cannot enforce a
+// minTCB floor. It must fail closed (loudly) when one is configured rather than
+// silently ignore it — the sibling direct-SNP paths enforce minTCB, and a silent
+// no-op here would run a workload on under-TCB silicon the operator meant to reject.
+func TestAzureAttester_MinTCBFailsClosed(t *testing.T) {
+	key, keys := maaSigningKey(t)
+	channelKey := bytes.Repeat([]byte{0x9A}, 32)
+	att := &azureAttester{keys: keys, issuer: maaIssuer,
+		fetch: func(_ context.Context, nonce []byte) (maaEvidence, error) {
+			c := validMAAClaims()
+			c["x-ms-runtime"].(map[string]any)["client-payload"].(map[string]any)["nonce"] =
+				base64.StdEncoding.EncodeToString(agent.MAABindingNonce(nonce, channelKey))
+			return maaEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
+		}}
+	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{maaMeasurement}, MinTCB: 7}
+
+	_, err := att.Verify(context.Background(), req)
+	require.Error(t, err, "minTCB set on the MAA path must fail closed, not be ignored")
+	assert.Contains(t, err.Error(), "minTCB")
 }
 
 func TestAzureAttester_NotReadyAndNoFetch(t *testing.T) {

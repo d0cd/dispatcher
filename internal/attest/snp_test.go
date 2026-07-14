@@ -1,7 +1,6 @@
 package attest
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -11,21 +10,18 @@ import (
 	"crypto/x509/pkix"
 	"encoding/binary"
 	"encoding/hex"
-	"fmt"
 	"math/big"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/d0cd/dispatcher/internal/attest/agent"
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // --- synthetic AMD-style cert chain (ARK -> ASK -> VCEK) -------------------
 
 type snpChain struct {
 	ark, ask, vcek *x509.Certificate
+	arkKey         *ecdsa.PrivateKey
 	vcekKey        *ecdsa.PrivateKey
 }
 
@@ -39,7 +35,10 @@ func newSNPChain(t *testing.T) snpChain {
 			Subject:               pkix.Name{CommonName: cn},
 			IsCA:                  true,
 			BasicConstraintsValid: true,
-			KeyUsage:              x509.KeyUsageCertSign,
+			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+			// Mirror real AMD certs, which carry a KDS CRL distribution point so the
+			// revocation check can locate the ARK-signed CRL.
+			CRLDistributionPoints: []string{"https://kdsintf.amd.com/vcek/v1/Milan/crl"},
 		}
 		signer, signerKey := tmpl, key
 		if parent != nil {
@@ -63,7 +62,7 @@ func newSNPChain(t *testing.T) snpChain {
 	vcek, err := x509.ParseCertificate(der)
 	require.NoError(t, err)
 
-	return snpChain{ark: ark, ask: ask, vcek: vcek, vcekKey: vcekKey}
+	return snpChain{ark: ark, ask: ask, vcek: vcek, arkKey: arkKey, vcekKey: vcekKey}
 }
 
 // bigIntToLE renders n as a little-endian byte slice of the given width, the
@@ -205,100 +204,4 @@ func TestVerifySNPChain(t *testing.T) {
 
 	// Multiple pinned roots: the ASK is accepted if ANY pinned root signed it.
 	assert.NoError(t, verifySNPChain(ch.vcek, ch.ask, []*x509.Certificate{newSNPChain(t).ark, ch.ark}))
-}
-
-// --- end-to-end attester ---------------------------------------------------
-
-func TestSNPAttester_VerifyAccepts(t *testing.T) {
-	ch := newSNPChain(t)
-	meas := make48(0xAB)
-	channelKey := []byte("in-tee-channel-public-key")
-
-	att := &snpAttester{roots: []*x509.Certificate{ch.ark},
-		fetch: func(_ context.Context, nonce []byte) (snpEvidence, error) {
-			// The guest binds this run: REPORT_DATA = SHA-512(nonce || channelKey).
-			rd := agent.BindingHash(nonce, channelKey)
-			return snpEvidence{
-				report:     buildSNPReport(t, meas, rd, 5, 0, ch.vcekKey),
-				vcek:       ch.vcek,
-				ask:        ch.ask,
-				channelKey: channelKey,
-			}, nil
-		}}
-
-	req := types.ConfidentialRequirement{
-		Required: true, Type: "sev-snp",
-		Measurements: []string{hex.EncodeToString(meas)}, MinTCB: 5,
-	}
-	res, err := att.Verify(context.Background(), req)
-	require.NoError(t, err)
-	assert.True(t, res.Verified)
-	assert.Equal(t, "sev-snp", res.Type)
-	assert.Equal(t, hex.EncodeToString(meas), res.Measurement)
-	assert.Equal(t, uint64(5), res.TCB)
-	assert.NotEmpty(t, res.Nonce, "the per-run nonce is recorded for the audit trail")
-}
-
-func TestSNPAttester_VerifyRejectsWrongMeasurement(t *testing.T) {
-	ch := newSNPChain(t)
-	channelKey := []byte("k")
-	att := &snpAttester{roots: []*x509.Certificate{ch.ark},
-		fetch: func(_ context.Context, nonce []byte) (snpEvidence, error) {
-			return snpEvidence{
-				report: buildSNPReport(t, make48(0x01), agent.BindingHash(nonce, channelKey), 5, 0, ch.vcekKey),
-				vcek:   ch.vcek, ask: ch.ask, channelKey: channelKey,
-			}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp",
-		Measurements: []string{hex.EncodeToString(make48(0x99))}, MinTCB: 5}
-	res, err := att.Verify(context.Background(), req)
-	require.NoError(t, err, "a policy mismatch is a verdict, not an error")
-	assert.False(t, res.Verified)
-	assert.Contains(t, res.Verdict, "measurement")
-}
-
-func TestSNPAttester_VerifyRejectsReplay(t *testing.T) {
-	ch := newSNPChain(t)
-	meas := make48(0x07)
-	// The guest binds a STALE nonce (not the one Verify generated) -> binding fails.
-	stale := bytesRepeat(0xEE, 32)
-	channelKey := []byte("k")
-	att := &snpAttester{roots: []*x509.Certificate{ch.ark},
-		fetch: func(_ context.Context, _ []byte) (snpEvidence, error) {
-			return snpEvidence{
-				report: buildSNPReport(t, meas, agent.BindingHash(stale, channelKey), 5, 0, ch.vcekKey),
-				vcek:   ch.vcek, ask: ch.ask, channelKey: channelKey,
-			}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev-snp",
-		Measurements: []string{hex.EncodeToString(meas)}, MinTCB: 5}
-	res, err := att.Verify(context.Background(), req)
-	require.NoError(t, err)
-	assert.False(t, res.Verified)
-	assert.Contains(t, res.Verdict, "REPORT_DATA")
-}
-
-func TestSNPAttester_RejectsTDXRequest(t *testing.T) {
-	att := &snpAttester{}
-	_, err := att.Verify(context.Background(),
-		types.ConfidentialRequirement{Required: true, Type: "tdx"})
-	require.Error(t, err, "an AMD SEV-SNP attester cannot verify an Intel TDX report")
-	assert.Contains(t, err.Error(), "tdx")
-}
-
-func TestSNPAttester_PropagatesFetchFailure(t *testing.T) {
-	att := &snpAttester{roots: []*x509.Certificate{newSNPChain(t).ark},
-		fetch: func(_ context.Context, _ []byte) (snpEvidence, error) {
-			return snpEvidence{}, fmt.Errorf("guest unreachable")
-		}}
-	_, err := att.Verify(context.Background(),
-		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "guest unreachable")
-}
-
-func TestSNPAttester_NoFetchWired(t *testing.T) {
-	_, err := (&snpAttester{}).Verify(context.Background(),
-		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
-	require.Error(t, err, "an attester with no fetch must error, not panic")
 }

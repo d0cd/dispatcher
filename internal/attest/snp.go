@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha512"
 	"crypto/x509"
 	"encoding/base64"
@@ -14,7 +13,6 @@ import (
 	"math/big"
 
 	"github.com/d0cd/dispatcher/internal/attest/agent"
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // AMD SEV-SNP ATTESTATION_REPORT ABI offsets (Table 22, "SEV Secure Nested
@@ -81,6 +79,8 @@ func parseSNPReport(b []byte) (*snpReport, error) {
 	}, nil
 }
 
+// verifySNPSignature checks the firmware's ECDSA-P384/SHA-384 signature over the
+// signed prefix using the VCEK public key (R3 — bind to the hardware root).
 // claims projects the report onto the provider-agnostic Claims the policy
 // engine consumes. SEV-SNP has no separate "sev" mode in a SNP report.
 func (r *snpReport) claims() Claims {
@@ -94,8 +94,6 @@ func (r *snpReport) claims() Claims {
 	}
 }
 
-// verifySNPSignature checks the firmware's ECDSA-P384/SHA-384 signature over the
-// signed prefix using the VCEK public key (R3 — bind to the hardware root).
 func verifySNPSignature(r *snpReport, vcek *x509.Certificate) error {
 	if r.sigAlgo != snpSigAlgoECDSAP384SHA384 {
 		return fmt.Errorf("snp report uses unsupported signature algorithm %d", r.sigAlgo)
@@ -163,63 +161,4 @@ func endpointSNPFetch(baseURL string) snpFetch {
 		}
 		return snpEvidence{report: report, channelKey: channelKey}, nil
 	}
-}
-
-// snpAttester verifies AMD SEV-SNP reports for GCP and AWS. roots are the pinned
-// AMD ARK roots. Verify fails closed when no evidence fetch is wired (fetch ==
-// nil) rather than booting a VM it cannot attest.
-type snpAttester struct {
-	roots []*x509.Certificate
-	fetch snpFetch
-}
-
-func (a *snpAttester) Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error) {
-	if req.Type == "tdx" {
-		return AttestationResult{}, fmt.Errorf("this attester verifies AMD SEV-SNP reports; tdx requires the Intel quote path")
-	}
-	if a.fetch == nil {
-		return AttestationResult{}, fmt.Errorf("snp attester has no evidence fetch wired")
-	}
-
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return AttestationResult{}, fmt.Errorf("generate attestation nonce: %w", err)
-	}
-
-	ev, err := a.fetch(ctx, nonce)
-	if err != nil {
-		return AttestationResult{}, fmt.Errorf("fetch snp evidence: %w", err)
-	}
-	if err := verifySNPChain(ev.vcek, ev.ask, a.roots); err != nil {
-		return AttestationResult{}, err
-	}
-	report, err := parseSNPReport(ev.report)
-	if err != nil {
-		return AttestationResult{}, err
-	}
-	if err := verifySNPSignature(report, ev.vcek); err != nil {
-		return AttestationResult{}, err
-	}
-
-	claims := report.claims()
-	policy := VerificationPolicy{
-		ExpectedType: req.Type,
-		Measurements: req.Measurements,
-		MinTCB:       req.MinTCB,
-		Nonce:        nonce,
-		ChannelKey:   ev.channelKey,
-	}
-	if err := applyPolicy(claims, policy); err != nil {
-		// Valid evidence that fails policy is a verdict, not an error: the run
-		// must abort, but the reason is the report's content, not a fetch fault.
-		return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
-	}
-	return AttestationResult{
-		Verified:    true,
-		Type:        "sev-snp",
-		Measurement: claims.Measurement,
-		TCB:         claims.TCB,
-		Nonce:       hex.EncodeToString(nonce),
-		Verdict:     "verified",
-	}, nil
 }

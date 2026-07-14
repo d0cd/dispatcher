@@ -62,7 +62,7 @@ The **GCP SEV-SNP golden capture is validated on real hardware**. Remaining:
 | Item | Effort | Impact |
 |---|---|---|
 | **Standard-path agent measurement** — on the *standard* AWS SEV-SNP and Azure MAA paths the scp'd agent isn't folded into the launch measurement (the measured `profile` backends and GCP Confidential Space close it). Fold the agent into the measured image for those paths too. Plan: [confidential-attestation-plan.md](confidential-attestation-plan.md). | M | Medium |
-| **Secret wrapping (R9) hardening** — source/secrets seal only into the proven TEE (delivered); still open: live VCEK/cert **revocation** and **MAA per-component TCB** mapping (`minTCB` is a no-op on MAA until then). | M | Medium |
+| **Secret wrapping (R9) hardening** — source/secrets seal only into the proven TEE (delivered); cert **revocation** now enforced on the AMD-cert-chain paths (AWS, azure-snp) via the AMD KDS CRL. Still open: **MAA per-component TCB** mapping (`minTCB` is unenforceable on MAA until then, so the MAA path fails closed — rejects the run — when it's set; use `profile: azure-snp` to enforce it). | M | Medium |
 | **AWS live pricing** — the EC2 bulk price list is ~479 MB and rarely parses in the plan timeout (now correctly skipped → static/rate-card fallback). Replace with the lightweight Price List Query API (`get-products`). | M | Low |
 | k8s Confidential Containers — a different, larger model. Out of scope until demand. | — | — |
 
@@ -156,9 +156,9 @@ TODO/FIXME/panic debt.
 ## Suggested order
 
 1. **Confidential: close the residuals** — fold the agent into the measured
-   image on the standard AWS SEV-SNP / Azure MAA paths, then live VCEK/cert
-   revocation and MAA per-component TCB mapping. (The live evidence fetch, VLEK
-   path, and Nitro backend already shipped.)
+   image on the standard AWS SEV-SNP / Azure MAA paths, then MAA per-component TCB
+   mapping. (The live evidence fetch, VLEK path, Nitro backend, and AMD KDS CRL
+   revocation on the AWS/azure-snp paths already shipped.)
 2. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
    (establishes the REST `Provider` pattern + cheap GPU).
 3. **Low-latency** — cloud-native fast backend + startup-latency feasibility.

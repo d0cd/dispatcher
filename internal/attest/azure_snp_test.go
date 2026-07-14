@@ -9,7 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"math/big"
 	"testing"
+	"time"
 
 	legacytpm "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
@@ -74,11 +76,38 @@ func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, e
 	return quote, sig
 }
 
+// arkSignedCRL builds an ARK-signed CRL revoking the given serials (nil = none),
+// the shape azureSNPCheckRevocation fetches from AMD KDS in production.
+func arkSignedCRL(t *testing.T, ch snpChain, revoked ...*big.Int) []byte {
+	t.Helper()
+	var entries []x509.RevocationListEntry
+	for _, s := range revoked {
+		entries = append(entries, x509.RevocationListEntry{SerialNumber: s, RevocationTime: time.Now().Add(-time.Hour)})
+	}
+	der, err := x509.CreateRevocationList(rand.Reader, &x509.RevocationList{
+		Number:                    big.NewInt(1),
+		ThisUpdate:                time.Now().Add(-time.Hour),
+		NextUpdate:                time.Now().Add(time.Hour),
+		RevokedCertificateEntries: entries,
+	}, ch.ark, ch.arkKey)
+	require.NoError(t, err)
+	return der
+}
+
+// installCRL points the revocation seam at a fixed CRL for the test's duration.
+func installCRL(t *testing.T, crl []byte) {
+	t.Helper()
+	prev := azureSNPCRLGetter
+	azureSNPCRLGetter = func(string) ([]byte, error) { return crl, nil }
+	t.Cleanup(func() { azureSNPCRLGetter = prev })
+}
+
 // azureEvidence assembles a full, valid Azure SNP+vTPM evidence bundle bound to
 // nonce+channelKey, returning it plus the AMD roots to trust. mutate can tamper.
 func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate func(*agent.AzureSNPEvidence)) (agent.AzureSNPEvidence, []*x509.Certificate) {
 	t.Helper()
 	ch := newSNPChain(t)
+	installCRL(t, arkSignedCRL(t, ch)) // default: an empty (nothing-revoked) CRL
 	akPriv, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
 
@@ -108,6 +137,60 @@ func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate 
 		mutate(&ev)
 	}
 	return ev, []*x509.Certificate{ch.ark}
+}
+
+// azureEvidencePolicy builds a valid bundle with a chosen SNP guest policy and
+// reported TCB, for the policy/TCB rejection tests.
+func azureEvidencePolicy(t *testing.T, nonce, channelKey, pcr11 []byte, policy, tcb uint64) (agent.AzureSNPEvidence, []*x509.Certificate) {
+	t.Helper()
+	ch := newSNPChain(t)
+	installCRL(t, arkSignedCRL(t, ch)) // default: an empty (nothing-revoked) CRL
+	akPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	runtimeData := runtimeDataWithAK(t, &akPriv.PublicKey)
+	var reportData [64]byte
+	rdHash := sha256.Sum256(runtimeData)
+	copy(reportData[:], rdHash[:])
+	report := buildSNPReport(t, make48(0x11), reportData[:], tcb, policy, ch.vcekKey)
+	pcrs := map[uint32][]byte{11: pcr11}
+	quote, sig := signedQuote(t, akPriv, pcrs, agent.MAABindingNonce(nonce, channelKey))
+	return agent.AzureSNPEvidence{
+		SNPReport: report, VCEK: ch.vcek.Raw, ASK: ch.ask.Raw, RuntimeData: runtimeData,
+		Quote: quote, QuoteSig: sig, PCRs: pcrs, ChannelKey: channelKey,
+	}, []*x509.Certificate{ch.ark}
+}
+
+// A genuine-hardware report with the DEBUG policy bit set must be rejected — a
+// debug guest lets the host read/write guest memory and forge the vTPM AK, a full
+// attestation bypass. Same for MIGRATE_MA and a TCB below the run's minimum.
+func TestVerifyAzureSNP_RejectsDebugPolicy(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, snpPolicyDebug, 9)
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "debug")
+}
+
+func TestVerifyAzureSNP_RejectsMigrateMA(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, snpPolicyMigrateMA, 9)
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "migration")
+}
+
+func TestVerifyAzureSNP_RejectsBelowMinTCB(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, 0, 5) // reported TCB 5
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}, MinTCB: 9})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "TCB")
 }
 
 // TestVerifyAzureSNP_Accepts: a well-formed bundle — genuine SNP report binding the
@@ -241,4 +324,52 @@ func TestVerifyAzureSNP_RejectsForgedQuote(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "quote signature")
+}
+
+// The measured Azure SNP path must reject a platform whose VCEK/ASK AMD cert has
+// been revoked, and must fail closed (never fail open) when the ARK-signed CRL is
+// missing, unreachable, or not chained to a pinned root.
+func TestAzureSNPCheckRevocation(t *testing.T) {
+	ch := newSNPChain(t)
+	roots := []*x509.Certificate{ch.ark}
+
+	t.Run("passes when nothing is revoked", func(t *testing.T) {
+		installCRL(t, arkSignedCRL(t, ch))
+		require.NoError(t, azureSNPCheckRevocation(ch.vcek, ch.ask, roots))
+	})
+
+	t.Run("rejects a revoked VCEK", func(t *testing.T) {
+		installCRL(t, arkSignedCRL(t, ch, ch.vcek.SerialNumber))
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "VCEK has been revoked")
+	})
+
+	t.Run("rejects a revoked ASK", func(t *testing.T) {
+		installCRL(t, arkSignedCRL(t, ch, ch.ask.SerialNumber))
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ASK has been revoked")
+	})
+
+	t.Run("rejects a CRL not signed by a pinned root", func(t *testing.T) {
+		installCRL(t, arkSignedCRL(t, newSNPChain(t))) // signed by a foreign ARK
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not signed by a pinned")
+	})
+
+	t.Run("fails closed when the CRL can't be fetched", func(t *testing.T) {
+		prev := azureSNPCRLGetter
+		azureSNPCRLGetter = func(string) ([]byte, error) { return nil, assert.AnError }
+		t.Cleanup(func() { azureSNPCRLGetter = prev })
+		require.Error(t, azureSNPCheckRevocation(ch.vcek, ch.ask, roots))
+	})
+
+	t.Run("fails closed when the ASK has no CRL distribution point", func(t *testing.T) {
+		installCRL(t, arkSignedCRL(t, ch))
+		askNoDP := *ch.ask
+		askNoDP.CRLDistributionPoints = nil
+		require.Error(t, azureSNPCheckRevocation(ch.vcek, &askNoDP, roots))
+	})
 }
