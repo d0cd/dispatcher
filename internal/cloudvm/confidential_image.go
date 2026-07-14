@@ -29,7 +29,7 @@ type ImageBuildConfig struct {
 // workload source + secrets arrive sealed at runtime, so they are never baked in.
 // NOTE (MVP): the base carries only a shell — workloads needing a language runtime
 // require a base that includes it; a per-runtime base image is deferred debt.
-const agentDockerfile = `FROM golang:1.24 AS build
+const agentDockerfile = `FROM golang:1.25 AS build
 WORKDIR /src
 COPY . .
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /dispatcher-attest ./cmd/dispatcher-attest

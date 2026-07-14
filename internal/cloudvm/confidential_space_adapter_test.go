@@ -137,6 +137,27 @@ func TestExecuteConfidentialSpace_BuildFailureNoVM(t *testing.T) {
 	assert.Equal(t, 0, provider.VMCount(), "no VM when the image never built")
 }
 
+// TestExecuteConfidentialSpace_EgressResolutionFailsClosed: if the egress CIDR
+// can't be resolved, the run must abort before provisioning — never fall back to
+// an unscoped agent firewall that would let any host race the sealed payload.
+func TestExecuteConfidentialSpace_EgressResolutionFailsClosed(t *testing.T) {
+	provider := NewMockProvider(ProviderGCP)
+	deps := csDeps{
+		provider: provider,
+		buildImage: func(context.Context, types.WorkloadSpec) (string, string, error) {
+			return "ref@" + csTestDigest, csTestDigest, nil
+		},
+		baseURL:    func(*VMInfo) string { return "http://10.0.0.1:8443" },
+		waitReady:  func(context.Context, string) error { return nil },
+		egressCIDR: func(context.Context) (string, error) { return "", assertErr("no egress ip") },
+	}
+
+	_, err := executeConfidentialSpace(context.Background(), deps, csTestPlan(t, "run-egress", []string{"true"}))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "scope confidential agent firewall")
+	assert.Equal(t, 0, provider.VMCount(), "no VM may be provisioned when the firewall can't be scoped")
+}
+
 type assertErr string
 
 func (e assertErr) Error() string { return string(e) }

@@ -6,11 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
@@ -382,48 +379,4 @@ func (a *ConfidentialSpaceAdapter) Cleanup(ctx context.Context, h *adapter.RunHa
 		}
 	}
 	return &adapter.CleanupResult{Success: true, ResourcesCleaned: cleaned}, nil
-}
-
-// detectEgressCIDR resolves dispatcher's public egress IP as a /32 to scope the
-// agent-port firewall. It fails closed: if the IP can't be resolved it returns an
-// error so the caller aborts the run, rather than opening the agent port to
-// 0.0.0.0/0 (which would let any host race dispatcher's sealed payload).
-func detectEgressCIDR(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
-	if err != nil {
-		return "", fmt.Errorf("build egress-ip request: %w", err)
-	}
-	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
-	if err != nil {
-		return "", fmt.Errorf("query egress ip: %w", err)
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64))
-	ip := strings.TrimSpace(string(body))
-	if net.ParseIP(ip) == nil {
-		return "", fmt.Errorf("egress-ip service returned %q, not an IP address", ip)
-	}
-	return ip + "/32", nil
-}
-
-// waitForAgentEndpoint polls the in-TEE agent's endpoint until it accepts a TCP
-// connection or the context deadline passes. The agent starts serving before the
-// attestation exchange, so a reachable port is the readiness signal.
-func waitForAgentEndpoint(ctx context.Context, baseURL string) error {
-	host := strings.TrimPrefix(baseURL, "http://")
-	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	var dialer net.Dialer
-	for {
-		conn, err := dialer.DialContext(waitCtx, "tcp", host)
-		if err == nil {
-			_ = conn.Close()
-			return nil
-		}
-		select {
-		case <-waitCtx.Done():
-			return fmt.Errorf("agent endpoint %s not reachable: %w", baseURL, err)
-		case <-time.After(3 * time.Second):
-		}
-	}
 }

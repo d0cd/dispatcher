@@ -9,10 +9,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// TestConfidentialVMAdapter_CleanupDestroyFailureSurfacesError: a failed VM
+// teardown must be reported (Success=false + the error), not silently swallowed —
+// a leaked confidential VM keeps billing and holds the sealed workload.
+func TestConfidentialVMAdapter_CleanupDestroyFailureSurfacesError(t *testing.T) {
+	provider := NewMockProvider(ProviderAzure)
+	provider.DestroyErr = assertErr("destroy refused")
+	a := &confidentialVMAdapter{provider: provider}
+	h := &adapter.RunHandle{ID: "vm-9", State: &confidentialRunState{Provider: ProviderAzure, VMID: "vm-9"}}
+
+	res, err := a.Cleanup(context.Background(), h)
+	require.NoError(t, err)
+	assert.False(t, res.Success, "a failed teardown must not report success")
+	assert.Contains(t, res.Errors, "destroy refused")
+}
 
 func sshConfTestPlan(t *testing.T, id string, command []string) *types.Plan {
 	t.Helper()

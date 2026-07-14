@@ -1,12 +1,83 @@
 package cloudvm
 
 import (
+	"context"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// A prior run's best-effort firewall reap can fail, leaking the per-workload
+// firewall rule; the next run must not die on "already exists" — it replaces the
+// stale rule (delete + recreate) rather than failing to provision.
+func TestCreateAgentFirewall_ReplacesLeakedRule(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+
+	var calls []string
+	createN := 0
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		verb := args[2] // compute firewall-rules <verb> ...
+		calls = append(calls, verb)
+		if verb == "create" {
+			createN++
+			if createN == 1 {
+				return nil, fmt.Errorf("The resource 'dispatcher-fw-cs-x' already exists")
+			}
+		}
+		return []byte("{}"), nil
+	}
+
+	g := &GCPProvider{project: "p"}
+	err := g.createAgentFirewall(context.Background(), "dispatcher-fw-cs-x", "1.2.3.4/32", "plan_x")
+	require.NoError(t, err, "a leaked firewall must be replaced, not fatal")
+	assert.Equal(t, []string{"create", "delete", "create"}, calls, "collide -> delete stale -> recreate")
+}
+
+// When the create succeeds but its output can't be parsed, the VM (and the
+// agent-port firewall opened for it) already exist — createConfidentialSpaceVM
+// must tear them down before returning, or it orphans a billing confidential VM.
+func TestCreateConfidentialSpaceVM_ParseFailureTearsDown(t *testing.T) {
+	prevRetry, prevRun := retryCLIOutput, runCLI
+	t.Cleanup(func() { retryCLIOutput, runCLI = prevRetry, prevRun })
+
+	retryCLIOutput = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		return []byte("not-json"), nil // create "succeeds" but output is unparseable
+	}
+	var calls [][]string
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, args)
+		return []byte("{}"), nil
+	}
+
+	g := &GCPProvider{project: "p", zone: "us-central1-a"}
+	opts := VMOptions{
+		Name:                  "dispatcher-cs-job",
+		Region:                "us-central1-a",
+		ConfidentialAllowFrom: "1.2.3.4/32",
+		Tags:                  map[string]string{"dispatcher": "true", "dispatcher-run-id": "plan_x"},
+	}
+
+	_, err := g.createConfidentialSpaceVM(context.Background(), opts)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parse")
+
+	deletedVM, deletedFirewall := false, false
+	for _, c := range calls {
+		if slices.Contains(c, "instances") && slices.Contains(c, "delete") && slices.Contains(c, opts.Name) {
+			deletedVM = true
+		}
+		if slices.Contains(c, "firewall-rules") && slices.Contains(c, "delete") {
+			deletedFirewall = true
+		}
+	}
+	assert.True(t, deletedVM, "the created VM must be destroyed on parse failure")
+	assert.True(t, deletedFirewall, "the agent firewall must be deleted on parse failure")
+}
 
 func TestGCPConfidentialSpaceCreateArgs(t *testing.T) {
 	opts := VMOptions{

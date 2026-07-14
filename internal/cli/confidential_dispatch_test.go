@@ -76,6 +76,48 @@ func TestAdapterForPlan_ConfidentialRunFailsClosedNotPlain(t *testing.T) {
 	require.NoError(t, plainErr)
 }
 
+// A confidential, attestation-required run routed to a target that has no
+// attesting backend (empty profile, not one of the 3 cloud confidential targets)
+// must fail closed — never fall through to a plain, non-attesting adapter.
+func TestAdapterForPlan_ConfidentialUnattestableTargetFailsClosed(t *testing.T) {
+	p := &types.Plan{
+		Recommendation: &types.Recommendation{Target: "local-process"},
+		Workload: types.WorkloadSpec{Requirements: types.ResourceRequirements{
+			Confidential: types.ConfidentialRequirement{Required: true, Attestation: "required"},
+		}},
+	}
+	_, err := adapterForPlan(context.Background(), p)
+	require.Error(t, err, "confidential+attestation on a target with no attesting backend must fail closed")
+	assert.Contains(t, err.Error(), "no attesting backend")
+}
+
+// attestation: off is the documented escape hatch — it may use the plain adapter
+// (which still provisions an encrypted-memory VM where the target supports it).
+func TestAdapterForPlan_ConfidentialAttestationOffUsesPlainAdapter(t *testing.T) {
+	p := &types.Plan{
+		Recommendation: &types.Recommendation{Target: "local-process"},
+		Workload: types.WorkloadSpec{Requirements: types.ResourceRequirements{
+			Confidential: types.ConfidentialRequirement{Required: true, Attestation: "off"},
+		}},
+	}
+	a, err := adapterForPlan(context.Background(), p)
+	require.NoError(t, err)
+	require.NotNil(t, a)
+}
+
+// Symmetric to the nitro case: azure-snp profile on aws-vm must fail closed.
+func TestAdapterForPlan_AzureSNPOnAWSFailsClosed(t *testing.T) {
+	p := &types.Plan{
+		Recommendation: &types.Recommendation{Target: "aws-vm"},
+		Workload: types.WorkloadSpec{Requirements: types.ResourceRequirements{
+			Confidential: types.ConfidentialRequirement{Required: true, Attestation: "required", Profile: "azure-snp"},
+		}},
+	}
+	_, err := adapterForPlan(context.Background(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure-snp")
+}
+
 // A measured profile on a mismatched provider target must fail closed in the
 // dispatch, not silently route to that provider's unmeasured default backend.
 func TestAdapterForPlan_ProfileTargetMismatchFailsClosed(t *testing.T) {

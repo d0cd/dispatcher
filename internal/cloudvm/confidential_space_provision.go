@@ -113,6 +113,14 @@ func (g *GCPProvider) createAgentFirewall(ctx context.Context, name, cidr, runID
 		return err
 	}
 	_, err := runCLI(ctx, "gcloud", gcpAgentFirewallCreateArgs(name, name, cidr, runID, g.project)...)
+	if err != nil && strings.Contains(err.Error(), "already exists") {
+		// A prior run leaked this per-workload firewall (its best-effort reap
+		// failed), which would otherwise permanently block re-running the same
+		// workload. Replace it: delete the stale rule and recreate it scoped to
+		// this run's egress CIDR.
+		_, _ = runCLI(ctx, "gcloud", gcpAgentFirewallDeleteArgs(name, g.project)...)
+		_, err = runCLI(ctx, "gcloud", gcpAgentFirewallCreateArgs(name, name, cidr, runID, g.project)...)
+	}
 	return err
 }
 
@@ -156,6 +164,18 @@ func (g *GCPProvider) createConfidentialSpaceVM(ctx context.Context, opts VMOpti
 		}
 	}
 
+	// Past this point the VM (and, if requested, its agent-port firewall) already
+	// exist, so any early return must tear them down — CreateVM's error contract
+	// leaves the caller no handle to clean up (mirrors the firewall branch above).
+	teardown := func() {
+		cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if opts.ConfidentialAllowFrom != "" {
+			_ = g.deleteAgentFirewall(cctx, agentFirewallName(opts.Name))
+		}
+		_ = g.DestroyVM(cctx, opts.Name)
+	}
+
 	var instances []struct {
 		NetworkInterfaces []struct {
 			AccessConfigs []struct {
@@ -164,9 +184,11 @@ func (g *GCPProvider) createConfidentialSpaceVM(ctx context.Context, opts VMOpti
 		} `json:"networkInterfaces"`
 	}
 	if err := json.Unmarshal(output, &instances); err != nil {
+		teardown()
 		return nil, fmt.Errorf("cannot parse gcloud output: %w", err)
 	}
 	if len(instances) == 0 {
+		teardown()
 		return nil, fmt.Errorf("no instances created")
 	}
 	ip := ""
