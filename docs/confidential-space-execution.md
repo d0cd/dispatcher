@@ -1,6 +1,6 @@
 # Confidential Space execution model
 
-**Status:** design + phased build. The verifier is done and golden-validated
+**Status:** built + live-validated end-to-end (hardware-validated `dispatcher run`; see the "What's built" table below and confidential-computing.md §6). The verifier is golden-validated
 (`docs/confidential-attestation-plan.md`); this doc is how a `dispatcher run`
 actually *executes* on GCP Confidential Space, which is a distinct execution
 path from the SSH-into-a-VM model every current adapter uses.

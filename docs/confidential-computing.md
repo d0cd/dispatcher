@@ -1,7 +1,7 @@
 # Spec: Confidential computing (secure jobs)
 
 **Status:** Implemented end-to-end on all three clouds — provisioning + verifier cores + pinned ARK/AWS roots + the in-TEE measured agent and live evidence fetch. The raw SEV-SNP report parser is golden-validated against a report captured on GCP hardware (GCP's own run path uses Confidential Space). Residual: on the standard AWS SEV-SNP / Azure MAA paths the scp'd agent isn't in the launch measurement (the measured `profile` backends and GCP Confidential Space close it). Cert revocation is enforced on the AMD-cert-chain paths (AWS, Azure `profile: azure-snp`) via the AMD KDS CRL; MAA per-component TCB mapping remains.
-**Related:** ROADMAP Theme 6.
+**Related:** [ROADMAP](ROADMAP.md) → "Confidential computing (secure jobs)".
 
 Run a workload on a TEE-backed VM (hardware-encrypted memory) so the cloud
 provider can't read its data *in use* — **and prove it** via attestation before
@@ -269,7 +269,7 @@ warned.
 - The **verify-and-gate flow**: pluggable per-provider `Attester`, post-boot
   verify that **destroys the VM** on failure, verdict recorded on run state.
 - **Verifier cores** behind the per-provider `Attester`: raw SEV-SNP report parse
-  + ECDSA-P384/SHA-384 signature + VCEK/VLEK←ASK←ARK chain — **hand-rolled on Go
+  + ECDSA-P384/SHA-384 signature + VCEK←ASK←ARK (VLEK←ASVK←ARK on AWS) chain — **hand-rolled on Go
   stdlib** (`crypto/ecdsa`/`x509`/`encoding/binary`, `internal/attest/snp.go`) on
   the **Azure measured direct-SNP** path, and via **go-sev-guest** on the **AWS**
   VLEK path; token JWS (`go-jose/v4`) for **Azure MAA** (compliance/type/measurement
@@ -301,7 +301,7 @@ warned.
   GCP's own run path is **Confidential Space** (Google-signed EAT/JWS + image-digest
   allowlist), not the raw report. ✅ **Azure MAA** claim names + JWKS fetch/pinning +
   guest agent implemented; ✅ **AWS VLEK** — AWS masks the chip id and signs with VLEK
-  not VCEK, so verification uses a `VLEK→ASK→ARK` path (via go-sev-guest; ARK/ASK-Milan
+  not VCEK, so verification uses a `VLEK→ASVK→ARK` path (via go-sev-guest; ARK/ASK-Milan
   roots match).
 - **MAA TCB mapping** — MAA reports per-component SVNs, not one TCB, so the MAA path
   can't compare against `minTCB`. Rather than silently ignore it, the MAA attester
@@ -343,8 +343,10 @@ increment 2/3) is trusted.
 ## 8. Decisions
 
 - **Measurement bar — EXACT (R7).** Allowlist of known-good launch measurements per
-  pinned vendor confidential image; reject anything else. dispatcher ships a base
-  allowlist; operators extend it for custom images.
+  pinned vendor confidential image; reject anything else. dispatcher ships **no** base
+  allowlist: on the standard SEV-SNP / MAA paths the operator supplies
+  `confidential.measurements` (an empty allowlist fails closed), and the measured
+  `profile` backends resolve it from the pin registry (§5).
 - **Guest-agent delivery — vendor image (C), custom-image escape hatch (B), drop
   cloud-init (A).** Use the pinned vendor confidential image's built-in, **measured**
   attestation agent (Azure guest-attestation/MAA, GCP Confidential Space, AWS image

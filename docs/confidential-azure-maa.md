@@ -1,6 +1,6 @@
 # Azure confidential runs (MAA) — design
 
-**Status:** design, grounded by a live spike. Azure confidential VMs are
+**Status:** implemented + live-validated end-to-end (the MAA adapter is run-reachable and hardware-validated; measured-boot PCR pinning remains infra-gated). Azure confidential VMs are
 SSH-able SEV-SNP VMs, so they run through the existing `CloudVMAdapter` +
 `verifyConfidential` → `azureAttester` flow — much more reuse than GCP CS. But a
 live spike (Ubuntu 24.04 CVM, `Standard_DC2ads_v5`) turned up findings that

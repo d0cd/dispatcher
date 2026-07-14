@@ -42,7 +42,7 @@ configured RG/project; Azure auto-created VNet handled best-effort).
 | Item | Effort | Impact |
 |---|---|---|
 | **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. At minimum, warn when `outputs:` is set but unretrievable. | M | Medium |
-| **Azure per-run firewall** — AWS (per-run SG) and Hetzner inject SSH ingress; `az vm create` opens tcp/22 by default so it works, but `--allow-ssh-from` isn't honored on Azure (an NSG rule). | S | Low |
+| **Per-run SSH firewall beyond Hetzner** — `--allow-ssh-from` is honored only on hetzner-vm today; the CLI (`run.go`) rejects it for every other target. AWS has provider-level per-run-SG restriction wired but it's unreachable until the CLI gate widens; GCP/Azure/Lima/Kubernetes have no per-run firewall (Azure `az vm create` opens tcp/22 by default; a scoped NSG rule is unimplemented). Widen the gate + add the GCP/Azure NSG/firewall rules. | S | Low |
 | **Spot/preemptible support** — lowest-cost-success is the headline and the planner advises spot, but there's no spot provisioning. Surface as "variable/evictable, not estimable" rather than a wrong precise price. | L | Medium |
 
 ## Confidential computing (secure jobs)

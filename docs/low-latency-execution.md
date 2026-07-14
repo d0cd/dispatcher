@@ -158,10 +158,10 @@ aggregate:
 **Execution & scheduling:**
 - Each shard is a run on the fast backend (its own microVM/sandbox), so isolation,
   cleanup, and reconnect come from the existing machinery.
-- Scheduling reuses the duration history already recorded in
-  `internal/cost/history.go`: **Longest-Processing-Time** assignment when past
-  per-item/per-shard durations exist, round-robin otherwise. Concurrency is capped
-  (a `shard.maxParallel`, defaulting to a sane fraction of host capacity).
+- Scheduling assigns items **round-robin** today; Longest-Processing-Time
+  assignment from the duration history in `internal/cost/history.go` is planned
+  (once per-shard history accrues — see ROADMAP). Concurrency is capped
+  (a `shard.maxParallel`, defaulting to 4 when unset).
 
 **Aggregation & failure:**
 - Each shard's declared `outputs` are rsynced back into a per-shard subdir under

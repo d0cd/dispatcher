@@ -69,7 +69,7 @@ dispatcher confidential pins        # Show/pin/capture/build/check measured-imag
 | firecracker-vm | local-vm | CloudVMAdapter + FirecrackerProvider | Working (needs a KVM host; live-validated) |
 | kubernetes | kubernetes | K8sAdapter | Working (needs kubectl) |
 | hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated: provisioning + gc reap/safety (needs hcloud CLI) |
-| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = SEV-SNP (VLEK→ASK→ARK) verifier + measured agent, plus a Nitro Enclaves path (PCR0), both implemented and run-reachable; residual: the scp'd SEV-SNP agent isn't folded into the launch measurement (see confidential_aws.go SECURITY NOTE). |
+| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = SEV-SNP (VLEK→ASVK→ARK) verifier + measured agent, plus a Nitro Enclaves path (PCR0), both implemented and run-reachable; residual: the scp'd SEV-SNP agent isn't folded into the launch measurement (see confidential_aws.go SECURITY NOTE). |
 | gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = Confidential Space (measured agent image digest) with live evidence fetch; SEV-SNP verifier golden-validated on real hardware. |
 | azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Live-validated: provisioning + gc reap/teardown-cascade, and a ConfidentialVM (SEV-SNP, vTPM, secure boot) create+reap. Confidential = MAA path (JWKS pinned) and a measured direct-SNP path (`confidential.profile: azure-snp`, agent in PCR11), both implemented and run-reachable. |
 
