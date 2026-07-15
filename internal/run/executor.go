@@ -218,6 +218,76 @@ func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) (er
 	return e.executeEphemeral(ctx, r, handle, logWriter)
 }
 
+// supervision bundles the two per-handle background goroutines an ephemeral run
+// needs — the cost sampler (budget enforcement) and the watchdog heartbeat — so a
+// transient-failure retry can tear them down and re-arm them on the replacement
+// handle as one unit, rather than juggling two stop functions in lockstep.
+type supervision struct {
+	stopSampler  func()
+	stopWatchdog func()
+}
+
+func (s *supervision) stop() {
+	s.stopSampler()
+	s.stopWatchdog()
+}
+
+// superviseHandle starts the cost sampler and watchdog heartbeat bound to handle.
+func (e *Executor) superviseHandle(ctx context.Context, r *Run, handle *adapter.RunHandle, logWriter io.Writer) *supervision {
+	return &supervision{
+		stopSampler:  e.startCostSampler(ctx, r, func() error { return e.adapter.Terminate(context.Background(), handle) }, logWriter),
+		stopWatchdog: e.startEphemeralWatchdog(ctx, r, handle, logWriter),
+	}
+}
+
+// retryTransientFailure tears the failed attempt down and re-provisions once,
+// re-arming supervision (via sup) on the new handle. The run stays in Running
+// throughout so the budget keeps applying to the replacement VM. Returns the new
+// handle, its terminal state + error, and whether the retry produced a healthy
+// run. Supervision is stopped BEFORE teardown so a budget breach in the
+// re-provision window can't trip BudgetExceeded on the destroyed handle and burn
+// the run's only Running->BudgetExceeded transition.
+func (e *Executor) retryTransientFailure(ctx context.Context, r *Run, sup *supervision, logWriter io.Writer) (*adapter.RunHandle, types.RunState, error, bool) {
+	if logWriter != nil {
+		fmt.Fprintln(logWriter, "[dispatcher] retrying transient failure once")
+	}
+	r.RetryCount++
+	r.Failure = adapter.FailureDetails{}
+	sup.stop()
+
+	// Tear down the failed attempt so its VM/Job doesn't leak while re-provisioning;
+	// drop r.Handle so a failed re-provision doesn't clean the dead handle twice.
+	if _, cErr := e.adapter.Cleanup(context.Background(), r.Handle); cErr != nil {
+		dlog.L().Warn("retry.cleanup.failed", "run", r.ID, "err", cErr.Error())
+	}
+	r.Handle = nil
+
+	retryHandle, retryErr := e.adapter.Execute(ctx, r.Plan)
+	if retryErr != nil {
+		if logWriter != nil {
+			fmt.Fprintf(logWriter, "[dispatcher] retry execute failed: %v\n", retryErr)
+		}
+		// Supervision is already stopped; leave sup as no-ops so the caller's
+		// deferred sup.stop() is safe.
+		*sup = supervision{stopSampler: func() {}, stopWatchdog: func() {}}
+		return nil, types.RunStateExecutionFailed, nil, false
+	}
+	retryHandle.RunID = r.ID
+	r.Handle = retryHandle
+	_ = r.PersistHandle()
+	*sup = *e.superviseHandle(ctx, r, retryHandle, logWriter) // re-arm on the new handle
+
+	// We deliberately don't re-stream logs here — the original writer is closed.
+	state, err := e.waitForTerminal(ctx, retryHandle, r.Plan.Constraints.MaxDuration)
+	if err == nil && state != types.RunStateExecutionFailed {
+		return retryHandle, state, nil, true
+	}
+	if fr, ok := e.adapter.(adapter.FailureReporter); ok {
+		r.Failure = fr.FailureDetails(retryHandle)
+	}
+	return retryHandle, state, err, false
+}
+
 // executeEphemeral runs the post-execution lifecycle with guaranteed cleanup.
 func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	handle *adapter.RunHandle, logWriter io.Writer) error {
@@ -232,18 +302,14 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 		}
 	}()
 
-	stopSampler := e.startCostSampler(ctx, r, func() error { return e.adapter.Terminate(context.Background(), handle) }, logWriter)
-	// Call through the variable so a retry that restarts the sampler is honored.
-	defer func() { stopSampler() }()
-
-	// Execute's setup watchdog covers provisioning and source upload. Once a
-	// durable ephemeral workload is running, keep extending the same deadline
-	// while this executor owns it. Without this heartbeat, a correct long compute
-	// can self-destruct at the setup TTL even though the CLI is still attached.
-	stopWatchdog := e.startEphemeralWatchdog(ctx, r, handle, logWriter)
-	// Call through the variable so a retry can stop the old handle's heartbeat
-	// and replace it with one bound to the newly provisioned handle.
-	defer func() { stopWatchdog() }()
+	// Supervise the handle: the cost sampler (budget) and the watchdog heartbeat
+	// run for as long as this executor owns the run. The watchdog matters because
+	// Execute's setup TTL only covers provisioning; without a heartbeat a correct
+	// long compute could self-destruct mid-run even though the CLI is attached. A
+	// transient retry re-arms sup on the replacement handle; the deferred stop
+	// calls through the pointer so it always tears down the current supervision.
+	sup := e.superviseHandle(ctx, r, handle, logWriter)
+	defer func() { sup.stop() }()
 
 	// Stream logs (non-fatal)
 	if logWriter != nil {
@@ -284,71 +350,14 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 			fmt.Fprintf(logWriter, "[dispatcher] failure classified as %s: %s\n", kind, r.Failure.Message)
 		}
 		// Opt-in retry: only when the user explicitly asked AND the failure
-		// looks transient AND we haven't already retried.
+		// looks transient AND we haven't already retried. Don't re-provision a run
+		// the sampler already killed (BudgetExceeded is terminal).
 		retrySucceeded := false
 		if r.Plan.Constraints.RetryTransientFailures &&
 			kind == adapter.FailureTransient &&
 			r.RetryCount == 0 &&
-			!r.GetState().IsTerminal() { // don't re-provision a run the sampler already killed (BudgetExceeded)
-			if logWriter != nil {
-				fmt.Fprintf(logWriter, "[dispatcher] retrying transient failure once\n")
-			}
-			r.RetryCount++
-			r.Failure = adapter.FailureDetails{}
-			// Stop the original sampler BEFORE teardown/re-provision. It captured
-			// the now-doomed first handle and the run is still Running, so a budget
-			// breach during the (tens-of-seconds) re-provision window would trip
-			// BudgetExceeded on the destroyed handle and burn the run's only
-			// Running->BudgetExceeded transition — leaving the retry VM uncapped.
-			// A fresh sampler is armed on the new handle once Execute succeeds.
-			stopSampler()
-			// The watchdog closure also captures a handle. Stop it before destroying
-			// the failed attempt; otherwise it renews handle-1 forever while the
-			// replacement handle expires at its original TTL.
-			stopWatchdog()
-			stopWatchdog = func() {}
-			// Tear down the failed attempt's resources before re-provisioning.
-			// The retry overwrites r.Handle, so without this the first
-			// attempt's VM/Job would be orphaned and keep billing until the
-			// watchdog TTL or `dispatcher gc` reclaims it.
-			if _, cErr := e.adapter.Cleanup(context.Background(), handle); cErr != nil {
-				dlog.L().Warn("retry.cleanup.failed", "run", r.ID, "err", cErr.Error())
-			}
-			// The old handle is destroyed; drop it so a failed re-provision below
-			// doesn't leave the deferred cleanup running Cleanup on it a second
-			// time. Restored to the new handle only when Execute succeeds.
-			handle = nil
-			r.Handle = nil
-			// A retry is a fresh run from the adapter's perspective. The
-			// previous handle is dead; ask the adapter for a new one. Cloud
-			// VM re-provisioning lives behind adapter.Execute, so this path
-			// "just works" wherever Execute is itself safe to call twice
-			// (local, docker today; cloud-vm would re-provision a new VM).
-			if retryHandle, retryErr := e.adapter.Execute(ctx, r.Plan); retryErr == nil {
-				retryHandle.RunID = r.ID
-				handle = retryHandle
-				r.Handle = retryHandle
-				_ = r.PersistHandle()
-				// Arm a fresh cost sampler on the NEW handle (the original was
-				// already stopped before teardown) so the retry VM stays capped.
-				stopSampler = e.startCostSampler(ctx, r, func() error { return e.adapter.Terminate(context.Background(), handle) }, logWriter)
-				stopWatchdog = e.startEphemeralWatchdog(ctx, r, handle, logWriter)
-				// Wait for the new run. We deliberately don't re-stream logs
-				// here to keep the retry path narrow — the original log
-				// writer is closed.
-				state, err = e.waitForTerminal(ctx, handle, r.Plan.Constraints.MaxDuration)
-				if err == nil && state != types.RunStateExecutionFailed {
-					retrySucceeded = true
-				} else if fr, ok := e.adapter.(adapter.FailureReporter); ok {
-					// Retry also failed — capture details for the final
-					// run record. ClassifyFailure on the post-retry detail
-					// will say "permanent" by definition (we already gave
-					// it one shot).
-					r.Failure = fr.FailureDetails(handle)
-				}
-			} else if logWriter != nil {
-				fmt.Fprintf(logWriter, "[dispatcher] retry execute failed: %v\n", retryErr)
-			}
+			!r.GetState().IsTerminal() {
+			handle, state, err, retrySucceeded = e.retryTransientFailure(ctx, r, sup, logWriter)
 		}
 		if !retrySucceeded {
 			e.collectArtifacts(ctx, r, handle, logWriter) // crash dumps from the failed handle
