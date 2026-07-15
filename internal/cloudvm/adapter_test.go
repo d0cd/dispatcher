@@ -350,3 +350,18 @@ func execCommandExit(t *testing.T, code int) error {
 func TestNiceCommand_WrapsWorkload(t *testing.T) {
 	assert.Equal(t, "nice -n 10 python main.py", niceCommand("python main.py"))
 }
+
+// parseOOMEvidence confirms an OOM only from real kernel/cgroup evidence — a
+// kernel OOM-killer line or a non-zero cgroup oom_kill counter — and preserves
+// uncertainty (not OOM) when the evidence is absent.
+func TestParseOOMEvidence(t *testing.T) {
+	killLine := "[12345.6] Out of memory: Killed process 4242 (python) total-vm:16000000kB"
+	ev := parseOOMEvidence(killLine)
+	assert.True(t, ev.oomKilled, "a kernel OOM-killer line confirms OOM")
+	assert.Contains(t, ev.summary, "Killed process")
+
+	assert.True(t, parseOOMEvidence("oom_kill 3\n").oomKilled, "a non-zero cgroup oom_kill counter confirms OOM")
+	assert.False(t, parseOOMEvidence("oom_kill 0\n").oomKilled, "oom_kill 0 is not an OOM")
+	assert.False(t, parseOOMEvidence("").oomKilled, "no evidence → not OOM (preserve uncertainty)")
+	assert.False(t, parseOOMEvidence("some unrelated kernel line").oomKilled)
+}

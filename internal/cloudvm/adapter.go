@@ -460,18 +460,90 @@ func (a *CloudVMAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDet
 	if !ok {
 		return adapter.FailureDetails{Message: "no cloud vm state"}
 	}
+	// Capture kernel/cgroup OOM evidence from the still-alive VM before teardown,
+	// so diagnose can state OOM as a fact rather than a guess.
+	ev := captureFailureEvidence(state)
+
 	if !state.LastExitCodeRead {
-		return adapter.FailureDetails{
+		fd := adapter.FailureDetails{
 			Signal:  "SIGKILL",
 			Message: "workload terminated before exit code was captured (likely OOM or external kill)",
 		}
+		if ev.oomKilled {
+			fd.OOMKilled = true
+			fd.Message = "workload OOM-killed: " + ev.summary
+		}
+		return fd
 	}
 	fd := adapter.FailureDetails{ExitCode: state.LastExitCode}
 	if state.LastExitCode != 0 {
 		fd.Message = fmt.Sprintf("workload exited with code %d on %s VM %s",
 			state.LastExitCode, state.Provider, state.VMID)
 	}
+	// Kernel evidence turns a 137/SIGKILL guess into a confirmed OOM.
+	if ev.oomKilled {
+		fd.OOMKilled = true
+		fd.Message = "workload OOM-killed: " + ev.summary + " (" + fd.Message + ")"
+	}
 	return fd
+}
+
+// failureEvidence is the OOM verdict captureFailureEvidence extracts from a
+// failed VM's kernel log / cgroup before teardown.
+type failureEvidence struct {
+	oomKilled bool
+	summary   string // bounded, human-readable
+}
+
+// maxEvidenceSummary bounds the captured evidence line kept on the run record —
+// kernel lines can be long and workload-private detail shouldn't accumulate.
+const maxEvidenceSummary = 200
+
+// captureFailureEvidence best-effort SSHes the still-alive VM for OOM evidence:
+// the kernel OOM-killer lines and the cgroup oom_kill counter. Empty when the VM
+// is unreachable (already torn down / network gone) — absence is not evidence.
+func captureFailureEvidence(state *CloudVMState) failureEvidence {
+	// dmesg is root-restricted on stock images; try sudo then fall back. The
+	// cgroup memory.events oom_kill counter is world-readable.
+	cmd := "{ sudo -n dmesg 2>/dev/null || dmesg 2>/dev/null; } | grep -iE 'out of memory|oom-kill|killed process' | tail -5; " +
+		"cat /sys/fs/cgroup/memory.events 2>/dev/null | grep -E '^oom_kill '"
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	// Parse whatever stdout we get even on a non-zero exit: the trailing cgroup
+	// grep exits 1 when it finds nothing, which would otherwise discard a dmesg
+	// OOM line already on stdout. A total SSH failure just yields "" (not OOM).
+	out, _ := exec.CommandContext(ctx, "ssh", sshCmdArgs(state, cmd)...).Output()
+	return parseOOMEvidence(string(out))
+}
+
+// parseOOMEvidence classifies captured kernel/cgroup output. OOM is confirmed
+// only by a kernel OOM-killer line or a non-zero cgroup oom_kill counter;
+// otherwise the verdict is "not confirmed" (uncertainty preserved).
+func parseOOMEvidence(raw string) failureEvidence {
+	oom := false
+	summary := ""
+	for _, line := range strings.Split(raw, "\n") {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "out of memory") || strings.Contains(lower, "oom-kill") || strings.Contains(lower, "killed process") {
+			oom = true
+			if summary == "" {
+				summary = strings.TrimSpace(line)
+			}
+		}
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "oom_kill" && f[1] != "0" {
+			oom = true
+		}
+	}
+	if !oom {
+		return failureEvidence{}
+	}
+	if summary == "" {
+		summary = "cgroup oom_kill counter is non-zero"
+	}
+	if len(summary) > maxEvidenceSummary {
+		summary = summary[:maxEvidenceSummary] + "…"
+	}
+	return failureEvidence{oomKilled: true, summary: summary}
 }
 
 // Logs spawns `ssh ... tail -f` in a goroutine and returns immediately so
