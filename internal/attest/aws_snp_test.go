@@ -27,13 +27,13 @@ func TestPinARK_RejectsMismatchedRoot(t *testing.T) {
 }
 
 func TestAWSAttester_NotReadyAndNoFetch(t *testing.T) {
-	_, err := (&awsAttester{}).Verify(context.Background(),
+	_, err := (&awsSNPAttester{}).Verify(context.Background(),
 		types.ConfidentialRequirement{Required: true, Type: "sev-snp"})
 	require.Error(t, err, "no fetch wired must error, not panic")
 }
 
 func TestAWSAttester_PropagatesFetchFailure(t *testing.T) {
-	att := &awsAttester{
+	att := &awsSNPAttester{
 		fetchChain: func(string) ([]byte, error) { return nil, nil },
 		fetch: func(_ context.Context, _ []byte) (snpEvidence, error) {
 			return snpEvidence{}, assertErr("/dev/sev-guest unavailable")

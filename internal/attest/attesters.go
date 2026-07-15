@@ -23,10 +23,10 @@ func NewAzureAttester(keys map[string]crypto.PublicKey, issuer, baseURL string, 
 	return &azureAttester{keys: keys, issuer: issuer, mb: mb, fetch: endpointMAAFetch(baseURL)}
 }
 
-// NewAWSAttester verifies raw AWS SEV-SNP reports (go-sev-guest + the VLEK chain
+// NewAWSSNPAttester verifies raw AWS SEV-SNP reports (go-sev-guest + the VLEK chain
 // from AMD KDS) from the agent endpoint.
-func NewAWSAttester(baseURL string) Attester {
-	return &awsAttester{fetchChain: fetchVLEKChainFromKDS, fetch: endpointSNPFetch(baseURL)}
+func NewAWSSNPAttester(baseURL string) Attester {
+	return &awsSNPAttester{fetchChain: fetchVLEKChainFromKDS, fetch: endpointSNPFetch(baseURL)}
 }
 
 // endpointMAAFetch reads MAA evidence (the signed token) from the agent's

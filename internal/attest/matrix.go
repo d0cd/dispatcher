@@ -14,7 +14,7 @@ import (
 //
 // Every cell here must match the corresponding verifier: csAttester
 // (confidential_space.go), azureAttester (maa.go), azureSNPAttester
-// (azure_snp.go), awsAttester (aws_snp.go), nitroAttester (nitro.go), and the
+// (azure_snp.go), awsSNPAttester (aws_snp.go), nitroAttester (nitro.go), and the
 // shared applyPolicy (attestation_policy.go). TestMatrix_GroundedInCode ties the
 // security-critical cells to the actual verifier behavior.
 
