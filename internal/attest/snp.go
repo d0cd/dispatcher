@@ -132,12 +132,11 @@ func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) erro
 	return fmt.Errorf("snp ASK chains to none of the %d pinned AMD roots", len(roots))
 }
 
-// snpEvidence is what the per-VM fetch returns: the raw report, the AMD cert
-// chain proving the firmware key, and the in-TEE channel public key the report
-// binds. The ARK is pinned on the attester, not fetched from the guest.
+// snpEvidence is what the per-VM fetch returns: the raw report and the in-TEE
+// channel public key the report binds. The ARK is pinned on the attester, not
+// fetched from the guest.
 type snpEvidence struct {
 	report     []byte
-	vcek, ask  *x509.Certificate
 	channelKey []byte
 }
 
