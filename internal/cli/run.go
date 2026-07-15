@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -23,6 +24,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/shard"
 	"github.com/d0cd/dispatcher/internal/target"
 	"github.com/d0cd/dispatcher/internal/types"
+	"github.com/d0cd/dispatcher/internal/workload"
 )
 
 var runFlags struct {
@@ -227,6 +229,26 @@ func runRun(cmd *cobra.Command, args []string) error {
 	a, err := adapterForPlan(cmd.Context(), p)
 	if err != nil {
 		return err
+	}
+
+	// Preflight external inputs before provisioning: a bounded Range read of each
+	// DISPATCHER_INPUT* URI catches a 403/404 source failure here — before a paid
+	// VM is created — instead of after staging fails on the box. A definitive
+	// source error aborts; a transport error also aborts (don't pay to provision
+	// against an unreachable source) but is labeled as possibly transient.
+	env, _ := workload.LoadDotEnv(p.Workload.Source.Path) // best-effort; refs also come from spec env
+	if env == nil {
+		env = map[string]string{}
+	}
+	for k, v := range p.Workload.Env {
+		env[k] = v // spec-level env wins over .env
+	}
+	if refs := workload.InputRefs(env); len(refs) > 0 {
+		client := &http.Client{Timeout: 20 * time.Second}
+		if err := workload.PreflightInputs(cmd.Context(), refs, client); err != nil {
+			return fmt.Errorf("input preflight failed: %w", err)
+		}
+		dim.Fprintf(os.Stderr, "Preflighted %d external input(s)\n", len(refs))
 	}
 
 	// Create and execute run
