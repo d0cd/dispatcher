@@ -157,8 +157,25 @@ func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) (er
 	// reaped mid-run.
 	saveRun(r)
 
-	handle, err := e.adapter.Execute(ctx, r.Plan)
+	// Bill the provisioning/staging phase, not only the running workload:
+	// adapter.Execute provisions + uploads + starts the workload (minutes for a
+	// cloud VM), and the billable clock starts at VM creation. Start the cost
+	// sampler now — no handle exists yet, so a budget breach here cancels the
+	// provisioning context to abort staging rather than terminating a handle.
+	execCtx, cancelExec := context.WithCancel(ctx)
+	defer cancelExec()
+	stopProvSampler := e.startCostSampler(ctx, r, func() error { cancelExec(); return nil }, logWriter)
+
+	handle, err := e.adapter.Execute(execCtx, r.Plan)
+	stopProvSampler()
 	if err != nil {
+		// If the sampler tripped the budget mid-provisioning, the run is already
+		// BudgetExceeded (terminal) — surface that, don't relabel it a workload
+		// failure. The adapter's own teardown reclaims any partial provisioning.
+		if r.GetState() == types.RunStateBudgetExceeded {
+			saveRun(r)
+			return fmt.Errorf("budget exceeded during provisioning (run %s)", r.ID)
+		}
 		r.SetError(types.RunStateExecutionFailed, err)
 		return fmt.Errorf("execution failed: %w", err)
 	}
@@ -205,7 +222,7 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 		}
 	}()
 
-	stopSampler := e.startCostSampler(ctx, r, handle, logWriter)
+	stopSampler := e.startCostSampler(ctx, r, func() error { return e.adapter.Terminate(context.Background(), handle) }, logWriter)
 	// Call through the variable so a retry that restarts the sampler is honored.
 	defer func() { stopSampler() }()
 
@@ -304,7 +321,7 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 				_ = r.PersistHandle()
 				// Arm a fresh cost sampler on the NEW handle (the original was
 				// already stopped before teardown) so the retry VM stays capped.
-				stopSampler = e.startCostSampler(ctx, r, handle, logWriter)
+				stopSampler = e.startCostSampler(ctx, r, func() error { return e.adapter.Terminate(context.Background(), handle) }, logWriter)
 				stopWatchdog = e.startEphemeralWatchdog(ctx, r, handle, logWriter)
 				// Wait for the new run. We deliberately don't re-stream logs
 				// here to keep the retry path narrow — the original log
@@ -550,12 +567,20 @@ func CostSampleInterval() time.Duration {
 	return time.Duration(costSampleInterval.Load())
 }
 
-// startCostSampler periodically computes the run's live cost and terminates
-// the workload if PlanConstraints.MaxEstimatedCostUSD is breached. Returns a
-// stop function that cancels the sampler; callers must defer it.
-func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter.RunHandle, logWriter io.Writer) func() {
+// startCostSampler periodically computes the run's live cost and, if
+// PlanConstraints.MaxEstimatedCostUSD is breached, transitions the run to
+// BudgetExceeded and calls terminate to stop the billable work — Terminate on a
+// running handle, or (during provisioning, before a handle exists) cancel of the
+// provisioning context. Returns a stop function that cancels the sampler; callers
+// must defer it.
+func (e *Executor) startCostSampler(ctx context.Context, r *Run, terminate func() error, logWriter io.Writer) func() {
 	budget := r.Plan.Constraints.MaxEstimatedCostUSD
-	if budget <= 0 {
+	// Run the tracker whenever there's a budget to enforce OR a priced estimate to
+	// surface live — so `list` and the persisted record reflect real-time spend
+	// (not $0.00) and the billable clock survives a CLI crash. Skip only free or
+	// unpriced runs (local, docker) where there's nothing to track or enforce.
+	priced := r.Plan.Recommendation != nil && r.Plan.Recommendation.EstimatedCost.Value > 0
+	if budget <= 0 && !priced {
 		return func() {}
 	}
 
@@ -578,7 +603,11 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter
 				return
 			case <-ticker.C:
 				live := r.ComputeLiveCost()
-				if live.Value <= budget {
+				// Persist live spend each tick so `list`/the record track cost
+				// through provisioning, run, and teardown — and survive a crash.
+				r.setCost(live)
+				saveRun(r)
+				if budget <= 0 || live.Value <= budget {
 					adjustSamplerRate(ticker, live.Value, budget, base)
 					continue
 				}
@@ -607,7 +636,7 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, handle *adapter
 					"budget_usd", budget,
 					"overshoot_usd", overshoot,
 					"confidence", string(live.Confidence))
-				if termErr := e.adapter.Terminate(context.Background(), handle); termErr != nil {
+				if termErr := terminate(); termErr != nil {
 					dlog.L().Error("budget.terminate.failed",
 						"run", r.ID, "err", termErr.Error())
 				}

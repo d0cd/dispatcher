@@ -863,6 +863,20 @@ func rsyncUploadArgs(state *CloudVMState, sourcePath, dest string) ([]string, er
 	return append(args, sourcePath+"/", dest), nil
 }
 
+// controlPlaneNiceness lowers the workload's CPU scheduling priority so a
+// CPU-saturating job can't starve dispatcher's on-VM control plane — sshd, the
+// watchdog-renewal SSH, and log streaming — which otherwise surfaces as SSH
+// timeouts mid-run. The workload author does nothing; the nicer priority only
+// yields CPU when the box is contended, so throughput is unaffected when idle.
+const controlPlaneNiceness = 10
+
+// niceCommand wraps a workload command so it runs at lower CPU priority, leaving
+// headroom for the control plane. `nice` is coreutils (present on every image)
+// and propagates the wrapped command's exit code.
+func niceCommand(cmdStr string) string {
+	return fmt.Sprintf("nice -n %d %s", controlPlaneNiceness, cmdStr)
+}
+
 func startWorkloadOnVM(ctx context.Context, state *CloudVMState, w types.WorkloadSpec) error {
 	var cmdStr string
 	if len(w.Command) > 0 {
@@ -892,7 +906,7 @@ func startWorkloadOnVM(ctx context.Context, state *CloudVMState, w types.Workloa
 			"} > %s 2>&1\n"+
 			"echo $? > %s\n",
 		adapter.ShellQuote(state.RemoteDir),
-		cmdStr,
+		niceCommand(cmdStr),
 		adapter.ShellQuote(logPath),
 		adapter.ShellQuote(exitCodePath),
 	)

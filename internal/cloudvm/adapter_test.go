@@ -344,3 +344,9 @@ func execCommandExit(t *testing.T, code int) error {
 	require.Error(t, err)
 	return err
 }
+
+// The workload runs at lower CPU priority so it can't starve the on-VM control
+// plane (sshd, watchdog renewal, log streaming) under saturation.
+func TestNiceCommand_WrapsWorkload(t *testing.T) {
+	assert.Equal(t, "nice -n 10 python main.py", niceCommand("python main.py"))
+}
