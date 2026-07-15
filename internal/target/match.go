@@ -56,6 +56,24 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 		if req := RequiredTargetForProfile(c.Profile); req != "" && t.ID != req {
 			reasons = append(reasons, "confidential profile "+c.Profile+" requires target "+req)
 		}
+		// An attested run (attestation != off) needs the target's MEASURED backend:
+		// the standard SEV-SNP / MAA agents aren't in the launch measurement, so the
+		// run path refuses them. Feasibility must agree or the plan recommends a
+		// target run will reject. GCP Confidential Space needs no explicit profile.
+		if !strings.EqualFold(c.Attestation, "off") {
+			switch t.ID {
+			case "aws-vm":
+				if c.Profile != "nitro" {
+					reasons = append(reasons, "confidential attestation on aws-vm requires profile: nitro (the standard SEV-SNP agent is unmeasured)")
+				}
+			case "azure-vm":
+				if c.Profile != "azure-snp" {
+					reasons = append(reasons, "confidential attestation on azure-vm requires profile: azure-snp (the standard MAA agent is unmeasured)")
+				}
+			case "oci-vm":
+				reasons = append(reasons, "confidential attestation is not yet available on oci-vm")
+			}
+		}
 	}
 
 	// Sandbox requires isolation stronger than a bare host process (container or

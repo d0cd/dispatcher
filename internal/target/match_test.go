@@ -263,3 +263,34 @@ func TestCheckFeasibility_Sandbox(t *testing.T) {
 	assert.False(t, res.Feasible, "process-only isolation must not satisfy sandbox")
 	assert.Contains(t, joinReasons(res), "sandbox")
 }
+
+// An attested confidential run on aws-vm/azure-vm needs the measured profile the
+// run path demands (nitro/azure-snp); feasibility must agree or the plan
+// recommends a target the run then refuses.
+func TestCheckFeasibility_ConfidentialRequiresMeasuredProfile(t *testing.T) {
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{
+			Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp"}, // attestation defaults on, no profile
+		},
+	}
+	awsConf := types.TargetConfig{
+		ID: "aws-vm", Enabled: true,
+		Capabilities: types.Capabilities{
+			WorkloadKinds: []types.WorkloadKind{types.WorkloadKindScript},
+			Resources:     types.ResourceCapability{Confidential: types.ConfidentialCapability{Supported: true, Types: []string{"sev-snp"}}},
+		},
+	}
+	res := CheckFeasibility(awsConf, w)
+	assert.False(t, res.Feasible, "aws-vm confidential without profile:nitro must be infeasible")
+	assert.Contains(t, joinReasons(res), "nitro")
+
+	// With profile:nitro it's feasible.
+	w.Requirements.Confidential.Profile = "nitro"
+	assert.True(t, CheckFeasibility(awsConf, w).Feasible, joinReasons(CheckFeasibility(awsConf, w)))
+
+	// attestation:off (encrypted memory, unverified) needs no profile.
+	w.Requirements.Confidential.Profile = ""
+	w.Requirements.Confidential.Attestation = "off"
+	assert.True(t, CheckFeasibility(awsConf, w).Feasible, "attestation:off needs no measured profile")
+}

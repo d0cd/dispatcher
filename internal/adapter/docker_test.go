@@ -3,6 +3,7 @@ package adapter
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -85,4 +86,16 @@ func TestParseDockerInspect(t *testing.T) {
 		fd := parseDockerInspect("garbage")
 		assert.Contains(t, fd.Message, "unexpected shape")
 	})
+}
+
+// When `docker inspect` is unavailable (--rm removed the container), FailureDetails
+// must fall back to the docker-run client's exit code so an OOM/SIGKILLed
+// container (137) still gets a transient classification instead of being lost.
+func TestDockerFailureDetails_FallsBackToRunExitCode(t *testing.T) {
+	cmd := exec.Command("sh", "-c", "exit 137")
+	_ = cmd.Run() // populates ProcessState with exit 137
+	h := &RunHandle{ID: "dispatcher-no-such-container-xyz", State: &dockerState{cmd: cmd}}
+	fd := (&DockerAdapter{}).FailureDetails(h)
+	assert.Equal(t, 137, fd.ExitCode, "inspect unavailable → use the docker-run exit code")
+	assert.Equal(t, FailureTransient, ClassifyFailure(fd), "137 is a SIGKILL → transient (retryable)")
 }

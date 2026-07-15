@@ -47,6 +47,37 @@ func NewOCIProvider(region string) *OCIProvider {
 
 func (o *OCIProvider) Name() ProviderID { return ProviderOCI }
 
+// ociFlexSizing returns the OCPU/memory for a Flex shape from the catalog SKU the
+// planner selected, so the provisioned box matches what was costed. Falls back to
+// 2 OCPU / 16 GB for a shape not in the catalog.
+func ociFlexSizing(shape string) (ocpus int, memoryGB float64) {
+	for _, inst := range defaultInstances {
+		if inst.Provider == ProviderOCI && inst.Name == shape && inst.VCPUs > 0 {
+			return inst.VCPUs, inst.MemoryGB
+		}
+	}
+	return 2, 16
+}
+
+// reapByRunTag best-effort destroys any instance carrying this run's
+// dispatcher-run-id tag — used to clean up a launch whose OCID we never captured
+// (e.g. the blocking --wait-for-state was cancelled after the instance existed).
+func (o *OCIProvider) reapByRunTag(tags map[string]string) {
+	runID := tags["dispatcher-run-id"]
+	if runID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	vms, err := o.ListVMs(ctx, map[string]string{"dispatcher-run-id": runID})
+	if err != nil {
+		return
+	}
+	for _, vm := range vms {
+		_ = o.DestroyVM(ctx, vm.ID)
+	}
+}
+
 // SetRegion re-points the provider so create and teardown act on the same region.
 func (o *OCIProvider) SetRegion(region string) {
 	if region != "" {
@@ -161,9 +192,12 @@ func (o *OCIProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--output", "json",
 	)
 
-	// Flex shapes require an explicit OCPU/memory config; bare-metal shapes reject it.
+	// Flex shapes require an explicit OCPU/memory config; bare-metal shapes reject
+	// it. Size it from the catalog SKU the planner selected (and costed) so the
+	// provisioned box matches what was priced, not a fixed 2/16.
 	if strings.HasSuffix(shape, ".Flex") {
-		shapeConfig, _ := json.Marshal(map[string]any{"ocpus": 2, "memoryInGBs": 16})
+		ocpus, memoryGB := ociFlexSizing(shape)
+		shapeConfig, _ := json.Marshal(map[string]any{"ocpus": ocpus, "memoryInGBs": memoryGB})
 		f, err := adapter.WriteSecureTempFile("dispatcher-oci-shape-*.json", shapeConfig)
 		if err != nil {
 			return nil, fmt.Errorf("write shape config: %w", err)
@@ -206,6 +240,11 @@ func (o *OCIProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	// `--wait-for-state RUNNING` makes the single call block until the VM is up.
 	output, err := runCLI(ctx, "oci", args...)
 	if err != nil {
+		// launch creates the instance, THEN --wait-for-state blocks until RUNNING.
+		// A cancel/timeout during the wait would leave a billable instance behind
+		// (its OCID isn't in our output), so reap any instance carrying this run's
+		// tag before returning. Best-effort — nothing exists if launch failed early.
+		o.reapByRunTag(opts.Tags)
 		return nil, wrapExecError("oci compute instance launch", err)
 	}
 

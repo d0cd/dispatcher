@@ -185,6 +185,16 @@ func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) (er
 	handle.RunID = r.ID
 	r.Handle = handle
 
+	// The provisioning sampler could have tripped the budget as Execute was
+	// completing (its terminate=cancelExec had no handle to kill then). The run is
+	// now BudgetExceeded but a real VM exists — tear it down so it doesn't run
+	// uncapped, and don't proceed into the ephemeral lifecycle on a terminal run.
+	if r.GetState() == types.RunStateBudgetExceeded {
+		e.attemptCleanup(context.Background(), r)
+		saveRun(r)
+		return fmt.Errorf("budget exceeded during provisioning (run %s)", r.ID)
+	}
+
 	// Persist handle immediately — if CLI crashes after this point,
 	// we can reconnect using the persisted state.
 	if err := r.PersistHandle(); err != nil {

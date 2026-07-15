@@ -185,3 +185,42 @@ func TestOCIListVMs_FiltersByFreeformTags(t *testing.T) {
 	require.Len(t, vms, 1, "only the running instance matching the run-id tag")
 	assert.Equal(t, "a", vms[0].ID)
 }
+
+func TestOCIFlexSizing_FromCatalog(t *testing.T) {
+	// A selected Flex SKU is sized from its catalog entry, not a fixed 2/16.
+	o, m := ociFlexSizing("VM.Standard.E5.Flex")
+	assert.Equal(t, 4, o)
+	assert.Equal(t, 32.0, m)
+	// An unknown shape falls back to the safe default.
+	o2, m2 := ociFlexSizing("VM.Nonexistent.Flex")
+	assert.Equal(t, 2, o2)
+	assert.Equal(t, 16.0, m2)
+}
+
+// A launch whose --wait-for-state is cancelled after the instance was created
+// must be reaped by its run tag, not leaked.
+func TestOCICreateVM_ReapsLeakOnLaunchFailure(t *testing.T) {
+	withOCIEnv(t)
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	terminated := ""
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		j := strings.Join(args, " ")
+		switch {
+		case strings.Contains(j, "instance launch"):
+			return nil, fmt.Errorf("context canceled during --wait-for-state")
+		case strings.Contains(j, "instance list"):
+			return []byte(`{"data":[{"id":"ocid1.instance.oc1..leaked","lifecycle-state":"RUNNING","freeform-tags":{"dispatcher-run-id":"run_leak"}}]}`), nil
+		case strings.Contains(j, "instance terminate"):
+			terminated = j
+			return []byte("{}"), nil
+		default:
+			return []byte(`{"data":[]}`), nil
+		}
+	}
+	o := NewOCIProvider("us-phoenix-1")
+	_, err := o.CreateVM(context.Background(), VMOptions{Name: "x", Tags: map[string]string{"dispatcher-run-id": "run_leak", "dispatcher": "true"}})
+	require.Error(t, err)
+	assert.Contains(t, terminated, "instance terminate", "a leaked launch must be reaped by run tag")
+	assert.Contains(t, terminated, "ocid1.instance.oc1..leaked")
+}

@@ -227,10 +227,23 @@ func (d *DockerAdapter) FailureDetails(h *RunHandle) FailureDetails {
 		"--format", "{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}",
 		h.ID,
 	).Output()
-	if err != nil {
-		return FailureDetails{Message: "docker inspect unavailable (container may have been removed)"}
+	if err == nil {
+		return parseDockerInspect(string(out))
 	}
-	return parseDockerInspect(string(out))
+	// inspect is gone (`--rm` removed the container, or a daemon hiccup). Fall back
+	// to the foreground `docker run` client's exit code, which Status() already
+	// captured via Wait() and which equals the container's exit code — so an
+	// OOM/SIGKILLed container (137) still gets classified transient and retried,
+	// instead of being lost as an unknown failure.
+	if ds, ok := h.State.(*dockerState); ok && ds.cmd != nil && ds.cmd.ProcessState != nil {
+		code := ds.cmd.ProcessState.ExitCode()
+		fd := FailureDetails{ExitCode: code}
+		if code != 0 {
+			fd.Message = fmt.Sprintf("container exited with code %d (docker inspect unavailable)", code)
+		}
+		return fd
+	}
+	return FailureDetails{Message: "docker inspect unavailable (container may have been removed)"}
 }
 
 // parseDockerInspect turns the `{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}`

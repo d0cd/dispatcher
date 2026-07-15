@@ -702,6 +702,21 @@ func TestNewLiveCatalog_EmptyFetchIsSkippedNotGPUSeeded(t *testing.T) {
 		"an empty fetch must not be back-filled with static GPU instances")
 }
 
+// A live feed returns only general-purpose rows (no feed sets Confidential), so
+// the static confidential SKU must be back-filled — otherwise a confidential run
+// finds no catalog match and falls back to the coarse rate card.
+func TestNewLiveCatalog_SeedsConfidentialSKUs(t *testing.T) {
+	cat, _, err := NewLiveCatalog(context.Background(),
+		&fakeFetcher{provider: ProviderAzure, instances: []InstanceType{
+			{Name: "Standard_D2s_v3", Provider: ProviderAzure, VCPUs: 2, MemoryGB: 8, PricePerHour: 0.096, Arch: "x86_64"},
+		}},
+	)
+	require.NoError(t, err)
+	conf := cat.FindCheapestForProvider(ProviderAzure, InstanceRequirements{Confidential: true})
+	require.NotEmpty(t, conf, "the confidential SKU must be back-filled for a fetched provider")
+	assert.True(t, conf[0].Confidential, "the seeded SKU is the confidential one")
+}
+
 func TestNewLiveCatalog_SkipsOnTransientError(t *testing.T) {
 	// Bias is toward "skip and continue" — a partial catalog is more useful
 	// than no catalog, especially during pre-flight commands like `audit`.

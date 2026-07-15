@@ -190,7 +190,12 @@ func (a *K8sAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails
 	if !ok {
 		return adapter.FailureDetails{Message: "no k8s state"}
 	}
-	cmd := exec.Command("kubectl", "get", "pod", state.PodName,
+	// Bounded timeout: FailureDetails runs before teardown, so an unreachable /
+	// black-holed API server (TCP up, no HTTP response) must not hang the executor
+	// indefinitely and strand the Job — fall through to "unavailable" instead.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "kubectl", "get", "pod", state.PodName,
 		"-n", state.Namespace,
 		"-o", "jsonpath={.status.containerStatuses[0].state.terminated}")
 	out, err := cmd.Output()

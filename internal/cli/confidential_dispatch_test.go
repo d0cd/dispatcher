@@ -42,13 +42,18 @@ func TestDispatch_AWSNitroProfileIsReachable(t *testing.T) {
 	assert.True(t, usesAWSNitro(p), "confidential.profile: nitro must select the Nitro path")
 }
 
-// The default (no profile) Azure route fails closed because its old MAA agent
-// was delivered post-boot and was not part of the measured launch chain.
+// The default (no profile) Azure confidential route fails closed at PLAN time:
+// feasibility requires the measured profile the run path demands, so the plan
+// never recommends azure-vm (whose standard MAA agent isn't measured) and the
+// failure surfaces early with clear guidance. (The run-path defense-in-depth for
+// a hand-forced plan is covered by TestAdapterForPlan_ConfidentialRunFailsClosedNotPlain.)
 func TestDispatch_DefaultAzureProfileFailsClosed(t *testing.T) {
-	p := buildConfidentialPlan(t, "azure-vm", "  attestation: required\n")
-	assert.False(t, usesAzureSNP(p))
-	_, err := adapterForPlan(context.Background(), p)
-	require.Error(t, err)
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.py"), []byte(`print("hi")`), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatcher.yaml"), []byte("confidential:\n  attestation: required\n"), 0o644))
+
+	_, err := plan.Build(dir, types.PlanConstraints{TargetName: "azure-vm"}, nil)
+	require.Error(t, err, "confidential azure-vm without profile: azure-snp must be infeasible")
 	assert.Contains(t, err.Error(), "azure-snp")
 }
 

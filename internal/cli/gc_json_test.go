@@ -183,3 +183,12 @@ func TestGC_ProtectsCorruptRecordVMByRecoveredPlanID(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out), &report))
 	assert.Equal(t, 0, report.Found, "a corrupt record's VM must be protected, not reaped")
 }
+
+// Every provisionable cloud-VM target must be discoverable by gc, or an orphaned
+// VM of that provider bills forever and never appears in `dispatcher gc`.
+func TestGCDiscoversAllCloudTargets(t *testing.T) {
+	for _, target := range []string{"hetzner-vm", "aws-vm", "gcp-vm", "azure-vm", "oci-vm"} {
+		_, ok := gcProviderCLIs[target]
+		assert.True(t, ok, "gc must discover %s (it's a provisionable target) or it leaks orphaned VMs invisibly", target)
+	}
+}

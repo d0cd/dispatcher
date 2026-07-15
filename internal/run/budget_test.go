@@ -16,8 +16,10 @@ import (
 )
 
 type budgetAdapter struct {
-	terminated   atomic.Bool
-	blockExecute bool // when set, Execute blocks until its context is canceled (models slow provisioning)
+	terminated     atomic.Bool
+	blockExecute   bool          // when set, Execute blocks until its context is canceled (models slow provisioning)
+	executeIgnores time.Duration // when >0, Execute sleeps this long ignoring cancel, then returns a handle (models provisioning that completed as the budget tripped)
+	cleanupCalls   atomic.Int32
 }
 
 func (b *budgetAdapter) ID() string { return "test" }
@@ -29,6 +31,10 @@ func (b *budgetAdapter) EstimateCost(context.Context, types.WorkloadSpec) (types
 }
 func (b *budgetAdapter) Prepare(context.Context, *types.Plan) error { return nil }
 func (b *budgetAdapter) Execute(ctx context.Context, _ *types.Plan) (*adapter.RunHandle, error) {
+	if b.executeIgnores > 0 {
+		time.Sleep(b.executeIgnores) // provisioning completes despite the budget cancel
+		return &adapter.RunHandle{ID: "h", TargetID: "test"}, nil
+	}
 	if b.blockExecute {
 		<-ctx.Done() // provisioning is still in flight until the context is canceled
 		return nil, ctx.Err()
@@ -47,6 +53,7 @@ func (b *budgetAdapter) Terminate(context.Context, *adapter.RunHandle) error {
 	return nil
 }
 func (b *budgetAdapter) Cleanup(context.Context, *adapter.RunHandle) (*adapter.CleanupResult, error) {
+	b.cleanupCalls.Add(1)
 	return &adapter.CleanupResult{Success: true}, nil
 }
 
@@ -166,6 +173,38 @@ func TestExecutor_BudgetEnforcedDuringProvisioning(t *testing.T) {
 // A priced run with no budget must still track spend live so `list` and the
 // persisted record reflect real cost (not $0.00) and survive a CLI crash — the
 // tracker persists live cost even when there's nothing to enforce.
+// The provisioning sampler can trip the budget as Execute is completing (its
+// terminate=cancelExec had no handle to kill yet). When Execute then returns a
+// real handle, the executor must notice the run is already BudgetExceeded and
+// tear the VM down — not proceed into the ephemeral lifecycle and let it run
+// uncapped.
+func TestExecutor_BudgetTripRacingExecuteSuccess_TearsDown(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prev := SetCostSampleInterval(5 * time.Millisecond)
+	defer func() { SetCostSampleInterval(prev) }()
+
+	a := &budgetAdapter{executeIgnores: 120 * time.Millisecond} // budget trips during this window
+	exec := NewExecutor(a)
+	r := &Run{
+		ID:    "run_race_budget",
+		State: types.RunStateCreated,
+		Plan: &types.Plan{
+			Constraints: types.PlanConstraints{MaxEstimatedCostUSD: 0.00001},
+			Recommendation: &types.Recommendation{
+				Target:        "test",
+				EstimatedCost: types.CostEstimate{Value: 100, Currency: "USD", Confidence: types.ConfidenceHigh},
+			},
+			Workload: types.WorkloadSpec{Name: "job", DetectedKind: types.WorkloadKindScript},
+		},
+		Timeline: []PhaseMark{{State: types.RunStateCreated}},
+	}
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.Error(t, err)
+	assert.Equal(t, types.RunStateBudgetExceeded, r.GetState())
+	assert.Greater(t, a.cleanupCalls.Load(), int32(0), "the just-provisioned VM must be torn down, not left running uncapped")
+}
+
 func TestCostSampler_PersistsLiveCostForPricedRun(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	prev := SetCostSampleInterval(5 * time.Millisecond)

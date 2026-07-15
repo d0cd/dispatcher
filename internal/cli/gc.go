@@ -14,6 +14,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/run"
+	"github.com/d0cd/dispatcher/internal/types"
 )
 
 var gcFlags struct {
@@ -100,6 +101,12 @@ before running for real, especially with long-lived state directories.`,
 					unrecoverable = true
 				}
 			case !rec.State.IsTerminal():
+				activeRuns[rec.PlanID] = true
+			case rec.State == types.RunStateArtifactFailed:
+				// The executor deliberately preserved this VM for output recovery
+				// (its watchdog TTL is the lease). Protect it from reaping so gc
+				// doesn't destroy the outputs the operator still needs; the watchdog
+				// (or `dispatcher stop`) reclaims it.
 				activeRuns[rec.PlanID] = true
 			}
 		}
@@ -354,18 +361,24 @@ func init() {
 // override it to inject fakes.
 var durableAdaptersFn = durableAdapters
 
+// gcProviderCLIs maps every durable target gc can reap to the CLI whose presence
+// gates it. Every provisionable cloud-VM target MUST appear here — a target that
+// `dispatcher run` can create but gc can't discover leaks orphaned billing VMs
+// invisibly (TestGCDiscoversAllCloudTargets guards this).
+var gcProviderCLIs = map[string]string{
+	"lima-vm":    "limactl",
+	"kubernetes": "kubectl",
+	"hetzner-vm": "hcloud",
+	"aws-vm":     "aws",
+	"gcp-vm":     "gcloud",
+	"azure-vm":   "az",
+	"oci-vm":     "oci",
+}
+
 // durableAdapters returns cloud VM adapters whose CLIs are actually installed.
 func durableAdapters() []adapter.DurableAdapter {
-	cliChecks := map[string]string{
-		"lima-vm":    "limactl",
-		"kubernetes": "kubectl",
-		"hetzner-vm": "hcloud",
-		"aws-vm":     "aws",
-		"gcp-vm":     "gcloud",
-		"azure-vm":   "az",
-	}
 	var result []adapter.DurableAdapter
-	for id, cli := range cliChecks {
+	for id, cli := range gcProviderCLIs {
 		if _, err := exec.LookPath(cli); err != nil {
 			continue // CLI not installed, skip silently
 		}

@@ -82,21 +82,33 @@ func NewLiveCatalog(ctx context.Context, fetchers ...Fetcher) (*Catalog, []Skipp
 	return &Catalog{instances: seedStaticGPU(instances, fetched)}, skipped, nil
 }
 
-// seedStaticGPU backfills GPU instances from the static catalog for any provider
-// that was fetched live but whose feed returned no GPU rows (e.g. the Hetzner
-// and Azure feeds carry no GPU SKUs). Without this, a GPU workload on such a
-// provider resolves no instance type and is refused at provisioning even though
-// the provider offers GPUs. Providers whose live feed already has GPU rows, or
-// that were skipped entirely, are left untouched.
+// seedStaticGPU backfills the static catalog's GPU AND confidential SKUs for any
+// provider fetched live but whose feed carries none of them (live feeds return
+// only general-purpose rows — no provider feed sets GPUCount or Confidential).
+// Without this a GPU workload resolves no instance and is refused, and a
+// confidential run falls back to the coarse rate card (an overestimate that can
+// spuriously trip the budget gate) instead of the priced confidential SKU.
+// Providers whose feed already carries the SKU kind, or that were skipped, are
+// left untouched.
 func seedStaticGPU(instances []InstanceType, fetched map[ProviderID]bool) []InstanceType {
 	hasGPU := map[ProviderID]bool{}
+	hasConfidential := map[ProviderID]bool{}
 	for _, inst := range instances {
 		if inst.GPUCount > 0 {
 			hasGPU[inst.Provider] = true
 		}
+		if inst.Confidential {
+			hasConfidential[inst.Provider] = true
+		}
 	}
 	for _, inst := range defaultInstances {
-		if inst.GPUCount > 0 && fetched[inst.Provider] && !hasGPU[inst.Provider] {
+		if !fetched[inst.Provider] {
+			continue
+		}
+		switch {
+		case inst.GPUCount > 0 && !hasGPU[inst.Provider]:
+			instances = append(instances, inst)
+		case inst.Confidential && !hasConfidential[inst.Provider]:
 			instances = append(instances, inst)
 		}
 	}
