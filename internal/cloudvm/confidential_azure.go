@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto"
 	"fmt"
-	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -156,38 +155,6 @@ func NewAzureConfidentialAdapter(provider Provider, keys map[string]crypto.Publi
 	}
 }
 
-func (a *AzureConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
-	if a.agentBin == "" {
-		return nil, fmt.Errorf("azure confidential adapter has no agent binary configured")
-	}
-	a.resolveRegion(p)
-
-	keyPath, err := generateSSHKey(ctx, p.Metadata.ID)
-	if err != nil {
-		return nil, fmt.Errorf("generate ssh key: %w", err)
-	}
-	defer func() {
-		_ = os.Remove(keyPath)
-		_ = os.Remove(keyPath + ".pub")
-	}()
-
-	egress, err := detectEgressCIDR(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("scope confidential agent firewall: %w", err)
-	}
-	deps := azureDeps{
-		provider:   a.provider,
-		keys:       a.keys,
-		issuer:     a.issuer,
-		mb:         a.measuredBoot,
-		sshPubKey:  keyPath + ".pub",
-		sshUser:    a.config.SSHUser,
-		startAgent: azureStartAgent(a.agentBin, a.maaURL, keyPath, a.config.SSHUser, egress, a.provider),
-		waitReady:  waitForAgentEndpoint,
-	}
-	state, err := executeAzureConfidential(ctx, deps, p)
-	if err != nil {
-		return nil, err
-	}
-	return &adapter.RunHandle{ID: state.VMID, TargetID: a.targetID, State: state}, nil
+func (a *AzureConfidentialAdapter) Execute(context.Context, *types.Plan) (*adapter.RunHandle, error) {
+	return nil, fmt.Errorf("standard Azure MAA execution is disabled: its post-boot agent is not measured; use confidential.profile: azure-snp")
 }

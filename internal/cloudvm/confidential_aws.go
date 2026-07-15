@@ -145,39 +145,6 @@ func NewAWSConfidentialAdapter(provider Provider, agentBin string, cfg Config) *
 	}
 }
 
-func (a *AWSConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
-	if a.agentBin == "" {
-		return nil, fmt.Errorf("aws confidential adapter has no agent binary configured")
-	}
-	region := a.resolveRegion(p)
-	ami, err := resolveAWSConfidentialAMI(ctx, region)
-	if err != nil {
-		return nil, err
-	}
-	keyPath, err := generateSSHKey(ctx, p.Metadata.ID)
-	if err != nil {
-		return nil, fmt.Errorf("generate ssh key: %w", err)
-	}
-	defer func() {
-		_ = os.Remove(keyPath)
-		_ = os.Remove(keyPath + ".pub")
-	}()
-
-	egress, err := detectEgressCIDR(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("scope confidential agent firewall: %w", err)
-	}
-	deps := awsDeps{
-		provider:   a.provider,
-		image:      ami,
-		sshPubKey:  keyPath + ".pub",
-		sshUser:    a.config.SSHUser,
-		startAgent: awsStartAgent(a.agentBin, keyPath, a.config.SSHUser, egress, a.provider),
-		waitReady:  waitForAgentEndpoint,
-	}
-	state, err := executeAWSConfidential(ctx, deps, p)
-	if err != nil {
-		return nil, err
-	}
-	return &adapter.RunHandle{ID: state.VMID, TargetID: a.targetID, State: state}, nil
+func (a *AWSConfidentialAdapter) Execute(context.Context, *types.Plan) (*adapter.RunHandle, error) {
+	return nil, fmt.Errorf("standard AWS SEV-SNP execution is disabled: its post-boot agent is not measured; use confidential.profile: nitro")
 }

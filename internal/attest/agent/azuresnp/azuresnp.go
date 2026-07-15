@@ -1,10 +1,7 @@
 //go:build linux
 
-// Package azuresnpagent is the in-CVM agent for Azure confidential VMs using
-// direct SEV-SNP + vTPM attestation (Constellation-style, no MAA). It gathers the
-// SNP report + HCL runtime data + an AK-signed TPM quote over PCR11 (the UKI
-// carrying the agent) and serves the sealed exchange over TCP. Only this binary
-// links the vTPM/SNP evidence libraries (go-azguestattestation, go-tpm-tools).
+// Package azuresnpagent gathers direct Azure SEV-SNP + vTPM evidence. The
+// measured image bakes this agent into a dm-verity root and pins PCR11.
 package azuresnpagent
 
 import (
@@ -15,23 +12,30 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 
-	"github.com/edgelesssys/go-azguestattestation/maa"
-	"github.com/google/go-tpm-tools/client"
 	legacytpm "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
 
 	"github.com/d0cd/dispatcher/internal/attest/agent"
 )
 
-// akHandle is the persistent handle where Azure provisions the vTPM Attestation
-// Key on a confidential VM.
-const akHandle = tpmutil.Handle(0x81000003)
+const (
+	akHandle                  = tpmutil.Handle(0x81000003)
+	hclReportIndex            = tpmutil.Handle(0x1400001)
+	hclHeaderLength           = 0x20
+	snpReportLength           = 0x4a0
+	snpRuntimeDataPadding     = 0x14
+	azureTHIMCertificationURL = "http://169.254.169.254/metadata/THIM/amd/certification"
+	maxTHIMCertificationBytes = 2 << 20
+)
 
-// attestFunc gathers the direct-verification evidence for this run: the SNP report
-// + HCL runtime data (which binds the AK) via go-azguestattestation, and a vTPM
-// quote over PCR11 signed by the AK with extraData = the run+channel binding.
+// attestFunc gathers the SNP report and HCL runtime data, then asks Azure's
+// persistent vTPM AK to quote PCR11 with extraData bound to the run nonce and
+// ephemeral channel key. It intentionally avoids parsing the unrelated UEFI
+// event log: PCR11 is verified directly, and eliminating that parser removes a
+// credential-boundary dependency on GO-2026-5298.
 func attestFunc() agent.AttestFunc {
 	return func(ctx context.Context, runNonce, channelPub []byte) (string, error) {
 		binding := agent.MAABindingNonce(runNonce, channelPub)
@@ -42,47 +46,49 @@ func attestFunc() agent.AttestFunc {
 		}
 		defer rwc.Close()
 
-		// SNP report + HCL runtime data + VCEK chain (fetched from AMD KDS).
-		params, err := maa.NewParameters(ctx, binding, http.DefaultClient, rwc)
+		snpReport, runtimeData, err := readAzureHCLReport(rwc)
 		if err != nil {
 			return "", fmt.Errorf("gather snp/runtime evidence: %w", err)
 		}
-
-		// A vTPM quote over PCR11, signed by the Azure AK, bound to this run.
-		ak, err := client.LoadCachedKey(rwc, akHandle, client.NullSession{})
+		vcekPEM, chainPEM, err := fetchAzureTHIMCertificates(ctx, http.DefaultClient)
 		if err != nil {
-			return "", fmt.Errorf("load vTPM AK: %w", err)
+			return "", fmt.Errorf("fetch vcek chain: %w", err)
 		}
-		defer ak.Close()
-		quote, err := ak.Quote(legacytpm.PCRSelection{Hash: legacytpm.AlgSHA256, PCRs: []int{11}}, binding)
+
+		selection := legacytpm.PCRSelection{Hash: legacytpm.AlgSHA256, PCRs: []int{11}}
+		quote, sig, err := legacytpm.Quote(rwc, akHandle, "", "", binding, selection, legacytpm.AlgNull)
 		if err != nil {
 			return "", fmt.Errorf("quote pcr11: %w", err)
 		}
-		sig, err := legacytpm.DecodeSignature(bytes.NewBuffer(quote.GetRawSig()))
+		pcrs, err := legacytpm.ReadPCRs(rwc, selection)
 		if err != nil {
-			return "", fmt.Errorf("decode quote signature: %w", err)
+			return "", fmt.Errorf("read pcr11: %w", err)
 		}
 		if sig.RSA == nil {
 			return "", fmt.Errorf("vTPM AK quote is not RSA-signed")
 		}
 
-		vcekDER, err := firstCertDER(params.VcekCert)
+		vcekDER, err := firstCertDER(vcekPEM)
 		if err != nil {
 			return "", fmt.Errorf("vcek: %w", err)
 		}
-		askDER, err := firstCertDER(params.VcekChain)
+		askDER, err := firstCertDER(chainPEM)
 		if err != nil {
 			return "", fmt.Errorf("ask: %w", err)
 		}
+		pcrMap := make(map[uint32][]byte, len(pcrs))
+		for idx, digest := range pcrs {
+			pcrMap[uint32(idx)] = digest
+		}
 
 		ev := agent.AzureSNPEvidence{
-			SNPReport:   params.SNPReport,
+			SNPReport:   snpReport,
 			VCEK:        vcekDER,
 			ASK:         askDER,
-			RuntimeData: params.RuntimeData,
-			Quote:       quote.GetQuote(),
+			RuntimeData: runtimeData,
+			Quote:       quote,
 			QuoteSig:    sig.RSA.Signature,
-			PCRs:        quote.GetPcrs().GetPcrs(),
+			PCRs:        pcrMap,
 			ChannelKey:  channelPub,
 		}
 		raw, err := json.Marshal(ev)
@@ -93,8 +99,48 @@ func attestFunc() agent.AttestFunc {
 	}
 }
 
-// firstCertDER returns the DER of the first PEM certificate block in b (the VCEK
-// leaf, or the ASK at the head of the KDS cert chain).
+func readAzureHCLReport(rwc io.ReadWriter) ([]byte, []byte, error) {
+	raw, err := legacytpm.NVReadEx(rwc, hclReportIndex, legacytpm.HandleOwner, "", 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	minimum := hclHeaderLength + snpReportLength + snpRuntimeDataPadding
+	if len(raw) <= minimum {
+		return nil, nil, fmt.Errorf("HCL report is shorter than expected: %d bytes", len(raw))
+	}
+	body := raw[hclHeaderLength:]
+	runtimeData, _, _ := bytes.Cut(body[snpReportLength+snpRuntimeDataPadding:], []byte{0})
+	return body[:snpReportLength], runtimeData, nil
+}
+
+func fetchAzureTHIMCertificates(ctx context.Context, client *http.Client) ([]byte, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, azureTHIMCertificationURL, http.NoBody)
+	if err != nil {
+		return nil, nil, err
+	}
+	req.Header.Set("Metadata", "True")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, nil, fmt.Errorf("THIM returned %s", resp.Status)
+	}
+	var result struct {
+		VcekCert         string `json:"vcekCert"`
+		CertificateChain string `json:"certificateChain"`
+	}
+	dec := json.NewDecoder(io.LimitReader(resp.Body, maxTHIMCertificationBytes))
+	if err := dec.Decode(&result); err != nil {
+		return nil, nil, err
+	}
+	if result.VcekCert == "" || result.CertificateChain == "" {
+		return nil, nil, fmt.Errorf("THIM response is missing VCEK certificate data")
+	}
+	return []byte(result.VcekCert), []byte(result.CertificateChain), nil
+}
+
 func firstCertDER(pemBytes []byte) ([]byte, error) {
 	block, _ := pem.Decode(pemBytes)
 	if block == nil {
@@ -106,8 +152,7 @@ func firstCertDER(pemBytes []byte) ([]byte, error) {
 	return block.Bytes, nil
 }
 
-// RunAgent serves the sealed-exchange API on addr, attesting via direct SNP+vTPM
-// evidence. The measured CVM image bakes this binary into the UKI.
+// RunAgent serves the sealed-exchange API on addr.
 func RunAgent(addr string) error {
 	return agent.RunServer(addr, attestFunc())
 }

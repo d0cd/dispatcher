@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -68,6 +69,19 @@ func TestExecute_FailsClosedWhenAttestationRequired(t *testing.T) {
 	require.Error(t, err, "attestation:required must fail closed until verification exists")
 	assert.Contains(t, err.Error(), "attestation")
 	assert.Equal(t, 0, mock.VMCount(), "must not provision a VM it can't attest")
+}
+
+func TestUnmeasuredStandardAttestationAdaptersFailClosed(t *testing.T) {
+	p := confidentialPlan(types.ConfidentialRequirement{Required: true, Attestation: "required"})
+	aws := NewAWSConfidentialAdapter(NewMockProvider(ProviderAWS), "/tmp/agent", Config{ProviderID: ProviderAWS})
+	_, err := aws.Execute(context.Background(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nitro")
+
+	azure := NewAzureConfidentialAdapter(NewMockProvider(ProviderAzure), nil, "", "", "/tmp/agent", attest.MAAMeasuredBoot{}, Config{ProviderID: ProviderAzure})
+	_, err = azure.Execute(context.Background(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure-snp")
 }
 
 func TestAttestationPreflight_OffIsAllowed(t *testing.T) {

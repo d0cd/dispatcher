@@ -1,0 +1,187 @@
+package cloudvm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestOCIShapeAndPlatformConfig(t *testing.T) {
+	decode := func(b []byte) map[string]any {
+		if b == nil {
+			return nil
+		}
+		var m map[string]any
+		require.NoError(t, json.Unmarshal(b, &m))
+		return m
+	}
+
+	// Non-confidential: a default VM shape, no platform-config.
+	shape, pc, err := ociShapeAndPlatformConfig(VMOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "VM.Standard.E4.Flex", shape)
+	assert.Nil(t, pc)
+
+	// sev: a VM shape with memory encryption on (no attestation report).
+	shape, pc, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "sev"})
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(shape, "VM."), "sev is a VM shape")
+	assert.Equal(t, true, decode(pc)["isMemoryEncryptionEnabled"])
+
+	// sev-snp uses a VM-scoped E5 guest, never the bare-metal host itself.
+	shape, pc, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "sev-snp"})
+	require.NoError(t, err)
+	assert.Equal(t, "VM.Standard.E5.Flex", shape)
+	assert.Equal(t, "AMD_VM", decode(pc)["type"])
+	assert.Equal(t, true, decode(pc)["isMemoryEncryptionEnabled"])
+
+	// An explicit instance type wins over the confidential default.
+	shape, _, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "sev-snp", InstanceType: "VM.Standard.E6.Flex"})
+	require.NoError(t, err)
+	assert.Equal(t, "VM.Standard.E6.Flex", shape)
+
+	_, _, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "sev-snp", InstanceType: "BM.Standard.E6.128"})
+	require.Error(t, err, "bare metal is not automatically a VM-scoped SNP guest")
+
+	// An unsupported confidential type is rejected.
+	_, _, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "tdx"})
+	require.Error(t, err)
+}
+
+func withOCIEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("DISPATCHER_OCI_COMPARTMENT_ID", "ocid1.compartment.oc1..cccc")
+	t.Setenv("DISPATCHER_OCI_AVAILABILITY_DOMAIN", "Uocm:PHX-AD-1")
+	t.Setenv("DISPATCHER_OCI_SUBNET_ID", "ocid1.subnet.oc1..ssss")
+	t.Setenv("DISPATCHER_OCI_IMAGE_ID", "ocid1.image.oc1..iiii")
+}
+
+func TestOCICreateVM_ConfidentialArgv(t *testing.T) {
+	withOCIEnv(t)
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+
+	var launchArgs []string
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "instance launch"):
+			launchArgs = args
+			return []byte(`{"data":{"id":"ocid1.instance.oc1..vvvv"}}`), nil
+		case strings.Contains(joined, "list-vnics"):
+			return []byte(`{"data":[{"public-ip":"203.0.113.7"}]}`), nil
+		default:
+			return []byte(`{"data":{}}`), nil
+		}
+	}
+
+	o := NewOCIProvider("us-phoenix-1")
+	vm, err := o.CreateVM(context.Background(), VMOptions{
+		Name:             "dispatcher-snp-job",
+		ConfidentialType: "sev-snp",
+		Tags:             map[string]string{"dispatcher-run-id": "run_1", "dispatcher": "true"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "ocid1.instance.oc1..vvvv", vm.ID)
+	assert.Equal(t, "203.0.113.7", vm.IP)
+
+	a := strings.Join(launchArgs, " ")
+	assert.Contains(t, a, "--compartment-id ocid1.compartment.oc1..cccc")
+	assert.Contains(t, a, "--subnet-id ocid1.subnet.oc1..ssss")
+	assert.Contains(t, a, "--image-id ocid1.image.oc1..iiii")
+	assert.Contains(t, a, "--availability-domain Uocm:PHX-AD-1")
+	assert.Contains(t, a, "--assign-public-ip true")
+	assert.Contains(t, a, "--platform-config file://", "a confidential launch must pass a platform-config")
+	assert.Contains(t, a, "--region us-phoenix-1")
+}
+
+func TestOCICreateVM_RequiresOCIDs(t *testing.T) {
+	// No env set → the required OCIDs are missing → fail closed before any CLI call.
+	o := NewOCIProvider("us-phoenix-1")
+	_, err := o.CreateVM(context.Background(), VMOptions{Name: "x", Tags: map[string]string{"dispatcher-run-id": "r"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DISPATCHER_OCI_")
+}
+
+func TestOCICreateVM_PublicIPFailureUsesFreshCleanupContext(t *testing.T) {
+	withOCIEnv(t)
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+
+	cleanupCalled := false
+	cleanupContextAlive := false
+	runCLI = func(ctx context.Context, _ string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "instance launch"):
+			return []byte(`{"data":{"id":"ocid1.instance.oc1..cleanup"}}`), nil
+		case strings.Contains(joined, "list-vnics"):
+			return nil, ctx.Err()
+		case strings.Contains(joined, "instance terminate"):
+			cleanupCalled = true
+			cleanupContextAlive = ctx.Err() == nil
+			return []byte(`{}`), nil
+		default:
+			return nil, fmt.Errorf("unexpected oci call: %s", joined)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := NewOCIProvider("us-phoenix-1").CreateVM(ctx, VMOptions{Name: "x"})
+	require.Error(t, err)
+	assert.True(t, cleanupCalled)
+	assert.True(t, cleanupContextAlive, "cleanup must not reuse the canceled provisioning context")
+}
+
+func TestOCIGetVM_MapsLifecycleState(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "list-vnics") {
+			return []byte(`{"data":[]}`), nil
+		}
+		return []byte(`{"data":{"id":"ocid1.instance.oc1..vvvv","lifecycle-state":"TERMINATED"}}`), nil
+	}
+	o := NewOCIProvider("us-phoenix-1")
+	vm, err := o.GetVM(context.Background(), "ocid1.instance.oc1..vvvv")
+	require.NoError(t, err)
+	assert.Equal(t, VMStateTerminated, vm.State)
+}
+
+func TestOCIDestroyVM_TerminatesForce(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	var got string
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		got = strings.Join(args, " ")
+		return []byte("{}"), nil
+	}
+	o := NewOCIProvider("")
+	require.NoError(t, o.DestroyVM(context.Background(), "ocid1.instance.oc1..vvvv"))
+	assert.Contains(t, got, "instance terminate")
+	assert.Contains(t, got, "--force")
+}
+
+func TestOCIListVMs_FiltersByFreeformTags(t *testing.T) {
+	withOCIEnv(t)
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	runCLI = func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"data":[
+			{"id":"a","lifecycle-state":"RUNNING","freeform-tags":{"dispatcher":"true","dispatcher-run-id":"run_1"}},
+			{"id":"b","lifecycle-state":"RUNNING","freeform-tags":{"dispatcher":"true","dispatcher-run-id":"run_2"}},
+			{"id":"c","lifecycle-state":"TERMINATED","freeform-tags":{"dispatcher":"true","dispatcher-run-id":"run_1"}}
+		]}`), nil
+	}
+	o := NewOCIProvider("us-phoenix-1")
+	vms, err := o.ListVMs(context.Background(), map[string]string{"dispatcher-run-id": "run_1"})
+	require.NoError(t, err)
+	require.Len(t, vms, 1, "only the running instance matching the run-id tag")
+	assert.Equal(t, "a", vms[0].ID)
+}

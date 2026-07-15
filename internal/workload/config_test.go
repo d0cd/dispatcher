@@ -28,7 +28,19 @@ func TestApplyConfig_Shard(t *testing.T) {
 	assert.Equal(t, "pytest --collect-only -q", spec.Shard.Discover)
 	assert.Equal(t, 4, spec.Shard.MaxParallel)
 	assert.Equal(t, []string{"results/"}, spec.Shard.Outputs)
+	assert.Equal(t, []string{"results/"}, spec.Outputs,
+		"aggregate outputs must be collected by each shard adapter")
 	assert.Equal(t, "continue", spec.Shard.OnShardFailure)
+}
+
+func TestApplyConfig_AggregateOutputsAreSanitizedAndMerged(t *testing.T) {
+	spec := &types.WorkloadSpec{Outputs: []string{"existing/"}}
+	ApplyConfig(spec, &DispatcherConfig{
+		Outputs:   []string{"top-level/", "existing/"},
+		Aggregate: &DispatchAggregateConfig{Outputs: []string{"shards/", "../private"}},
+	})
+	assert.Equal(t, []string{"shards/"}, spec.Shard.Outputs)
+	assert.Equal(t, []string{"top-level/", "existing/", "shards/"}, spec.Outputs)
 }
 
 func TestLoadConfig_ParsesShard(t *testing.T) {

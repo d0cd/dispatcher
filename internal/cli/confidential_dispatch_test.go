@@ -35,21 +35,21 @@ func buildConfidentialPlan(t *testing.T, target, confidentialBody string) *types
 func TestDispatch_AzureSNPProfileIsReachable(t *testing.T) {
 	p := buildConfidentialPlan(t, "azure-vm", "  profile: azure-snp\n")
 	assert.True(t, usesAzureSNP(p), "confidential.profile: azure-snp must select the measured Azure SNP path")
-	assert.False(t, usesAzureConfidential(p), "azure-snp must not also match the MAA path")
 }
 
 func TestDispatch_AWSNitroProfileIsReachable(t *testing.T) {
 	p := buildConfidentialPlan(t, "aws-vm", "  profile: nitro\n")
 	assert.True(t, usesAWSNitro(p), "confidential.profile: nitro must select the Nitro path")
-	assert.False(t, usesAWSConfidential(p), "nitro must not also match the SEV-SNP path")
 }
 
-// The default (no profile) confidential run still takes the standard
-// MAA/SEV-SNP backend for its target.
-func TestDispatch_DefaultProfileTakesStandardBackend(t *testing.T) {
+// The default (no profile) Azure route fails closed because its old MAA agent
+// was delivered post-boot and was not part of the measured launch chain.
+func TestDispatch_DefaultAzureProfileFailsClosed(t *testing.T) {
 	p := buildConfidentialPlan(t, "azure-vm", "  attestation: required\n")
-	assert.True(t, usesAzureConfidential(p), "no profile → standard Azure MAA path")
 	assert.False(t, usesAzureSNP(p))
+	_, err := adapterForPlan(context.Background(), p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "azure-snp")
 }
 
 // A confidential plan must resolve to a confidential (attesting) adapter via
@@ -129,15 +129,4 @@ func TestAdapterForPlan_ProfileTargetMismatchFailsClosed(t *testing.T) {
 	_, err := adapterForPlan(context.Background(), p)
 	require.Error(t, err, "profile nitro on azure-vm must fail closed, not route to the Azure MAA adapter")
 	assert.Contains(t, err.Error(), "nitro")
-}
-
-// A DISPATCHER_MAA_URL carrying shell metacharacters must be rejected at the
-// boundary — it is interpolated into a guest-side `sudo bash -c '...'`.
-func TestNewAzureConfidentialAdapter_RejectsUnsafeMAAURL(t *testing.T) {
-	t.Setenv("DISPATCHER_MAA_URL", "https://evil'; touch /pwned #")
-	t.Setenv("DISPATCHER_AZURE_AGENT_BIN", "/tmp/agent")
-
-	_, err := newAzureConfidentialAdapter(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "DISPATCHER_MAA_URL")
 }

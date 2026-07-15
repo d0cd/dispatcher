@@ -14,6 +14,7 @@
 # below errors, check `snpguest --help` / `snpguest <cmd> --help` and adjust —
 # the goal is simply to land report.bin + report-data.hex + {vcek,ask,ark}.pem.
 set -euo pipefail
+umask 077
 
 OUT=${1:-./snp-out}
 # Processor model the KDS keys are fetched for: milan | genoa | turin | ...

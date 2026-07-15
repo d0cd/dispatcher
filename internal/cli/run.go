@@ -398,12 +398,8 @@ func adapterForPlan(ctx context.Context, p *types.Plan) (adapter.TargetAdapter, 
 		return newConfidentialSpaceAdapter(ctx)
 	case usesAzureSNP(p):
 		return newAzureSNPConfidentialAdapter(ctx)
-	case usesAzureConfidential(p):
-		return newAzureConfidentialAdapter(ctx)
 	case usesAWSNitro(p):
 		return newNitroConfidentialAdapter(ctx)
-	case usesAWSConfidential(p):
-		return newAWSConfidentialAdapter(ctx)
 	default:
 		// A confidential run with attestation on MUST resolve to an attesting
 		// backend. If none of the predicates matched (e.g. an empty profile on a
@@ -411,7 +407,16 @@ func adapterForPlan(ctx context.Context, p *types.Plan) (adapter.TargetAdapter, 
 		// closed rather than silently using a plain, non-attesting adapter.
 		// `attestation: off` is the escape hatch and still uses the plain path.
 		if c := p.Workload.Requirements.Confidential; c.Required && c.Attestation != "off" && p.Recommendation != nil {
-			return nil, fmt.Errorf("confidential attestation required but target %q has no attesting backend", p.Recommendation.Target)
+			switch p.Recommendation.Target {
+			case "aws-vm":
+				return nil, fmt.Errorf("AWS attestation requires confidential.profile: nitro; the standard SEV-SNP path cannot release secrets because its post-boot agent is not measured")
+			case "azure-vm":
+				return nil, fmt.Errorf("Azure attestation requires confidential.profile: azure-snp; the standard MAA path cannot release secrets because its post-boot agent is not measured")
+			case "oci-vm":
+				return nil, fmt.Errorf("OCI confidential attestation is unavailable until OCI BYAS evidence and certificate-chain verification are implemented and live-validated")
+			default:
+				return nil, fmt.Errorf("confidential attestation required but target %q has no attesting backend", p.Recommendation.Target)
+			}
 		}
 		return adapterForTarget(p.Recommendation.Target)
 	}
@@ -450,6 +455,13 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 		return cloudvm.NewCloudVMAdapter(
 			cloudvm.NewAzureProvider("dispatcher-rg", ""),
 			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "dispatcher"},
+		), nil
+	case "oci-vm":
+		// SSHUser is image-dependent (Ubuntu images use "ubuntu", Oracle Linux
+		// "opc"); the operator supplies a matching DISPATCHER_OCI_IMAGE_ID.
+		return cloudvm.NewCloudVMAdapter(
+			cloudvm.NewOCIProvider(os.Getenv("DISPATCHER_OCI_REGION")),
+			cloudvm.Config{ProviderID: cloudvm.ProviderOCI, SSHUser: "ubuntu"},
 		), nil
 	case "gcp-confidential-space":
 		// Reconnect/status/cleanup only drive VM lifecycle + stored state, so the

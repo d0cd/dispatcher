@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -46,21 +47,37 @@ func saveRun(r *Run) {
 
 // collectArtifacts transitions the run to CollectingArtifacts and retrieves the
 // declared outputs from the given handle (crash dumps on failure, real outputs
-// on success). Best-effort: a nil handle or a failed transition/collection is a
-// no-op so cleanup still runs. Called exactly once per run, from the branch that
-// knows which handle actually ran.
-func (e *Executor) collectArtifacts(ctx context.Context, r *Run, handle *adapter.RunHandle, logWriter io.Writer) {
+// on success), retrying a transient transport failure with bounded backoff.
+// Returns true only when the outputs were retrieved. Called exactly once per run,
+// from the branch that knows which handle actually ran; a nil handle or a failed
+// transition returns false.
+func (e *Executor) collectArtifacts(ctx context.Context, r *Run, handle *adapter.RunHandle, logWriter io.Writer) bool {
 	if handle == nil {
-		return
+		return false
 	}
 	if tErr := r.Transition(types.RunStateCollectingArtifacts); tErr != nil {
-		return
+		return false
 	}
-	if artifacts, aErr := e.adapter.Artifacts(ctx, handle); aErr == nil {
-		r.Artifacts = artifacts
-	} else if logWriter != nil {
-		fmt.Fprintf(logWriter, "[dispatcher] warning: artifact collection failed: %v\n", aErr)
+	var lastErr error
+	for attempt := 0; attempt < artifactCollectAttempts; attempt++ {
+		artifacts, aErr := e.adapter.Artifacts(ctx, handle)
+		if aErr == nil {
+			r.Artifacts = artifacts
+			return true
+		}
+		lastErr = aErr
+		if attempt < artifactCollectAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(time.Duration(artifactRetryInterval.Load())):
+			}
+		}
 	}
+	if logWriter != nil {
+		fmt.Fprintf(logWriter, "[dispatcher] warning: artifact collection failed after %d attempts: %v\n", artifactCollectAttempts, lastErr)
+	}
+	return false
 }
 
 // Execute runs the full lifecycle with guaranteed cleanup and panic recovery.
@@ -192,6 +209,15 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	// Call through the variable so a retry that restarts the sampler is honored.
 	defer func() { stopSampler() }()
 
+	// Execute's setup watchdog covers provisioning and source upload. Once a
+	// durable ephemeral workload is running, keep extending the same deadline
+	// while this executor owns it. Without this heartbeat, a correct long compute
+	// can self-destruct at the setup TTL even though the CLI is still attached.
+	stopWatchdog := e.startEphemeralWatchdog(ctx, r, handle, logWriter)
+	// Call through the variable so a retry can stop the old handle's heartbeat
+	// and replace it with one bound to the newly provisioned handle.
+	defer func() { stopWatchdog() }()
+
 	// Stream logs (non-fatal)
 	if logWriter != nil {
 		if err := e.adapter.Logs(ctx, handle, logWriter); err != nil {
@@ -249,6 +275,11 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 			// Running->BudgetExceeded transition — leaving the retry VM uncapped.
 			// A fresh sampler is armed on the new handle once Execute succeeds.
 			stopSampler()
+			// The watchdog closure also captures a handle. Stop it before destroying
+			// the failed attempt; otherwise it renews handle-1 forever while the
+			// replacement handle expires at its original TTL.
+			stopWatchdog()
+			stopWatchdog = func() {}
 			// Tear down the failed attempt's resources before re-provisioning.
 			// The retry overwrites r.Handle, so without this the first
 			// attempt's VM/Job would be orphaned and keep billing until the
@@ -274,6 +305,7 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 				// Arm a fresh cost sampler on the NEW handle (the original was
 				// already stopped before teardown) so the retry VM stays capped.
 				stopSampler = e.startCostSampler(ctx, r, handle, logWriter)
+				stopWatchdog = e.startEphemeralWatchdog(ctx, r, handle, logWriter)
 				// Wait for the new run. We deliberately don't re-stream logs
 				// here to keep the retry path narrow — the original log
 				// writer is closed.
@@ -300,7 +332,19 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 
 	// Success (first attempt or retry): collect outputs from the handle that
 	// actually completed — for a retry that's the re-provisioned VM.
-	e.collectArtifacts(ctx, r, handle, logWriter)
+	if !e.collectArtifacts(ctx, r, handle, logWriter) {
+		// Output retrieval failed after retries. Do NOT tear the VM down — that
+		// would destroy a finished job's outputs. Preserve it (it self-destructs
+		// at the watchdog TTL, which is the recovery lease) and mark ArtifactFailed,
+		// distinct from a workload failure. Suppress the deferred cleanup too.
+		_ = r.Transition(types.RunStateArtifactFailed)
+		saveRun(r)
+		cleanupDone = true
+		if logWriter != nil {
+			fmt.Fprintf(logWriter, "[dispatcher] workload completed but outputs were not retrieved; VM preserved until its watchdog TTL — recover the outputs, then `dispatcher stop %s` to tear down\n", r.ID)
+		}
+		return fmt.Errorf("workload completed but output retrieval failed; VM preserved for recovery (run %s)", r.ID)
+	}
 
 	// Reconcile cost
 	if err := r.Transition(types.RunStateReconcilingCost); err == nil {
@@ -317,6 +361,62 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	}
 
 	return nil
+}
+
+// startEphemeralWatchdog renews a durable target's self-destruct deadline for
+// as long as an attached ephemeral run is being supervised. Renewal failures
+// are warnings: provider Status and MaxDuration remain authoritative, while the
+// remote watchdog still bounds cost if the CLI or network disappears.
+func (e *Executor) startEphemeralWatchdog(ctx context.Context, r *Run,
+	handle *adapter.RunHandle, logWriter io.Writer) func() {
+	durable, ok := e.adapter.(adapter.DurableAdapter)
+	if !ok {
+		return func() {}
+	}
+
+	ttl := r.effectiveWatchdogTTL()
+	interval := ttl / 3
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+
+	heartbeatCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	renew := func() {
+		if _, err := durable.ExtendWatchdog(heartbeatCtx, handle, ttl); err != nil {
+			if heartbeatCtx.Err() == nil && logWriter != nil {
+				fmt.Fprintf(logWriter, "[dispatcher] warning: watchdog renewal failed: %v\n", err)
+			}
+			return
+		}
+		r.mu.Lock()
+		r.LastHeartbeat = time.Now().UTC()
+		r.mu.Unlock()
+		saveRun(r)
+	}
+
+	// Renew before returning so a short configured TTL cannot expire between
+	// setup completion and the first ticker firing.
+	renew()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatCtx.Done():
+				return
+			case <-ticker.C:
+				renew()
+			}
+		}
+	}()
+
+	return func() {
+		cancel()
+		wg.Wait()
+	}
 }
 
 // waitForTerminal polls the adapter's Status until it returns a terminal state,
@@ -413,9 +513,24 @@ var costSampleInterval atomic.Int64
 // Test-adjustable via SetStatusPollInterval.
 var statusPollInterval atomic.Int64
 
+// artifactRetryInterval is the backoff between artifact-collection attempts.
+// Test-adjustable via SetArtifactRetryInterval.
+var artifactRetryInterval atomic.Int64
+
+// artifactCollectAttempts bounds how many times collectArtifacts retries a
+// transient transport failure before giving up and preserving the VM.
+const artifactCollectAttempts = 3
+
 func init() {
 	costSampleInterval.Store(int64(5 * time.Second))
 	statusPollInterval.Store(int64(3 * time.Second))
+	artifactRetryInterval.Store(int64(3 * time.Second))
+}
+
+// SetArtifactRetryInterval changes the artifact-collection backoff. Test-only;
+// returns the previous value so the caller can restore it.
+func SetArtifactRetryInterval(d time.Duration) time.Duration {
+	return time.Duration(artifactRetryInterval.Swap(int64(d)))
 }
 
 // SetStatusPollInterval changes the Status poll period. Test-only; returns the

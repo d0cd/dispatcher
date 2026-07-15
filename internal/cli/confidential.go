@@ -33,15 +33,6 @@ func usesConfidentialSpace(p *types.Plan) bool {
 	return c.Required && c.Attestation != "off" && p.Recommendation != nil && p.Recommendation.Target == "gcp-vm"
 }
 
-// usesAzureConfidential reports whether a run should take the Azure confidential
-// (SEV-SNP CVM, MAA-attested + sealed) path: a confidential Azure run with
-// attestation on. `attestation: off` stays on the plain SSH path.
-func usesAzureConfidential(p *types.Plan) bool {
-	c := p.Workload.Requirements.Confidential
-	return c.Required && c.Attestation != "off" && c.Profile != "azure-snp" &&
-		p.Recommendation != nil && p.Recommendation.Target == "azure-vm"
-}
-
 // usesAzureSNP reports whether a confidential Azure run should take the measured
 // direct SNP+vTPM path (a custom measured image, agent in PCR11), selected by
 // `confidential.profile: azure-snp`. This is the Azure path that measures the
@@ -59,32 +50,6 @@ func usesAWSNitro(p *types.Plan) bool {
 	c := p.Workload.Requirements.Confidential
 	return c.Required && c.Attestation != "off" && c.Profile == "nitro" &&
 		p.Recommendation != nil && p.Recommendation.Target == "aws-vm"
-}
-
-// usesAWSConfidential reports whether a run should take the AWS SEV-SNP
-// confidential (go-sev-guest-verified + sealed) path: a confidential AWS run with
-// attestation on that isn't a Nitro run. `attestation: off` stays on the plain
-// SSH path.
-func usesAWSConfidential(p *types.Plan) bool {
-	c := p.Workload.Requirements.Confidential
-	return c.Required && c.Attestation != "off" && c.Profile != "nitro" &&
-		p.Recommendation != nil && p.Recommendation.Target == "aws-vm"
-}
-
-// newAWSConfidentialAdapter builds the AWS confidential adapter. Verification is
-// go-sev-guest against AMD roots (no vendor keys to load); agentBin is the
-// cross-compiled dispatcher-attest-aws binary. Fails closed when unconfigured.
-func newAWSConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, error) {
-	agentBin := os.Getenv("DISPATCHER_AWS_AGENT_BIN")
-	if agentBin == "" {
-		return nil, fmt.Errorf("confidential AWS runs need the measured agent binary: set DISPATCHER_AWS_AGENT_BIN " +
-			"to a cross-compiled dispatcher-attest-aws (GOOS=linux GOARCH=amd64)")
-	}
-	region := os.Getenv("DISPATCHER_AWS_REGION")
-	return cloudvm.NewAWSConfidentialAdapter(
-		cloudvm.NewAWSProvider(region), agentBin,
-		cloudvm.Config{ProviderID: cloudvm.ProviderAWS, Region: region, SSHUser: "ubuntu"},
-	), nil
 }
 
 // newNitroConfidentialAdapter builds the AWS Nitro Enclaves adapter from the
@@ -131,60 +96,6 @@ func newAzureSNPConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, e
 		cloudvm.NewAzureProvider(rg, location), image, map[int]string{11: pcr11},
 		cloudvm.Config{ProviderID: cloudvm.ProviderAzure, Region: location, SSHUser: "dispatcher"},
 	), nil
-}
-
-// newAzureConfidentialAdapter builds the Azure confidential adapter: the pinned
-// MAA instance's live signing keys + the cross-compiled agent binary + the Azure
-// provider. Fails closed with guidance when unconfigured.
-func newAzureConfidentialAdapter(ctx context.Context) (adapter.TargetAdapter, error) {
-	maaURL := os.Getenv("DISPATCHER_MAA_URL")
-	if maaURL == "" {
-		maaURL = "https://sharedeus.eus.attest.azure.net"
-	}
-	// maaURL is interpolated into a remote `sudo bash -c '...'` on the guest;
-	// reject anything that isn't a clean http(s) URL so it can't inject commands.
-	if err := cloudvm.ValidateAgentURL(maaURL); err != nil {
-		return nil, fmt.Errorf("DISPATCHER_MAA_URL: %w", err)
-	}
-	agentBin := os.Getenv("DISPATCHER_AZURE_AGENT_BIN")
-	if agentBin == "" {
-		return nil, fmt.Errorf("confidential Azure runs need the measured agent binary: set DISPATCHER_AZURE_AGENT_BIN " +
-			"to a cross-compiled dispatcher-attest-azure (GOOS=linux GOARCH=amd64)")
-	}
-	keys, err := attest.LoadAzureMAAKeys(ctx, maaURL)
-	if err != nil {
-		return nil, fmt.Errorf("load MAA signing keys from %s/certs: %w", maaURL, err)
-	}
-	rg := os.Getenv("DISPATCHER_AZURE_RG")
-	if rg == "" {
-		rg = "dispatcher-rg"
-	}
-	location := os.Getenv("DISPATCHER_AZURE_LOCATION")
-	// The MAA issuer is the instance URL (the token's iss).
-	return cloudvm.NewAzureConfidentialAdapter(
-		cloudvm.NewAzureProvider(rg, location),
-		keys, maaURL, maaURL, agentBin, azureMeasuredBoot(),
-		cloudvm.Config{ProviderID: cloudvm.ProviderAzure, Region: location, SSHUser: "dispatcher"},
-	), nil
-}
-
-// azureMeasuredBoot reads the pinned measured-boot state from the environment: a
-// base64 SHA-256 value per PCR (DISPATCHER_AZURE_PCR<n>, chiefly PCR4 — the UKI
-// carrying the agent) and DISPATCHER_AZURE_REQUIRE_SECUREBOOT=1. Unset means no
-// measured-boot enforcement (the scp'd agent is not measured — the current caveat).
-func azureMeasuredBoot() attest.MAAMeasuredBoot {
-	var mb attest.MAAMeasuredBoot
-	pcrs := map[int]string{}
-	for _, idx := range []int{0, 4, 7} {
-		if v := os.Getenv(fmt.Sprintf("DISPATCHER_AZURE_PCR%d", idx)); v != "" {
-			pcrs[idx] = v
-		}
-	}
-	if len(pcrs) > 0 {
-		mb.PCRs = pcrs
-	}
-	mb.RequireSecureBoot = os.Getenv("DISPATCHER_AZURE_REQUIRE_SECUREBOOT") == "1"
-	return mb
 }
 
 // newConfidentialSpaceAdapter builds the Confidential Space adapter for a run:

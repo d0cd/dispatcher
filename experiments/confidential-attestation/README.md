@@ -89,6 +89,7 @@ The script writes `report.bin`, `report-data.hex`, `vcek.pem`, `ask.pem`, `ark.p
 
 ```bash
 scp -r <vm>:snp-out/* experiments/confidential-attestation/fixtures/snp/
+chmod -R go-rwx experiments/confidential-attestation/fixtures/snp
 go test ./internal/attest -run Golden_SNPReport -v
 ```
 
@@ -130,6 +131,7 @@ Writes `token.jwt` and `jwks.json`.
 
 ```bash
 scp -r <vm>:maa-out/* experiments/confidential-attestation/fixtures/maa/
+chmod -R go-rwx experiments/confidential-attestation/fixtures/maa
 go test ./internal/attest -run Golden_MAAToken -v
 ```
 

@@ -44,6 +44,7 @@ var rateCards = map[string]RateCard{
 	"gcp":     {CPUPerHour: 0.04, MemoryPerHour: 0.005, GPUPerHour: 2.80, BasePerHour: 0.08},
 	"azure":   {CPUPerHour: 0.05, MemoryPerHour: 0.007, GPUPerHour: 3.00, BasePerHour: 0.10},
 	"hetzner": {CPUPerHour: 0.003, MemoryPerHour: 0.001, GPUPerHour: 0, BasePerHour: 0.003}, // Hetzner Cloud has no GPU SKU
+	"oci":     {CPUPerHour: 0.03, MemoryPerHour: 0.004, GPUPerHour: 0, BasePerHour: 0.02},
 }
 
 // EstimateCost produces a cost estimate for running a workload on a target.
@@ -263,6 +264,8 @@ func rateCardToProvider(card string) (cloudvm.ProviderID, bool) {
 		return cloudvm.ProviderAzure, true
 	case "hetzner":
 		return cloudvm.ProviderHetzner, true
+	case "oci":
+		return cloudvm.ProviderOCI, true
 	}
 	return "", false
 }

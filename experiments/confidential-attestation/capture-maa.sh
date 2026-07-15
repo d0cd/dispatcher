@@ -16,6 +16,7 @@
 # drop the token into $OUT/token.jwt. The MAA endpoint must be the SAME instance
 # the client attested against, or the JWKS won't contain the signing key.
 set -euo pipefail
+umask 077
 
 OUT=${1:-./maa-out}
 # The MAA instance the guest-attestation client used. The regional shared

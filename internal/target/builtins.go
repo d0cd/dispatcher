@@ -400,5 +400,48 @@ func BuiltinTargets() []types.TargetConfig {
 				},
 			},
 		},
+		{
+			ID:   "oci-vm",
+			Kind: types.TargetKindCloudVM,
+			// Provisioning is implemented but has not completed a live tenancy
+			// validation. Keep it out of automatic recommendations until create,
+			// VNIC discovery, SSH, cleanup, and billing are proven end to end.
+			Enabled: false,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU:    types.GPUCapability{Supported: false},
+					// OCI BYAS verification is not implemented. Do not advertise
+					// confidential support or let planning treat encryption alone as
+					// an attested secret-release boundary.
+					Confidential: types.ConfidentialCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   true,
+					PrivateVPCAccess: true,
+					StaticEgressIP:   true,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: true,
+					RateCard:      "oci",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
 	}
 }

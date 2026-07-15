@@ -418,10 +418,11 @@ func (a *CloudVMAdapter) Status(ctx context.Context, h *adapter.RunHandle) (type
 		args := sshCmdArgs(state, checkCmd)
 		output, err := exec.CommandContext(ctx, "ssh", args...).Output()
 		if err != nil {
-			// A failed ssh probe means we couldn't determine liveness (a dropped
-			// connection / transient network error), not that the workload failed.
-			// Surface it as an error so the executor's transient-tolerance handles
-			// it rather than tearing down a healthy VM on one bad probe.
+			// The provider proves that the VM exists, but only SSH can prove that
+			// dispatcher's in-guest supervisor remains observable. Surface loss of
+			// that channel as an indeterminate Status error. The executor tolerates
+			// a bounded number of consecutive errors, preventing both a one-blip
+			// teardown and an unlimited, permanently unobservable billing loop.
 			return types.RunStateRunning, fmt.Errorf("ssh liveness probe failed: %w", err)
 		}
 		if strings.TrimSpace(string(output)) == "done" {

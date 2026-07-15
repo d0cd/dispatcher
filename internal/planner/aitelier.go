@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -29,12 +31,13 @@ var ErrAtelierCancelled = errors.New("aitelier run cancelled")
 // tool loop against a local MCP server (started here) that wraps the planner's
 // ToolRegistry.
 type AtelierBackend struct {
-	baseURL  string
-	agent    string // backend name (claude, codex, ...) — first segment of `model`
-	model    string // optional inner LLM (e.g. "claude-sonnet-4-5") — second segment
-	apiKey   string // optional Bearer token for hosted mode
-	registry *ToolRegistry
-	client   *http.Client
+	baseURL   string
+	agent     string // backend name (claude, codex, ...) — first segment of `model`
+	model     string // optional inner LLM (e.g. "claude-sonnet-4-5") — second segment
+	apiKey    string // optional Bearer token for hosted mode
+	registry  *ToolRegistry
+	client    *http.Client
+	configErr error
 
 	// responseSchema is the JSON schema sent to aitelier as response_format.
 	// Defaults to the plan schema; callers can override via SetResponseSchema
@@ -70,16 +73,63 @@ func NewAtelierBackend(cfg AtelierConfig) *AtelierBackend {
 	if cfg.APIKey == "" {
 		cfg.APIKey = os.Getenv("AITELIER_API_KEY")
 	}
+	baseURL, configErr := validateAtelierBaseURL(cfg.BaseURL)
 
 	return &AtelierBackend{
-		baseURL:        cfg.BaseURL,
+		baseURL:        baseURL,
 		agent:          cfg.Agent,
 		model:          cfg.Model,
 		apiKey:         cfg.APIKey,
 		registry:       cfg.ToolRegistry,
 		client:         &http.Client{Timeout: 5 * time.Minute},
+		configErr:      configErr,
 		responseSchema: planResultResponseFormat(),
 	}
+}
+
+// validateAtelierBaseURL prevents an API key and private workload metadata from
+// being sent over cleartext networks. HTTP is permitted only for a loopback
+// daemon; remote deployments must use HTTPS. Embedded credentials, queries, and
+// fragments are rejected so URL construction remains unambiguous.
+func validateAtelierBaseURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw, fmt.Errorf("invalid AITELIER_URL %q", raw)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return raw, fmt.Errorf("AITELIER_URL must not contain credentials, query parameters, or a fragment")
+	}
+	host := u.Hostname()
+	isLoopback := strings.EqualFold(host, "localhost")
+	if ip := net.ParseIP(host); ip != nil {
+		isLoopback = ip.IsLoopback()
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback) {
+		return raw, fmt.Errorf("AITELIER_URL must use HTTPS unless it points to loopback")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return raw, fmt.Errorf("AITELIER_URL has unsupported scheme %q", u.Scheme)
+	}
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func (a *AtelierBackend) authorize(req *http.Request) {
+	if a.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	}
+}
+
+const maxAtelierResponseBytes = 16 << 20
+
+func readAtelierResponse(r io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, maxAtelierResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxAtelierResponseBytes {
+		return nil, fmt.Errorf("response exceeds %d bytes", maxAtelierResponseBytes)
+	}
+	return raw, nil
 }
 
 // SetResponseSchema overrides the response_format sent to aitelier on the
@@ -212,6 +262,9 @@ type runEvent struct {
 // agent loop happens inside aitelier; the planner sees a single turn that
 // returns the final structured plan with no follow-up tool calls.
 func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
+	if a.configErr != nil {
+		return nil, a.configErr
+	}
 	if a.registry == nil {
 		return nil, fmt.Errorf("AtelierBackend requires a ToolRegistry — agent loop needs an MCP server")
 	}
@@ -259,9 +312,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("X-Correlation-Id", correlationID)
-		if a.apiKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
-		}
+		a.authorize(httpReq)
 
 		httpResp, err := a.client.Do(httpReq)
 		if err != nil {
@@ -270,7 +321,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 		}
 		defer httpResp.Body.Close()
 
-		raw, err := io.ReadAll(httpResp.Body)
+		raw, err := readAtelierResponse(httpResp.Body)
 		if err != nil {
 			resCh <- result{err: fmt.Errorf("read chat response: %w", err)}
 			return
@@ -344,16 +395,14 @@ func (a *AtelierBackend) fetchToolNames(runID string) []string {
 	if err != nil {
 		return nil
 	}
-	if a.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.apiKey)
-	}
+	a.authorize(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return nil
 	}
 	defer resp.Body.Close()
 	var events []runEvent
-	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAtelierResponseBytes)).Decode(&events); err != nil {
 		return nil
 	}
 	var names []string
@@ -370,13 +419,14 @@ func (a *AtelierBackend) fetchToolNames(runID string) []string {
 
 // CheckAvailable hits /v1/discovery and confirms the sandbox agent is reachable.
 func (a *AtelierBackend) CheckAvailable(ctx context.Context) error {
+	if a.configErr != nil {
+		return a.configErr
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", a.baseURL+"/v1/discovery", nil)
 	if err != nil {
 		return err
 	}
-	if a.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.apiKey)
-	}
+	a.authorize(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("aitelier not reachable at %s: %w", a.baseURL, err)
@@ -389,7 +439,7 @@ func (a *AtelierBackend) CheckAvailable(ctx context.Context) error {
 		return fmt.Errorf("aitelier /v1/discovery returned %d", resp.StatusCode)
 	}
 	var d discoveryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAtelierResponseBytes)).Decode(&d); err != nil {
 		return fmt.Errorf("decode /v1/discovery: %w", err)
 	}
 	if !d.Dependencies.SandboxAgent.Reachable {
@@ -403,6 +453,7 @@ func (a *AtelierBackend) checkHealthFallback(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	a.authorize(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("aitelier not reachable at %s: %w", a.baseURL, err)
@@ -420,16 +471,14 @@ func (a *AtelierBackend) listActiveRuns(ctx context.Context) map[string]bool {
 	if err != nil {
 		return out
 	}
-	if a.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.apiKey)
-	}
+	a.authorize(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return out
 	}
 	defer resp.Body.Close()
 	var ar activeRunsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAtelierResponseBytes)).Decode(&ar); err != nil {
 		return out
 	}
 	for _, id := range ar.Active {
@@ -455,9 +504,7 @@ func (a *AtelierBackend) cancelNewRuns(before map[string]bool) {
 			if err != nil {
 				return
 			}
-			if a.apiKey != "" {
-				req.Header.Set("Authorization", "Bearer "+a.apiKey)
-			}
+			a.authorize(req)
 			resp, err := a.client.Do(req)
 			if err != nil {
 				return

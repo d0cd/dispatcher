@@ -1,16 +1,14 @@
 module github.com/d0cd/dispatcher
 
-go 1.25.0
+go 1.25.12
 
 require (
 	github.com/cloudflare/circl v1.6.4
-	github.com/edgelesssys/go-azguestattestation v0.0.0-20250408071817-8c4457b235ff
 	github.com/fatih/color v1.18.0
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/go-sev-guest v0.15.0
 	github.com/google/go-tpm v0.9.8
-	github.com/google/go-tpm-tools v0.4.6
 	github.com/hf/nsm v0.0.0-20220930140112-cd181bd646b9
 	github.com/mdlayher/vsock v1.3.0
 	github.com/spf13/cobra v1.8.1
@@ -21,10 +19,7 @@ require (
 
 require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
-	github.com/go-jose/go-jose/v3 v3.0.5 // indirect
-	github.com/google/go-attestation v0.6.0 // indirect
 	github.com/google/go-configfs-tsm v0.3.3-0.20240919001351-b4b5b84fdcbc // indirect
-	github.com/google/go-tdx-guest v0.3.2-0.20241009005452-097ee70d0843 // indirect
 	github.com/google/logger v1.1.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect

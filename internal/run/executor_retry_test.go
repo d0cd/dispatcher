@@ -2,8 +2,10 @@ package run
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -30,6 +32,8 @@ type retryAdapter struct {
 	cleanedHandles  []string
 	terminated      atomic.Bool
 	termHandle      string // ID of the handle passed to Terminate
+	watchdogMu      sync.Mutex
+	watchdogHandles []string
 }
 
 func (m *retryAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.RunState, error) {
@@ -84,6 +88,29 @@ func (m *retryAdapter) FailureDetails(_ *adapter.RunHandle) adapter.FailureDetai
 	return m.failure
 }
 
+func (m *retryAdapter) Reconnect(_ context.Context, handleID string, _ json.RawMessage) (*adapter.RunHandle, error) {
+	return &adapter.RunHandle{ID: handleID}, nil
+}
+
+func (m *retryAdapter) ExtendWatchdog(_ context.Context, h *adapter.RunHandle, ttl time.Duration) (time.Time, error) {
+	m.watchdogMu.Lock()
+	m.watchdogHandles = append(m.watchdogHandles, h.ID)
+	m.watchdogMu.Unlock()
+	return time.Now().Add(ttl), nil
+}
+
+func (m *retryAdapter) ListResources(context.Context) ([]adapter.ResourceInfo, error) {
+	return nil, nil
+}
+
+func (m *retryAdapter) DestroyResource(context.Context, adapter.ResourceInfo) error { return nil }
+
+func (m *retryAdapter) watchdogs() []string {
+	m.watchdogMu.Lock()
+	defer m.watchdogMu.Unlock()
+	return append([]string(nil), m.watchdogHandles...)
+}
+
 // When the retry's re-provision Execute fails, the already-cleaned old handle
 // must not be cleaned a second time (r.Handle is dropped after the pre-retry
 // cleanup) — a second DestroyVM on a non-idempotent provider would spuriously
@@ -133,6 +160,9 @@ func TestExecutor_TransientRetrySucceeds(t *testing.T) {
 	// leaks and keeps billing.
 	assert.Contains(t, m.cleanedHandles, "handle-1", "leaked first handle must be cleaned up on retry")
 	assert.Contains(t, m.cleanedHandles, "handle-2", "final handle must be cleaned up")
+	assert.Contains(t, m.watchdogs(), "handle-1")
+	assert.Contains(t, m.watchdogs(), "handle-2",
+		"retry must replace the heartbeat closure so the new VM's watchdog is renewed")
 }
 
 // After a transient-failure retry succeeds, the run's artifacts must come from

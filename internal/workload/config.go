@@ -300,7 +300,13 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 		spec.Shard.MaxParallel = cfg.Shard.MaxParallel
 	}
 	if cfg.Aggregate != nil {
-		spec.Shard.Outputs = cfg.Aggregate.Outputs
+		// aggregate.outputs describes the paths every shard must retrieve before
+		// the host can aggregate them. Adapters consume WorkloadSpec.Outputs, so
+		// populate both fields; keeping Shard.Outputs preserves the aggregation
+		// contract while Outputs makes collection actually happen.
+		aggregateOutputs := sanitizeOutputs(cfg.Aggregate.Outputs)
+		spec.Shard.Outputs = aggregateOutputs
+		spec.Outputs = aggregateOutputs
 		spec.Shard.OnShardFailure = cfg.Aggregate.OnShardFailure
 	}
 
@@ -339,8 +345,25 @@ func ApplyConfig(spec *types.WorkloadSpec, cfg *DispatcherConfig) {
 	}
 
 	if len(cfg.Outputs) > 0 {
-		spec.Outputs = sanitizeOutputs(cfg.Outputs)
+		// Explicit top-level outputs override auto-detection, while any explicit
+		// per-shard aggregate outputs remain included.
+		spec.Outputs = mergeOutputs(sanitizeOutputs(cfg.Outputs), spec.Shard.Outputs)
 	}
+}
+
+func mergeOutputs(existing, additional []string) []string {
+	seen := make(map[string]struct{}, len(existing)+len(additional))
+	out := make([]string, 0, len(existing)+len(additional))
+	for _, group := range [][]string{existing, additional} {
+		for _, p := range group {
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // sanitizeOutputs rejects entries that would let the workload escape the

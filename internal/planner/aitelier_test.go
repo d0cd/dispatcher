@@ -159,6 +159,24 @@ func TestAtelierBackend_CheckAvailable_DownReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestAtelierBackend_RejectsRemoteCleartextURL(t *testing.T) {
+	b := NewAtelierBackend(AtelierConfig{
+		BaseURL: "http://aitelier.example.test:7777",
+		APIKey:  "must-not-be-sent",
+	})
+	err := b.CheckAvailable(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTPS")
+}
+
+func TestAtelierBackend_AllowsLoopbackHTTPAndRemoteHTTPS(t *testing.T) {
+	for _, raw := range []string{"http://127.0.0.1:7777", "http://localhost:7777", "https://aitelier.example.test"} {
+		got, err := validateAtelierBaseURL(raw)
+		require.NoError(t, err, raw)
+		assert.Equal(t, raw, got)
+	}
+}
+
 func TestAtelierBackend_Chat_SendsChatCompletionWithAitelierBlock(t *testing.T) {
 	stub := newStubAitelier(t)
 	tools, _ := setupTestEnv(t)

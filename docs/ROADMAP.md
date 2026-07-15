@@ -1,15 +1,17 @@
 # Roadmap
 
-Remaining work, grouped by theme. dispatcher is mature — landed and
-live-validated: provisioning/pricing across Hetzner / AWS / GCP / Azure, plus
+Remaining work, grouped by theme. dispatcher has broad backend coverage — landed
+and live-validated: provisioning/pricing across Hetzner / AWS / GCP / Azure, plus
 Kubernetes, Lima, local process/docker, and **Firecracker microVMs**; durable
 execution; **GPU end-to-end** (GCP + AWS, via driver-baked images);
-**confidential computing end-to-end on all three clouds** (SEV-SNP/MAA/Nitro
-verifiers + the in-TEE measured agent's live evidence fetch, GCP SEV-SNP
+**measured confidential computing paths on GCP, Azure, and AWS** (Confidential
+Space / measured SNP / Nitro plus live evidence, GCP SEV-SNP
 golden-validated on real hardware) with the `dispatcher confidential` measured-image
 pin pipeline; **sharding/fan-out**; per-run SSH-key injection + per-run
 firewalls; and the bring-your-own-hosts importer. What's left is completeness
-gaps and new capabilities.
+gaps and new capabilities. A July 2026 live 37 GB, CPU-saturating cloud workload
+also exposed reliability gaps hidden by the smaller provider bring-up tests;
+closing those takes priority over adding another backend.
 
 Effort: **S** ≈ <½ day · **M** ≈ 1–2 days · **L** ≈ 3+ days. Impact is user-facing.
 
@@ -37,6 +39,38 @@ Remaining polish: also surface the spend warning in `status` (not only on
 lower-priority items surfaced by audit (Azure/GCP GC are scoped to the
 configured RG/project; Azure auto-created VNet handled best-effort).
 
+## Large artifacts & supervised cloud jobs
+
+A live x86 genomics baseline pressure-tested the path from provisioning through
+large input staging, CPU saturation, output recovery, and teardown. Two immediate
+correctness fixes are delivered: provider-running VMs no longer become terminal
+after a burst of SSH timeouts, and attached ephemeral cloud jobs now renew their
+self-destruct watchdog throughout compute (not only during setup). Focused and
+race tests cover both.
+
+The remaining work should stay generic and evidence-driven rather than grow a
+genomics-specific subsystem:
+
+| Item | Effort | Impact |
+|---|---|---|
+| **Bill from create through destroy** — setup/provision/upload currently occurs before a run handle and cost sampler exist, so live Hetzner runs can display `$0.00` and the configured budget cannot bound the most expensive staging phase. Start the billable clock at successful create, persist the selected hourly rate, sample through artifact collection/cleanup, and test budget termination during setup. | M | High |
+| **External-input preflight + bulk-data contract** — an upstream directory index can advertise an object while the object itself returns 403; checking only the index, filename, or `HEAD` metadata is not enough. Document URI + digest as the contract for large immutable inputs, use the existing workload args/environment to pass it (no new Dispatcher config type), and provide a preflight that performs a bounded `Range` read using the same credentials before expensive compute starts. Record HTTP status/source failure separately from slow transport, and verify the full digest in the workload. Dispatcher continues to stage and verify source and *small* declared inputs; never substitute a dataset merely because its filename matches. | S | High |
+| **Recoverable artifact collection** — artifact transport failure currently proceeds directly to destructive ephemeral cleanup. When the provider still reports the VM running, retry with bounded backoff and preserve a short recovery lease; expose an explicit force-cleanup path. Never report workload failure solely because output retrieval failed. | M | High |
+| **Structured failure evidence before cleanup** — capture guest OOM/cgroup state, signal, container inspect data, and a bounded kernel tail before removing containers or VMs. Map wrapped exits such as Python's unsigned `-9`/247 to probable SIGKILL instead of classifying them as permanent application errors; preserve uncertainty when the evidence is absent. | M | High |
+| **Concurrency-aware resource fit** — model worker concurrency together with peak per-worker memory and reserve CPU/memory for sshd, the provider agent, log streaming, and watchdog renewal. Reflect both workload and control-plane headroom in instance selection; avoid relying on each workload author to hand-write CPU affinity or discover OOM through a paid run. | M | High |
+| **Real stress lane** — add an opt-in live-provider scenario with a sparse/multipart multi-GB input and a CPU-saturating job. Assert watchdog renewal, temporary SSH unobservability, artifact recovery, budget accounting, and zero residual resources. Keep it scheduled/manual so CI cost stays bounded. | L | High |
+
+**Boundary (decided):** dispatcher is not a bulk-data transfer, cache, or
+content-addressed-storage service, nor a data lake / workflow engine. It owns the
+mechanisms it controls end-to-end — provisioning, billing/budget, the control
+plane it installs (agent/sshd/watchdog/log stream), staging code + small declared
+inputs (integrity-checked), retrieving declared outputs, and teardown. Large
+immutable inputs belong in operator-controlled object storage the workload fetches
+directly (e.g. `aws s3 cp` on the VM); ordinary workload args/environment already
+carry the URI and expected digest. A bounded source probe and an end-to-end digest
+check make failures explicit, but they do not turn Dispatcher into a transfer or
+caching layer. This meets the demonstrated need without a new data subsystem.
+
 ## Provider parity
 
 | Item | Effort | Impact |
@@ -57,12 +91,15 @@ in-TEE key (`REPORT_DATA=H(N‖key)`) and returns the report/token, and a
 Azure MAA (JWKS pinned) + measured direct-SNP (`profile: azure-snp`), AWS
 SEV-SNP (`VLEK→ASK→ARK`) + Nitro (`profile: nitro`). The `dispatcher
 confidential pins|pin|capture|build|check` pipeline manages measured-image pins.
-The **GCP SEV-SNP golden capture is validated on real hardware**. Remaining:
+The **GCP SEV-SNP golden capture is validated on real hardware**. Secret release
+fails closed unless the plan selects a measured backend: Nitro on AWS,
+`profile: azure-snp` on Azure, or Confidential Space on GCP. The standard AWS
+SEV-SNP and Azure MAA routes no longer execute because their SSH-delivered agent
+is outside the measured launch chain. **MAA per-component TCB** and **AMD KDS CRL
+revocation** remain implemented for verifier reuse. Remaining:
 
 | Item | Effort | Impact |
 |---|---|---|
-| **Standard-path agent measurement** — on the *standard* AWS SEV-SNP and Azure MAA paths the scp'd agent isn't folded into the launch measurement (the measured `profile` backends and GCP Confidential Space close it). Fold the agent into the measured image for those paths too. Plan: [confidential-attestation-plan.md](confidential-attestation-plan.md). | M | Medium |
-| **Secret wrapping (R9) hardening** — source/secrets seal only into the proven TEE (delivered); cert **revocation** enforced on the AMD-cert-chain paths (AWS, azure-snp) via the AMD KDS CRL, and **MAA per-component TCB** mapping now recombines the token's SVN claims to enforce `minTCB`. No open items. | — | — |
 | **AWS live pricing** — the EC2 bulk price list is ~479 MB and rarely parses in the plan timeout (now correctly skipped → static/rate-card fallback). Replace with the lightweight Price List Query API (`get-products`). | M | Low |
 | k8s Confidential Containers — a different, larger model. Out of scope until demand. | — | — |
 
@@ -95,7 +132,7 @@ the first REST provider is the real investment (it establishes an HTTP-based
 
 | Provider | Access | Fits cloud-VM adapter? | Distinct value | Effort |
 |---|---|---|---|---|
-| **Oracle Cloud (OCI)** | `oci` CLI, SSH VMs | ✅ near-identical to AWS/GCP | Large always-free tier (Ampere ARM) for CI; AMD SEV confidential; cheap ARM | M |
+| **Oracle Cloud (OCI)** | `oci` CLI, SSH VMs | ✅ near-identical to AWS/GCP | Large always-free tier (Ampere ARM) for CI; cheap ARM | **disabled — needs live validation** |
 | **Vultr** | `vultr-cli` + API, SSH VMs | ✅ | Cheap general + many regions; some GPU | M (low) |
 | **Lambda Cloud** | REST API (no rich CLI), SSH VMs | ~ VM lifecycle fits, but HTTP not CLI | On-demand H100/A100 well below hyperscaler list, often more available | M (first REST adapter) |
 | **RunPod** | REST/GraphQL + CLI, SSH-able pods | ~ container/VM hybrid | Very cheap community-cloud GPUs, per-second billing; burst GPU | M–L |
@@ -108,12 +145,21 @@ Azure new subs are capacity-restricted), and **stockout-prone** (L4/n2d shopping
 across zones). The cheap-GPU specialists sidestep all three — the strongest
 argument to prioritize them over more general-compute clouds.
 
-**Suggested order:** (1) **Oracle** — highest value/effort: mirrors the existing
-CLI adapter, free tier gives a no-cost CI lane + a second AMD-SEV confidential
-target. (2) **Lambda Cloud** — highest-value GPU add; builds the reusable REST
-`Provider` pattern. (3) **RunPod** — cheapest burst GPU once REST exists.
-(4) **Vultr / Thunder** — opportunistic. (5) **Modal** — separate serverless
-track, not a VM provider.
+**OCI status:** lifecycle, pricing, CLI wiring, and argv tests are built, but the
+builtin target is disabled until a real account validates the complete lifecycle.
+Confidential execution separately fails closed; OCI BYAS must be implemented
+rather than approximated with AWS evidence semantics.
+
+| Item | Effort | Impact |
+|---|---|---|
+| **Validate OCI against a real account** — run create → VNIC/IP retry → SSH → destroy end-to-end, confirm image users and billing, and add a scheduled live-provider lane before enabling the target. | M | Medium |
+| **Implement OCI BYAS attestation** — retrieve provider-documented evidence, validate its certificate chain and nonce/channel-key binding, and exercise secret sealing on a VM.Standard.E5/E6 Flex guest. Do not use the bare-metal host or AWS VLEK verifier as substitutes. | L | High |
+
+**Suggested order:** (1) **Oracle** — validate the built adapter live (above); free
+tier gives a no-cost CI lane + a second AMD-SEV confidential target. (2) **Lambda
+Cloud** — highest-value GPU add; builds the reusable REST `Provider` pattern.
+(3) **RunPod** — cheapest burst GPU once REST exists. (4) **Vultr / Thunder** —
+opportunistic. (5) **Modal** — separate serverless track, not a VM provider.
 
 GPU backends reuse the driver-baked-image mechanism already built
 (`DISPATCHER_GCP_GPU_IMAGE` / `DISPATCHER_AWS_GPU_IMAGE`); most specialists ship
@@ -148,20 +194,23 @@ force now that a live-provider lane is planned.
 
 Policy / risk / approval-gate concurrency; run-state durability (atomic + flocked
 writes, 0700 hardening, panic-recovery cleanup); the CLI/`--json` framework;
-provisioning/pricing/GPU wiring; per-run SSH-key injection (GCP metadata / AWS +
-Azure key-values / user-data); durable execution (watchdog renewal, signal
-teardown, k8s deadline); sharding core + fan-out; the BYO-hosts importer. No
-TODO/FIXME/panic debt.
+provisioning/GPU wiring; per-run SSH-key injection (GCP metadata / AWS + Azure
+key-values / user-data); sharding core + fan-out; the BYO-hosts importer. Cloud
+job supervision, setup-phase pricing, large staging, and cleanup ordering are
+explicitly not in this list until the stress lane above passes.
 
 ## Suggested order
 
-1. **Confidential: close the residuals** — MAA per-component TCB mapping shipped;
-   the only remaining item is folding the agent into the launch measurement on the
-   *standard* AWS SEV-SNP / Azure MAA paths, which is an image-build + hardware-capture
-   task (the measured `profile: nitro` / `profile: azure-snp` backends and GCP
-   Confidential Space already close it). (The live evidence fetch, VLEK path, Nitro
-   backend, and AMD KDS CRL revocation on the AWS/azure-snp paths already shipped.)
-2. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
+Confidential secret release is available on measured profiles and fails closed on
+the unmeasured standard routes. Remaining priorities:
+
+1. **Cloud-job reliability** — bill create-to-destroy, recover artifact transfer,
+   and add the real stress lane.
+2. **Large immutable inputs** — document the URI + digest contract and add the
+   bounded source preflight; keep storage, caching, and multipart transfer outside
+   Dispatcher.
+3. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
    (establishes the REST `Provider` pattern + cheap GPU).
-3. **Low-latency** — cloud-native fast backend + startup-latency feasibility.
-4. **CI live-provider lane** and **shell completion**.
+4. **Low-latency** — cloud-native fast backend + startup-latency feasibility.
+5. **Shell completion** and **AWS live pricing** (replace the 479 MB bulk list
+   with the Price List Query API).

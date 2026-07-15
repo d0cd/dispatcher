@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -51,6 +52,36 @@ func TestMCPServer_LifecycleAndURL(t *testing.T) {
 
 	assert.True(t, strings.HasPrefix(srv.URL(), "http://127.0.0.1:"))
 	assert.NotEqual(t, "http://127.0.0.1:0", srv.URL())
+	parsed, err := url.Parse(srv.URL())
+	require.NoError(t, err)
+	assert.Len(t, parsed.Query().Get("token"), 43)
+}
+
+func TestMCPServer_RejectsRequestsWithoutSessionToken(t *testing.T) {
+	tools, _ := setupTestEnv(t)
+	srv := NewMCPServer(tools)
+	require.NoError(t, srv.Start())
+	defer srv.Stop()
+
+	u, err := url.Parse(srv.URL())
+	require.NoError(t, err)
+	u.RawQuery = ""
+	resp, err := http.Post(u.String(), "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+}
+
+func TestMCPServer_RejectsOversizedBody(t *testing.T) {
+	tools, _ := setupTestEnv(t)
+	srv := NewMCPServer(tools)
+	require.NoError(t, srv.Start())
+	defer srv.Stop()
+
+	resp, err := http.Post(srv.URL(), "application/json", strings.NewReader(strings.Repeat("x", maxMCPRequestBytes+1)))
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	assert.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode)
 }
 
 func TestMCPServer_Initialize(t *testing.T) {
@@ -132,7 +163,9 @@ func TestMCPServer_ToolsCall_InspectWorkload(t *testing.T) {
 	textBlock := content[0].(map[string]any)
 	assert.Equal(t, "text", textBlock["type"])
 	// Inspecting a Python workload — the JSON payload should mention "python" somewhere
-	assert.Contains(t, strings.ToLower(textBlock["text"].(string)), "python")
+	payload := textBlock["text"].(string)
+	assert.Contains(t, strings.ToLower(payload), "python")
+	assert.NotContains(t, payload, dir, "MCP payload must not expose the operator's absolute workload path")
 }
 
 // Crucial: evaluate_all_targets needs the spec from a prior inspect_workload call.
