@@ -44,7 +44,7 @@ dispatcher stop <run-id>       # Stop and clean up
 | `plan <path>` | Generate execution plan with cost / risk analysis. Flags: `--ai` (LLM-driven planner), `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--gpu <spec>`. |
 | `validate [path]` | Validate `dispatcher.yaml` (schema + semantic checks) without planning or running. |
 | `audit <path>` | Pre-run risk audit: cost surprises, missing secrets, missing Dockerfile, no-feasible-target. |
-| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--region <region>` (cloud region/zone; overrides `region:`), `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; Hetzner only — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
+| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--region <region>` (cloud region/zone; overrides `region:`), `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; hetzner-vm and aws-vm — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
 | `explain <plan-id>` | Verbose recommendation for a saved plan. |
 
 ### Observability

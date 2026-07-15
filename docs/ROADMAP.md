@@ -35,9 +35,13 @@ BigQuery export), and `gc --warn-over <usd>` warns loudly when total ongoing
 cost crosses a threshold.
 
 Remaining polish: also surface the spend warning in `status` (not only on
-`gc`/`bill`); wire GPU long-tail pricing to the live catalog; and the
-lower-priority items surfaced by audit (Azure/GCP GC are scoped to the
-configured RG/project; Azure auto-created VNet handled best-effort).
+`gc`/`bill`); wire GPU long-tail pricing to the live catalog; **an auto-deallocating
+Azure watchdog** — the guest `shutdown` self-destruct leaves an Azure VM
+*Stopped (allocated)* (still compute-billing), so if the CLI dies before teardown
+only `gc` reclaims it; a managed-identity + IMDS-token `deallocate` would make the
+Azure cost backstop automatic like the other clouds; and the lower-priority items
+surfaced by audit (Azure/GCP GC are scoped to the configured RG/project; Azure
+auto-created VNet handled best-effort).
 
 ## Large artifacts & supervised cloud jobs
 
@@ -90,7 +94,7 @@ only if control-plane starvation is ever actually observed).
 | Item | Effort | Impact |
 |---|---|---|
 | **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. At minimum, warn when `outputs:` is set but unretrievable. | M | Medium |
-| **Per-run SSH firewall beyond Hetzner** — `--allow-ssh-from` is honored only on hetzner-vm today; the CLI (`run.go`) rejects it for every other target. AWS has provider-level per-run-SG restriction wired but it's unreachable until the CLI gate widens; GCP/Azure/Lima/Kubernetes have no per-run firewall (Azure `az vm create` opens tcp/22 by default; a scoped NSG rule is unimplemented). Widen the gate + add the GCP/Azure NSG/firewall rules. | S | Low |
+| **Per-run SSH firewall beyond Hetzner + AWS** — `--allow-ssh-from` is honored end-to-end on hetzner-vm and aws-vm (per-run firewall / security group); GCP/Azure/Lima/Kubernetes still reject it — no per-run firewall (Azure `az vm create` opens tcp/22 by default; a scoped NSG rule is unimplemented; GCP's additive default-allow-ssh can't be subtracted). Add the GCP/Azure NSG/firewall rules. | S | Low |
 | **Spot/preemptible support** — lowest-cost-success is the headline and the planner advises spot, but there's no spot provisioning. Surface as "variable/evictable, not estimable" rather than a wrong precise price. | L | Medium |
 
 ## Confidential computing (secure jobs)

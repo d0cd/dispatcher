@@ -91,10 +91,10 @@ SSH access is gated by a **per-run ed25519 key with no password** and host-key p
 **Per-run SSH allowlist (`--allow-ssh-from`).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to restrict inbound SSH to that range:
 
 - **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule from the CIDR, attached at create time; deleted on teardown.
-- **AWS** — the *provider* already applies the CIDR as the per-run security group's SSH ingress (replacing the `0.0.0.0/0` default). **But the CLI currently gates `--allow-ssh-from` to `hetzner-vm` only** (`run` rejects it for other targets), so this AWS capability is not yet reachable end-to-end — an AWS VM's SG defaults to `0.0.0.0/0` until the gate is widened.
-- **GCP / Azure** — **rejected** (no silent fallback). GCP's built-in `default-allow-ssh` permits tcp:22 from `0.0.0.0/0` and an additive ALLOW rule cannot subtract that access, so a per-run rule would imply a restriction it does not enforce; restrict SSH at the network/NSG level instead.
+- **AWS** — sets the per-run security group's SSH ingress to the CIDR (replacing the `0.0.0.0/0` default); `run` accepts `--allow-ssh-from` for `aws-vm`, so this is reachable end-to-end.
+- **GCP / Azure / others** — **rejected** (no silent fallback). GCP's built-in `default-allow-ssh` permits tcp:22 from `0.0.0.0/0` and an additive ALLOW rule cannot subtract that access, so a per-run rule would imply a restriction it does not enforce; restrict SSH at the network/NSG level instead.
 
-The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. *The AWS per-run SG and Hetzner firewall are covered by argv-level unit tests and live-validated via `gc` reap; live `--allow-ssh-from` restriction on AWS awaits wiring the CLI gate.* Operators remain responsible for restricting any non-SSH workload-bound ports.
+The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. Operators remain responsible for restricting any non-SSH workload-bound ports.
 
 ## LLM trust boundary
 
@@ -112,6 +112,8 @@ Cloud VMs created by dispatcher run a watchdog that polls a deadline file. If di
 The watchdog is installed by cloud-init as a `systemd` service (`Restart=always`, enabled for `multi-user.target`) with its deadline persisted under `/var/lib/dispatcher` (on-disk, not tmpfs). This means the backstop survives a VM reboot — after a reboot systemd re-launches it and it re-reads the persisted deadline, shutting down immediately if the deadline already passed.
 
 Default TTL is 30 minutes; tune via `watchdogTtl` in `dispatcher.yaml` or `--watchdog-ttl`.
+
+**Azure caveat:** the self-destruct is a guest-side `shutdown`, which stops compute billing on Hetzner/AWS/GCP. On Azure a guest halt leaves the VM *Stopped (allocated)* — still fully compute-billing; only a control-plane `az vm deallocate` (which the credential-less guest cannot call) stops charges. So on Azure the watchdog caps the OS but not compute cost; the deallocating backstop is `dispatcher gc`, which reaps stopped-but-allocated Azure VMs (manual/scheduled, not automatic). Auto-deallocation on Azure (managed identity + IMDS) is tracked in the roadmap.
 
 ## History and run state
 

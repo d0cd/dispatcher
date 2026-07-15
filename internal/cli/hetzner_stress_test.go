@@ -8,7 +8,7 @@
 // its declared output is retrieved (artifact recovery), live cost is billed
 // (budget accounting), and teardown leaves zero residual.
 //
-//   HCLOUD_TOKEN=... go test -tags hetznere2e -run TestHetznerStress ./internal/cli/
+//	HCLOUD_TOKEN=... go test -tags hetznere2e -run TestHetznerStress ./internal/cli/
 package cli
 
 import (

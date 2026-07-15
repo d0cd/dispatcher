@@ -61,7 +61,7 @@ func init() {
 	runCmd.Flags().StringVar(&runFlags.watchdogTTL, "watchdog-ttl", "",
 		"cloud VM self-destruct timer if dispatcher dies (e.g. 15m, 2h); default 30m")
 	runCmd.Flags().StringVar(&runFlags.allowSSHFrom, "allow-ssh-from", "",
-		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); Hetzner only")
+		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); hetzner-vm and aws-vm")
 	rootCmd.AddCommand(runCmd)
 }
 
