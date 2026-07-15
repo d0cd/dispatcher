@@ -357,7 +357,9 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 			kind == adapter.FailureTransient &&
 			r.RetryCount == 0 &&
 			!r.GetState().IsTerminal() {
-			handle, state, err, retrySucceeded = e.retryTransientFailure(ctx, r, sup, logWriter)
+			// state/err are consumed inside the helper; only the new handle and
+			// success flag matter to the caller from here.
+			handle, _, _, retrySucceeded = e.retryTransientFailure(ctx, r, sup, logWriter)
 		}
 		if !retrySucceeded {
 			e.collectArtifacts(ctx, r, handle, logWriter) // crash dumps from the failed handle

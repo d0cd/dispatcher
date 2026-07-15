@@ -433,7 +433,7 @@ func adapterForPlan(ctx context.Context, p *types.Plan) (adapter.TargetAdapter, 
 			case "aws-vm":
 				return nil, fmt.Errorf("AWS attestation requires confidential.profile: nitro; the standard SEV-SNP path cannot release secrets because its post-boot agent is not measured")
 			case "azure-vm":
-				return nil, fmt.Errorf("Azure attestation requires confidential.profile: azure-snp; the standard MAA path cannot release secrets because its post-boot agent is not measured")
+				return nil, fmt.Errorf("confidential attestation on azure-vm requires confidential.profile: azure-snp; the standard MAA path cannot release secrets because its post-boot agent is not measured")
 			case "oci-vm":
 				return nil, fmt.Errorf("OCI confidential attestation is unavailable until OCI BYAS evidence and certificate-chain verification are implemented and live-validated")
 			default:
@@ -526,7 +526,7 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 
 	if t.Kind == types.TargetKindSSH {
 		if t.SSH == nil || t.SSH.Host == "" {
-			return nil, fmt.Errorf("ssh target %q has no host configured; set ssh.host in its target YAML or recreate with dispatcher targets add %s --host ...", targetID, targetID)
+			return nil, fmt.Errorf("ssh target %q has no host configured; set ssh.host in its target YAML or recreate with `dispatcher targets add %s --host <addr>`", targetID, targetID)
 		}
 		cfg := adapter.SSHConfig{Host: t.SSH.Host, User: "root", Port: 22}
 		if t.SSH.User != "" {

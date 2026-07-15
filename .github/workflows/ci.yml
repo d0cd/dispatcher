@@ -33,6 +33,16 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # staticcheck: enforced and blocking. The check set is the default minus
+      # U1000 (see staticcheck.conf) — the orphaned standard-confidential helpers
+      # (confidential_aws.go / confidential_azure.go, left dead by the
+      # measured-profile refactor) still trip U1000; drop the exclusion in the
+      # conf once they're removed so dead code is caught too.
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
       - name: go build
         run: go build ./...
 
@@ -43,6 +53,29 @@ jobs:
 
       - name: coverage report
         run: go tool cover -func=coverage.out | tail -1
+
+      # Coverage floor on the cost/security-critical packages: guards against a
+      # regression in the code paths where a bug is expensive (billing, teardown,
+      # attestation, the run state machine). Floors are set a few points below
+      # current so noise doesn't flake, but a real drop fails the build. Raise them
+      # as coverage improves.
+      - name: coverage floor (critical packages)
+        env:
+          DISPATCHER_DISABLE_LIVE_PRICING: "1"
+        run: |
+          declare -A floor=( [cloudvm]=50 [adapter]=60 [run]=85 [target]=82 [cost]=70 [attest]=63 )
+          fail=0
+          for pkg in "${!floor[@]}"; do
+            cov=$(go test -cover ./internal/$pkg/ 2>&1 | grep -oE 'coverage: [0-9.]+%' | grep -oE '[0-9.]+' | head -1)
+            min=${floor[$pkg]}
+            if [ -z "$cov" ]; then echo "WARN: no coverage reported for internal/$pkg"; continue; fi
+            if awk -v c="$cov" -v m="$min" 'BEGIN{exit !(c+0 < m+0)}'; then
+              echo "FAIL: internal/$pkg coverage ${cov}% < floor ${min}%"; fail=1
+            else
+              echo "ok: internal/$pkg ${cov}% (floor ${min}%)"
+            fi
+          done
+          exit $fail
 
       - name: build & smoke the binary
         run: |

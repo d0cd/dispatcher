@@ -113,7 +113,7 @@ func limaIdentityPath() (string, error) {
 	}
 	path := filepath.Join(home, "_config", "user")
 	if _, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("Lima identity %s not found (run any `limactl start` once to bootstrap): %w", path, err)
+		return "", fmt.Errorf("no Lima identity at %s (run any `limactl start` once to bootstrap): %w", path, err)
 	}
 	return path, nil
 }
@@ -154,7 +154,7 @@ func (l *LimaProvider) getSSHPort(ctx context.Context, name string) (int, error)
 			return inst.SSHLocalPort, nil
 		}
 	}
-	return 0, fmt.Errorf("Lima instance %q has no sshLocalPort in its info", name)
+	return 0, fmt.Errorf("no sshLocalPort in info for Lima instance %q", name)
 }
 
 // WaitReady polls Lima's forwarded SSH port (not the VM's internal IP).
