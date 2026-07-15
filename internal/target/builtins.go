@@ -1,6 +1,19 @@
 package target
 
-import "github.com/d0cd/dispatcher/internal/types"
+import (
+	"os"
+
+	"github.com/d0cd/dispatcher/internal/types"
+)
+
+// ociExperimentalEnabled reports whether the unvalidated OCI target is opted in.
+// OCI provisioning is implemented but has never completed a live-tenancy
+// validation (its `oci` argv, confidential platform-config, and SEV-SNP signing
+// model are unverified), so it is disabled by default and enabled only via
+// DISPATCHER_OCI_EXPERIMENTAL — the escape hatch for running that validation.
+func ociExperimentalEnabled() bool {
+	return os.Getenv("DISPATCHER_OCI_EXPERIMENTAL") != ""
+}
 
 // BuiltinTargets returns the built-in target definitions.
 func BuiltinTargets() []types.TargetConfig {
@@ -403,10 +416,11 @@ func BuiltinTargets() []types.TargetConfig {
 		{
 			ID:   "oci-vm",
 			Kind: types.TargetKindCloudVM,
-			// Provisioning is implemented but has not completed a live tenancy
-			// validation. Keep it out of automatic recommendations until create,
-			// VNIC discovery, SSH, cleanup, and billing are proven end to end.
-			Enabled: false,
+			// Experimental: implemented but not live-validated (see
+			// ociExperimentalEnabled). Off by default so it's never auto-recommended
+			// or run by accident; opt in with DISPATCHER_OCI_EXPERIMENTAL to validate
+			// create → VNIC → SSH → cleanup → billing end to end.
+			Enabled: ociExperimentalEnabled(),
 			Capabilities: types.Capabilities{
 				WorkloadKinds: []types.WorkloadKind{
 					types.WorkloadKindScript,
