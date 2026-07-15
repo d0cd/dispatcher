@@ -191,9 +191,9 @@ main-push/`workflow_dispatch`). Remaining:
 
 | Item | Effort | Impact |
 |---|---|---|
-| **Live-provider integration lane** — opt-in, credentialed, manual/scheduled; exercise one real cloud's create/wait/destroy. Gate behind secrets so it never runs on forks/PRs. | L | Medium |
-| **Coverage floor** on cost/security-critical packages (cloudvm, adapter, run, target) — off today to avoid flaky reds until baselines are pinned. | S | Medium |
-| **staticcheck** — 4 pre-existing findings to clean first (2 `ST1005` in `lima.go`, 1 `ST1005` in `run.go`, 1 `U1000` in `runtime.go`). | S | Medium |
+| **Live-provider integration lane** — *delivered for Hetzner* (the `hetznere2e` stress lane: manual/weekly, gated on `secrets.HCLOUD_TOKEN`, skipped on forks). Extend to a second cloud's create/wait/destroy when useful. | M | Low |
+| **Coverage floor** — *delivered:* per-package floors on cloudvm/adapter/run/target/cost/attest, a few points below current so a real regression fails the build. Raise as coverage improves. | — | — |
+| **staticcheck** — *delivered:* enforced and blocking in CI (default checks minus U1000 via `staticcheck.conf`); the ST1005/SA4006 findings are fixed. Drop the `-U1000` exclusion once the orphaned standard-confidential helpers (`confidential_aws.go`/`confidential_azure.go`, dead after the measured-profile refactor) are removed. | S | Low |
 | **Release-binary smoke** (`--version`/`--help`) + GoReleaser dry-run if binaries are offered. | S | Low |
 
 ## UX polish
@@ -220,15 +220,20 @@ explicitly not in this list until the stress lane above passes.
 ## Suggested order
 
 Confidential secret release is available on measured profiles and fails closed on
-the unmeasured standard routes. Remaining priorities:
+the unmeasured standard routes. **Cloud-job reliability** and the **large-input
+contract** are delivered and live-validated on Hetzner: billing create-to-destroy,
+recoverable artifact collection, control-plane CPU headroom, kernel OOM evidence,
+signal-exit retry classification, and the URI+digest bounded source preflight, plus
+the opt-in live stress lane. Remaining priorities:
 
-1. **Cloud-job reliability** — bill create-to-destroy, recover artifact transfer,
-   and add the real stress lane.
-2. **Large immutable inputs** — document the URI + digest contract and add the
-   bounded source preflight; keep storage, caching, and multipart transfer outside
-   Dispatcher.
-3. **Candidate backends** — Oracle first (free CI lane + AMD SEV), then Lambda
-   (establishes the REST `Provider` pattern + cheap GPU).
-4. **Low-latency** — cloud-native fast backend + startup-latency feasibility.
-5. **Shell completion** and **AWS live pricing** (replace the 479 MB bulk list
+1. **Candidate backends** — **Oracle (OCI)** is built but gated experimental
+   (`DISPATCHER_OCI_EXPERIMENTAL`) pending a live-tenancy validation; then **Lambda
+   Cloud**, which establishes the reusable REST `Provider` pattern (every current
+   backend shells out to a CLI) and adds cheap on-demand H100/A100.
+2. **Low-latency** — cloud-native fast backend (prebaked images / warm pools) +
+   startup-latency feasibility so the planner prefers fast backends for short jobs.
+3. **Shell completion** and **AWS live pricing** (replace the 479 MB bulk list
    with the Price List Query API).
+
+CI hardening is delivered — `staticcheck` (minus U1000 pending the confidential
+dead-code cleanup) and per-package coverage floors are enforced and blocking.
