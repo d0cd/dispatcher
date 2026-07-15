@@ -33,11 +33,8 @@ jobs:
       - name: go vet
         run: go vet ./...
 
-      # staticcheck: enforced and blocking. The check set is the default minus
-      # U1000 (see staticcheck.conf) — the orphaned standard-confidential helpers
-      # (confidential_aws.go / confidential_azure.go, left dead by the
-      # measured-profile refactor) still trip U1000; drop the exclusion in the
-      # conf once they're removed so dead code is caught too.
+      # staticcheck: enforced and blocking, default check set (includes U1000
+      # unused-code — dead code is a bug).
       - name: staticcheck
         run: |
           go install honnef.co/go/tools/cmd/staticcheck@latest

@@ -193,7 +193,7 @@ main-push/`workflow_dispatch`). Remaining:
 |---|---|---|
 | **Live-provider integration lane** — *delivered for Hetzner* (the `hetznere2e` stress lane: manual/weekly, gated on `secrets.HCLOUD_TOKEN`, skipped on forks). Extend to a second cloud's create/wait/destroy when useful. | M | Low |
 | **Coverage floor** — *delivered:* per-package floors on cloudvm/adapter/run/target/cost/attest, a few points below current so a real regression fails the build. Raise as coverage improves. | — | — |
-| **staticcheck** — *delivered:* enforced and blocking in CI (default checks minus U1000 via `staticcheck.conf`); the ST1005/SA4006 findings are fixed. Drop the `-U1000` exclusion once the orphaned standard-confidential helpers (`confidential_aws.go`/`confidential_azure.go`, dead after the measured-profile refactor) are removed. | S | Low |
+| **staticcheck** — *delivered:* enforced and blocking in CI on the full default check set (U1000 unused-code included). All findings fixed, including removal of the orphaned standard-confidential helpers (`confidential_aws.go`/`confidential_azure.go`) left dead by the measured-profile refactor. | — | — |
 | **Release-binary smoke** (`--version`/`--help`) + GoReleaser dry-run if binaries are offered. | S | Low |
 
 ## UX polish
@@ -235,5 +235,5 @@ the opt-in live stress lane. Remaining priorities:
 3. **Shell completion** and **AWS live pricing** (replace the 479 MB bulk list
    with the Price List Query API).
 
-CI hardening is delivered — `staticcheck` (minus U1000 pending the confidential
-dead-code cleanup) and per-package coverage floors are enforced and blocking.
+CI hardening is delivered — `staticcheck` (full default set, U1000 included) and
+per-package coverage floors are enforced and blocking.
