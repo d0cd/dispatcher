@@ -42,22 +42,30 @@ configured RG/project; Azure auto-created VNet handled best-effort).
 ## Large artifacts & supervised cloud jobs
 
 A live x86 genomics baseline pressure-tested the path from provisioning through
-large input staging, CPU saturation, output recovery, and teardown. Two immediate
-correctness fixes are delivered: provider-running VMs no longer become terminal
-after a burst of SSH timeouts, and attached ephemeral cloud jobs now renew their
-self-destruct watchdog throughout compute (not only during setup). Focused and
-race tests cover both.
+large input staging, CPU saturation, output recovery, and teardown. Delivered and
+live-validated on Hetzner (provision → stage → CPU-saturating run → artifact →
+teardown, zero residual):
 
-The remaining work should stay generic and evidence-driven rather than grow a
+- provider-running VMs no longer go terminal after a burst of SSH timeouts, and
+  attached ephemeral jobs renew the watchdog through compute (not only setup);
+- **the billing/budget clock spans create→destroy** — the cost sampler starts
+  before provisioning, so a breach during the (most expensive) staging phase
+  aborts it, and live cost is persisted each tick so `list`/records show real
+  spend and survive a CLI crash;
+- **recoverable artifact collection** — output-transport failures retry with
+  backoff and then preserve the VM (ArtifactFailed, under the watchdog TTL as the
+  recovery lease) instead of destroying a finished job's unretrieved outputs;
+- **control-plane CPU headroom** — the workload runs under `nice` so a
+  CPU-saturating job can't starve sshd, watchdog renewal, or log streaming.
+
+Remaining work stays generic and evidence-driven rather than growing a
 genomics-specific subsystem:
 
 | Item | Effort | Impact |
 |---|---|---|
-| **Bill from create through destroy** — setup/provision/upload currently occurs before a run handle and cost sampler exist, so live Hetzner runs can display `$0.00` and the configured budget cannot bound the most expensive staging phase. Start the billable clock at successful create, persist the selected hourly rate, sample through artifact collection/cleanup, and test budget termination during setup. | M | High |
 | **External-input preflight + bulk-data contract** — an upstream directory index can advertise an object while the object itself returns 403; checking only the index, filename, or `HEAD` metadata is not enough. Document URI + digest as the contract for large immutable inputs, use the existing workload args/environment to pass it (no new Dispatcher config type), and provide a preflight that performs a bounded `Range` read using the same credentials before expensive compute starts. Record HTTP status/source failure separately from slow transport, and verify the full digest in the workload. Dispatcher continues to stage and verify source and *small* declared inputs; never substitute a dataset merely because its filename matches. | S | High |
-| **Recoverable artifact collection** — artifact transport failure currently proceeds directly to destructive ephemeral cleanup. When the provider still reports the VM running, retry with bounded backoff and preserve a short recovery lease; expose an explicit force-cleanup path. Never report workload failure solely because output retrieval failed. | M | High |
 | **Structured failure evidence before cleanup** — capture guest OOM/cgroup state, signal, container inspect data, and a bounded kernel tail before removing containers or VMs. Map wrapped exits such as Python's unsigned `-9`/247 to probable SIGKILL instead of classifying them as permanent application errors; preserve uncertainty when the evidence is absent. | M | High |
-| **Concurrency-aware resource fit** — model worker concurrency together with peak per-worker memory and reserve CPU/memory for sshd, the provider agent, log streaming, and watchdog renewal. Reflect both workload and control-plane headroom in instance selection; avoid relying on each workload author to hand-write CPU affinity or discover OOM through a paid run. | M | High |
+| **Concurrency-aware resource fit** — *CPU control-plane headroom is delivered (the `nice` wrapper).* Still open: model worker concurrency together with peak per-worker memory and reserve **memory** for the control plane, reflecting both workload and control-plane headroom in instance selection so a job doesn't OOM the box (taking sshd/agent with it) or discover the limit through a paid run. | M | Medium |
 | **Real stress lane** — add an opt-in live-provider scenario with a sparse/multipart multi-GB input and a CPU-saturating job. Assert watchdog renewal, temporary SSH unobservability, artifact recovery, budget accounting, and zero residual resources. Keep it scheduled/manual so CI cost stays bounded. | L | High |
 
 **Boundary (decided):** dispatcher is not a bulk-data transfer, cache, or
