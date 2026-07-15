@@ -65,7 +65,7 @@ genomics-specific subsystem:
 |---|---|---|
 | **External-input preflight + bulk-data contract** — *delivered:* `DISPATCHER_INPUT*` env vars carry `<uri> [sha256]` (no new config type); before provisioning, a bounded `Range` read of each URI fails the run on a 403/404 (definitive source error) vs a 5xx/timeout (transport, possibly transient), live-validated to provision no VM on a bad input. The workload fetches + digest-verifies the full object on the VM. Follow-up: auth-header (non-presigned) inputs; today presigned/public URLs authenticate via the URL. | — | — |
 | **Structured failure evidence before cleanup** — *delivered:* wrapped signal exits (137/247 = SIGKILL, 143/241 = SIGTERM) classify transient (crash signals stay permanent); and on a cloud failure, `FailureDetails` captures kernel OOM-killer lines + the cgroup oom_kill counter from the still-alive VM before teardown, so OOM is recorded as a fact (OOMKilled=true + the kernel line), uncertainty preserved when evidence is absent. Live-validated. Follow-up: the same kernel-tail capture for docker/k8s beyond today's `docker inspect`. | S | Medium |
-| **Concurrency-aware resource fit** — *CPU control-plane headroom is delivered (the `nice` wrapper).* Still open: model worker concurrency together with peak per-worker memory and reserve **memory** for the control plane, reflecting both workload and control-plane headroom in instance selection so a job doesn't OOM the box (taking sshd/agent with it) or discover the limit through a paid run. | M | Medium |
+| **Control-plane headroom** — *CPU delivered (the `nice` wrapper).* Sizing the box for the *workload's* memory is the application's job: it declares `resources.memory` and dispatcher already honors it in feasibility + instance selection (catalog `MinMemoryGB`); dispatcher does not model a workload's internal concurrency/footprint. A control-plane *memory* reserve (cgroup-cap the workload so it can't starve sshd/agent) is **deferred pending evidence** — the observed failure was CPU (fixed), and the live OOM test showed the kernel OOM-killer targets the workload, not sshd, so the control plane already survives. | S | Low |
 | **Real stress lane** — *delivered:* a `hetznere2e`-tagged integration test provisions a real Hetzner VM, runs a CPU-saturating job, and asserts run completion under saturation, artifact recovery, budget accounting, and zero residual (safety-net reaper by run-id tag); a manual/weekly workflow gated on `secrets.HCLOUD_TOKEN` (skipped on forks) keeps cost bounded. Follow-up: a multi-GB sparse input (paired with the external-input contract) and explicit SSH-unobservability assertion. | S | Medium |
 
 **Boundary (decided):** dispatcher is not a bulk-data transfer, cache, or
@@ -78,6 +78,12 @@ directly (e.g. `aws s3 cp` on the VM); ordinary workload args/environment alread
 carry the URI and expected digest. A bounded source probe and an end-to-end digest
 check make failures explicit, but they do not turn Dispatcher into a transfer or
 caching layer. This meets the demonstrated need without a new data subsystem.
+
+Likewise, a workload's own resource footprint (memory, internal concurrency) is
+the author's to declare, not dispatcher's to model: dispatcher sizes the box to
+the declared `resources.*` and gets out of the way. Dispatcher hardens only its
+own control plane against a greedy workload (CPU `nice` today; a memory reserve
+only if control-plane starvation is ever actually observed).
 
 ## Provider parity
 
