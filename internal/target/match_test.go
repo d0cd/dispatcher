@@ -295,10 +295,10 @@ func TestCheckFeasibility_ConfidentialRequiresMeasuredProfile(t *testing.T) {
 	assert.True(t, CheckFeasibility(awsConf, w).Feasible, "attestation:off needs no measured profile")
 }
 
-// OCI is experimental (unvalidated): the oci-vm target is disabled by default and
-// opted in only via DISPATCHER_OCI_EXPERIMENTAL, so it's never auto-recommended
-// or run by accident.
-func TestBuiltinTargets_OCIExperimentalGate(t *testing.T) {
+// oci-vm's standard (non-confidential) path is live-validated, so the target is
+// enabled by default like every other cloud VM; it no longer hides behind
+// DISPATCHER_OCI_EXPERIMENTAL.
+func TestBuiltinTargets_OCIEnabled(t *testing.T) {
 	find := func() types.TargetConfig {
 		for _, tgt := range BuiltinTargets() {
 			if tgt.ID == "oci-vm" {
@@ -309,8 +309,5 @@ func TestBuiltinTargets_OCIExperimentalGate(t *testing.T) {
 		return types.TargetConfig{}
 	}
 	t.Setenv("DISPATCHER_OCI_EXPERIMENTAL", "")
-	assert.False(t, find().Enabled, "oci-vm must be disabled by default (unvalidated)")
-
-	t.Setenv("DISPATCHER_OCI_EXPERIMENTAL", "1")
-	assert.True(t, find().Enabled, "the experimental opt-in must enable oci-vm for live validation")
+	assert.True(t, find().Enabled, "oci-vm is validated and must be enabled by default")
 }
