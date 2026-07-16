@@ -19,7 +19,7 @@ import (
 // exec runner for the workload. This is the entrypoint the dispatcher-attest
 // binary (the measured container) calls.
 func RunAgent(addr, audience string) error {
-	return RunServer(addr, csAttestFunc(csTeeserverSocket, audience))
+	return RunServerATLS(addr, csAttestFunc(csTeeserverSocket, audience))
 }
 
 // defaultRunner extracts the sealed source into a scratch workdir, runs the

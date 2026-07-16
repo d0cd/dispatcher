@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
@@ -170,26 +171,19 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 		return nil, fmt.Errorf("confidential agent endpoint not reachable: %w", err)
 	}
 
-	// Verify attestation BEFORE anything is sealed or shipped. The allowlist is
-	// exactly the image we just built — the token must attest that digest, echo
-	// this run's nonce, and commit to the agent's channel key.
+	// Attest AND deliver over one attested TLS session (aTLS): the token must
+	// attest the image digest we just built, echo this run's nonce, and commit to
+	// the TLS session binding — then the workload runs inside the TEE and its result
+	// comes back over the same session. Nothing is shipped before verification
+	// (RunOverATLS aborts if the peer doesn't verify).
 	req := w.Requirements.Confidential
-	req.Measurements = []string{imageDigest}
-	result, err := csVerify(ctx, d.keys, baseURL, req)
+	v := attest.CSValidator(d.keys, []string{imageDigest}, req.Type)
+	runRes, err := runOverATLS(ctx, strings.TrimPrefix(baseURL, "http://"), v, payload)
 	if err != nil {
-		return nil, fmt.Errorf("attestation verification failed: %w", err)
+		return nil, fmt.Errorf("attested aTLS run: %w", err)
 	}
-	if !result.Verified {
-		return nil, fmt.Errorf("attestation rejected: %s", result.Verdict)
-	}
+	result := v.Result
 	dlog.L().Info("cs.attested", "run", p.Metadata.ID, "vm_id", vm.ID, "digest", result.Measurement)
-
-	// Seal the source + secrets to the attested channel key and run the workload
-	// inside the TEE; the result comes back sealed to a fresh dispatcher key.
-	runRes, err := runSealedExchange(ctx, baseURL, result.ChannelKey, payload)
-	if err != nil {
-		return nil, fmt.Errorf("sealed run exchange: %w", err)
-	}
 
 	destroyOnErr = false // the run completed; the VM is owned by the run until Cleanup
 	return &confidentialRunState{
@@ -204,11 +198,10 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 	}, nil
 }
 
-// csVerify is a seam over the CS attester so adapter tests drive the flow
-// without a live agent (agent+verify are tested in the attest package).
-var csVerify = func(ctx context.Context, keys map[string]crypto.PublicKey, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
-	return attest.NewCSAttester(keys, baseURL).Verify(ctx, req)
-}
+// runOverATLS is a seam over the dispatcher-side aTLS transport so adapter tests
+// drive the flow without a live agent (the attested exchange is tested in the
+// attest packages).
+var runOverATLS = agent.RunOverATLS
 
 func a2provider(p Provider) ProviderID { return p.Name() }
 

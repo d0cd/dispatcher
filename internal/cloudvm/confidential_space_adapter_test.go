@@ -2,7 +2,7 @@ package cloudvm
 
 import (
 	"context"
-	"crypto"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +13,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/attest/agent"
+	"github.com/d0cd/dispatcher/internal/attest/atls"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -36,20 +37,32 @@ func csTestPlan(t *testing.T, id string, command []string) *types.Plan {
 
 const csTestDigest = "sha256:cafebabecafebabecafebabecafebabecafebabecafebabecafebabecafebabe"
 
-// stubCSVerify replaces the CS attester seam with a canned verdict and restores
-// it after the test. The agent + real attestation are covered end-to-end in the
-// attest package; here we drive only the dispatcher-side orchestration.
-func stubCSVerify(t *testing.T, res attest.AttestationResult, err error) {
+// stubATLSRun replaces the dispatcher-side aTLS run seam. The agent + real
+// attestation are covered end-to-end in the attest packages; here we drive only
+// the dispatcher-side orchestration. It records the delivered payload and sets the
+// attestation verdict the validator would have recorded (attRes). A non-nil err
+// models a failed attestation — RunOverATLS aborts before delivering, so nothing
+// runs.
+func stubATLSRun(t *testing.T, attRes attest.AttestationResult, got *agent.Payload, res agent.Result, err error) {
 	t.Helper()
-	prev := csVerify
-	csVerify = func(context.Context, map[string]crypto.PublicKey, string, types.ConfidentialRequirement) (attest.AttestationResult, error) {
-		return res, err
+	prev := runOverATLS
+	runOverATLS = func(_ context.Context, _ string, validator atls.Validator, p agent.Payload) (agent.Result, error) {
+		if err != nil {
+			return agent.Result{}, err
+		}
+		if got != nil {
+			*got = p
+		}
+		if av, ok := validator.(*attest.AttestValidator); ok {
+			av.Result = attRes
+		}
+		return res, nil
 	}
-	t.Cleanup(func() { csVerify = prev })
+	t.Cleanup(func() { runOverATLS = prev })
 }
 
-// stubExchange replaces the sealed-exchange seam and records the payload it was
-// handed, so tests can assert what dispatcher sealed and shipped.
+// stubExchange replaces the sealed-exchange seam still used by the SSH-VM
+// confidential path (azure-snp, nitro) and records the payload it was handed.
 func stubExchange(t *testing.T, got *agent.Payload, res agent.Result, err error) {
 	t.Helper()
 	prev := runSealedExchange
@@ -66,9 +79,8 @@ func stubExchange(t *testing.T, got *agent.Payload, res agent.Result, err error)
 // orchestration: build image → provision → attest+verify → seal source/.env →
 // run → sealed result.
 func TestExecuteConfidentialSpace_HappyPath(t *testing.T) {
-	stubCSVerify(t, attest.AttestationResult{Verified: true, Measurement: csTestDigest, ChannelKey: []byte("channel-key")}, nil)
 	var got agent.Payload
-	stubExchange(t, &got, agent.Result{ExitCode: 0, Stdout: []byte("trained")}, nil)
+	stubATLSRun(t, attest.AttestationResult{Verified: true, Measurement: csTestDigest}, &got, agent.Result{ExitCode: 0, Stdout: []byte("trained")}, nil)
 
 	provider := NewMockProvider(ProviderGCP)
 	deps := csDeps{
@@ -96,8 +108,7 @@ func TestExecuteConfidentialSpace_HappyPath(t *testing.T) {
 // a GPU workload reaching it must be refused before provisioning — never run
 // CPU-only on a confidential VM that can't do the job.
 func TestExecuteConfidentialSpace_RefusesGPUWorkload(t *testing.T) {
-	stubCSVerify(t, attest.AttestationResult{Verified: true, ChannelKey: []byte("k")}, nil)
-	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+	stubATLSRun(t, attest.AttestationResult{Verified: true}, nil, agent.Result{ExitCode: 0}, nil)
 
 	provider := NewMockProvider(ProviderGCP)
 	deps := csDeps{
@@ -119,14 +130,10 @@ func TestExecuteConfidentialSpace_RefusesGPUWorkload(t *testing.T) {
 // TestExecuteConfidentialSpace_UnverifiedTearsDown is the security gate: when
 // attestation does not verify, nothing is sealed or run and the VM is torn down.
 func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
-	stubCSVerify(t, attest.AttestationResult{Verified: false, Verdict: "digest mismatch"}, nil)
-	ran := false
-	prevExchange := runSealedExchange
-	runSealedExchange = func(context.Context, string, []byte, agent.Payload) (agent.Result, error) {
-		ran = true
-		return agent.Result{}, nil
-	}
-	t.Cleanup(func() { runSealedExchange = prevExchange })
+	// A real RunOverATLS attests first and returns this error WITHOUT delivering
+	// the payload (the no-run-on-unverified-TEE guarantee is proven in the attest
+	// packages); here we assert the adapter tears the VM down on that error.
+	stubATLSRun(t, attest.AttestationResult{}, nil, agent.Result{}, fmt.Errorf("attestation rejected: digest mismatch"))
 
 	provider := NewMockProvider(ProviderGCP)
 	deps := csDeps{
@@ -140,7 +147,6 @@ func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
 
 	_, err := executeConfidentialSpace(context.Background(), deps, csTestPlan(t, "run-2", []string{"true"}))
 	require.Error(t, err)
-	assert.False(t, ran, "a workload must never run on an unverified TEE")
 	assert.Equal(t, 0, provider.VMCount(), "the VM must be torn down on attestation rejection")
 }
 
@@ -148,8 +154,7 @@ func TestExecuteConfidentialSpace_UnverifiedTearsDown(t *testing.T) {
 // just the VM — otherwise every post-provision failure (incl. attestation
 // rejection) leaks a per-run firewall rule.
 func TestExecuteConfidentialSpace_UnverifiedReapsFirewall(t *testing.T) {
-	stubCSVerify(t, attest.AttestationResult{Verified: false, Verdict: "digest mismatch"}, nil)
-	stubExchange(t, nil, agent.Result{}, nil)
+	stubATLSRun(t, attest.AttestationResult{}, nil, agent.Result{}, fmt.Errorf("attestation rejected: digest mismatch"))
 
 	provider := &firewallMockProvider{MockProvider: NewMockProvider(ProviderGCP)}
 	deps := csDeps{

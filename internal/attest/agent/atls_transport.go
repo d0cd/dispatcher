@@ -46,6 +46,21 @@ func serveATLSConn(conn *tls.Conn, certSPKI []byte, issuer atls.Issuer, runner f
 	})
 }
 
+// RunServerATLS builds a server TLS config with a fresh ephemeral key and serves
+// the aTLS confidential exchange on a TCP addr with the default exec runner. It is
+// the aTLS replacement for RunServer, used by the per-cloud agent binaries.
+func RunServerATLS(addr string, attest AttestFunc) error {
+	cfg, spki, err := atls.NewServerConfig()
+	if err != nil {
+		return err
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	return ServeATLS(l, cfg, spki, attest, defaultRunner)
+}
+
 // RunOverATLS is the dispatcher-side aTLS transport: dial the agent, verify it via
 // validator (the per-cloud attestation), then deliver payload and return the
 // result — all over the attested session. Nothing is sent until the peer verifies
