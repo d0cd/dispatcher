@@ -34,6 +34,9 @@ const (
 	// maxEvidence bounds a single evidence message: a SEV-SNP report + cert table,
 	// an MAA JWT, or a Nitro COSE document all fit comfortably under 1 MiB.
 	maxEvidence = 1 << 20
+	// maxMessage bounds one post-attestation application message (the sealed-in-TLS
+	// payload can be a multi-MB source tarball; the result carries outputs).
+	maxMessage = 256 << 20
 )
 
 // Issuer produces attestation evidence inside the TEE that commits to bindData
@@ -162,6 +165,45 @@ func ClientAttest(ctx context.Context, conn *tls.Conn, validator Validator) erro
 		return fmt.Errorf("atls read evidence: %w", err)
 	}
 	return validator.Validate(ctx, evidence, bindData(peerSPKI, exporter), nonce)
+}
+
+// ServerRun is the agent-side transport: attest over the session, then serve one
+// request→response — read the client's request bytes, run handle, and write the
+// response — all inside the attested, encrypted TLS session (no separate sealing).
+// handle runs the workload; it may block for the workload's duration.
+func ServerRun(ctx context.Context, conn *tls.Conn, certSPKI []byte, issuer Issuer, handle func(ctx context.Context, request []byte) ([]byte, error)) error {
+	if err := ServerAttest(ctx, conn, certSPKI, issuer); err != nil {
+		return err
+	}
+	request, err := readMsg(conn, maxMessage)
+	if err != nil {
+		return fmt.Errorf("atls read request: %w", err)
+	}
+	response, err := handle(ctx, request)
+	if err != nil {
+		return err
+	}
+	if err := writeMsg(conn, response); err != nil {
+		return fmt.Errorf("atls write response: %w", err)
+	}
+	return nil
+}
+
+// ClientRun is the dispatcher-side transport: attest the peer, then send request
+// and return the response, all over the attested session. It returns before
+// sending anything if attestation fails, so no secret crosses an unverified TEE.
+func ClientRun(ctx context.Context, conn *tls.Conn, validator Validator, request []byte) ([]byte, error) {
+	if err := ClientAttest(ctx, conn, validator); err != nil {
+		return nil, err
+	}
+	if err := writeMsg(conn, request); err != nil {
+		return nil, fmt.Errorf("atls write request: %w", err)
+	}
+	response, err := readMsg(conn, maxMessage)
+	if err != nil {
+		return nil, fmt.Errorf("atls read response: %w", err)
+	}
+	return response, nil
 }
 
 // handshakeAndExport completes the TLS handshake under ctx and returns the

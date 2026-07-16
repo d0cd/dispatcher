@@ -186,3 +186,43 @@ func TestExporterIsPerSession(t *testing.T) {
 	}
 	require.NotEqual(t, get(), get(), "each handshake must yield a distinct exporter")
 }
+
+func TestSessionRunRoundTrip(t *testing.T) {
+	serverCfg, spki := mustServerCfg(t)
+	client, server := tlsLoopback(t, serverCfg, NewClientConfig())
+	ctx := context.Background()
+
+	handle := func(_ context.Context, req []byte) ([]byte, error) {
+		return append([]byte("echo:"), req...), nil
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- ServerRun(ctx, server, spki, &synthIssuer{}, handle) }()
+
+	resp, err := ClientRun(ctx, client, &synthValidator{}, []byte("payload"))
+	require.NoError(t, err)
+	require.Equal(t, "echo:payload", string(resp))
+	require.NoError(t, <-errc)
+}
+
+// TestClientRunAbortsWhenAttestationFails proves no secret crosses an unverified
+// TEE: a rejecting validator makes ClientRun fail before it sends the request.
+func TestClientRunAbortsWhenAttestationFails(t *testing.T) {
+	serverCfg, spki := mustServerCfg(t)
+	client, server := tlsLoopback(t, serverCfg, NewClientConfig())
+	ctx := context.Background()
+
+	delivered := make(chan struct{}, 1)
+	handle := func(_ context.Context, _ []byte) ([]byte, error) { delivered <- struct{}{}; return nil, nil }
+	// Stale-nonce issuer -> the validator rejects, so attestation fails.
+	go func() {
+		_ = ServerRun(ctx, server, spki, &synthIssuer{overrideNonce: bytes.Repeat([]byte{1}, nonceLen)}, handle)
+	}()
+
+	_, err := ClientRun(ctx, client, &synthValidator{}, []byte("secret-payload"))
+	require.Error(t, err, "ClientRun must fail when attestation fails")
+	select {
+	case <-delivered:
+		t.Fatal("payload was delivered despite failed attestation")
+	default:
+	}
+}
