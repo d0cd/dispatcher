@@ -9,10 +9,10 @@
 #
 # REPRODUCIBILITY: PCR0 is a content hash of this whole image, so any base-image
 # or package change silently changes PCR0. For a stable, verifiable PCR0, pin the
-# bases by digest (FROM golang:1.25.0@sha256:… / alpine:3.20.3@sha256:…) and the
+# bases by digest (FROM golang:1.25.12@sha256:… / alpine:3.20.3@sha256:…) and the
 # ca-certificates version, and record the expected PCR0 next to the pin. The
 # tags below are pinned to the go.mod toolchain version but not yet by digest.
-FROM golang:1.25.0 AS build
+FROM golang:1.25.12 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
