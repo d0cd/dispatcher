@@ -10,8 +10,7 @@ strict: a confidential run that can't meet every requirement **fails closed**,
 because a *partial* confidential guarantee is a false one.
 
 Reader's map: §1 threat model · §2 **security guarantees** · §3 **the protocol** ·
-§4 requirements/hygiene · §5 **operational protocol** · §6 status & gaps ·
-§7 build plan · §8 decisions.
+§4 requirements/hygiene · §5 **operational protocol** · §6 decisions.
 
 ---
 
@@ -253,80 +252,7 @@ warned.
 
 ---
 
-## 6. Status & gap analysis (built vs. this spec)
-
-**Built (safe scaffolding + verifier crypto):**
-- Typed requirement/capability and the **no-silent-downgrade** feasibility gate
-  (right type or rejected).
-- Provisioning flags (GCP/AWS/Azure) + confidential-capable builtins.
-- The **verify-and-gate flow**: pluggable per-provider `Attester`, post-boot
-  verify that **destroys the VM** on failure, verdict recorded on run state.
-- **Verifier cores** behind the per-provider `Attester`: raw SEV-SNP report parse
-  + ECDSA-P384/SHA-384 signature + VCEK←ASK←ARK chain — **hand-rolled on Go stdlib**
-  (`crypto/ecdsa`/`x509`/`encoding/binary`, `internal/attest/snp.go`) on the
-  **azure-snp** path; token JWS (`go-jose/v4`) for **GCP Confidential Space**
-  (Google-signed EAT + container image-digest allowlist); and a COSE chain to the
-  pinned **AWS Nitro** root (PCR0) on the **nitro** path. Each enforces R3–R8 +
-  freshness/binding (R1/R2) via `applyPolicy` (or, for Confidential Space, the digest
-  allowlist + nonce/channel-key binding).
-- **Measurement allowlist + minTCB** config (`confidential.measurements` /
-  `minTCB`), threaded to the verifier (R7); empty allowlist fails closed.
-- **Pinned AMD ARK roots** (Milan/Genoa/Turin), embedded from AMD's KDS; the
-  SEV-SNP chain anchors on them (R4) and a captured ASK chains to a pinned ARK
-  offline.
-- **Live-fetch attesters**: each attester is registered ready with a live
-  evidence fetch; `attestation: required` verifies the bound report before any
-  secret ships and fails closed if the operator hasn't provisioned the agent.
-- **Audit surfacing (R13)**: the verdict is rendered in human-readable `status`
-  and `diagnose`, not just `status --json`.
-- Secret-free cloud-init (R11).
-
-**Delivered / remaining:**
-- ✅ **In-TEE agent + evidence fetch** — the measured guest-agent
-  (`internal/attest/agent` + `cmd/dispatcher-attest*`) that, given the verifier's
-  per-run nonce, generates the in-TEE ephemeral key, sets `REPORT_DATA = H(N ‖
-  key)`, and returns the report/token (R1/R2/G3). Live on all three clouds.
-- **Provision hardening** — pinned vendor images (R7), confidential disk where
-  offered + warn (R10/N1), explicit policy bits (R6).
-- **Format bind** — ✅ the raw SEV-SNP report parser is golden-validated against a
-  real captured **v4** report (taken on GCP hardware) through the coded ABI offsets
-  + VCEK→ASK→ARK-Milan; this parser backs the **azure-snp** path. GCP's run path is
-  **Confidential Space** (Google-signed EAT/JWS + image-digest allowlist) and AWS's is
-  **nitro** (COSE + PCR0), neither of which uses the raw report.
-- **Revocation** (R4) — enforced on the AMD-cert-chain path (Azure `profile:
-  azure-snp`): the ARK-signed CRL at the ASK's AMD KDS distribution point,
-  fail-closed if unreachable. Delegated to the cloud service on GCP CS;
-  n/a on Nitro (ephemeral certs).
-
-A verified confidential run works today given the operator-supplied agent /
-pinned measured image; `attestation: off` remains the explicit opt-out that
-provisions encrypted memory with no proof (N4).
-
----
-
-## 7. Build plan (TDD, incremental)
-
-| # | Increment | Delivers |
-|---|---|---|
-| ✅ | Typed requirement/capability/feasibility | no silent downgrade |
-| ✅ | Provisioning flags + builtins | the TEE itself |
-| ✅ | Verify-and-gate flow + fail-closed | safe scaffolding |
-| ✅ | Verifiers — **both** cores (synthetic-tested): SEV-SNP report (stdlib x509/ecdsa/binary) and MAA/token JWS (go-jose/v4): chain + TCB + policy + exact-measurement + type + `REPORT_DATA` | the proof crypto |
-| ✅ | Measurement allowlist + minTCB config (R7) | policy inputs |
-| ✅ | Pinned AMD ARK roots (Milan/Genoa/Turin), embedded from KDS (R4) | SEV-SNP trust anchor |
-| ✅ | Audit surfacing in `status`/`diagnose` (R13) | usability + audit |
-| 1 | Provision hardening: pinned vendor images, confidential disk + warn, policy bits | safe, known launch |
-| 2 | In-TEE agent evidence fetch: nonce + ephemeral in-TEE key, `REPORT_DATA=H(N‖key)` (vendor-image agent, measured); flips attesters to ready | bound, fresh evidence |
-| ~ | Format bind + revocation: SEV-SNP report layout confirmed on a real capture ✅; AMD KDS CRL revocation (azure-snp) ✅ | live trust |
-| 4 | Channel binding: trust the channel key only after R2 verifies; wrap secrets to it (R9) | no MITM/relay |
-
-Each verifier core is unit-tested against synthetic evidence; the binary/claim
-formats are confirmed against a real captured sample before the live fetch (§7
-increment 2/3) is trusted.
-
----
-
-## 8. Decisions
+## 6. Decisions
 
 - **Measurement bar — EXACT (R7).** Allowlist of known-good launch measurements per
   pinned measured image; reject anything else. dispatcher ships **no** base

@@ -1,8 +1,9 @@
 # AWS Nitro Enclaves confidential runs
 
 Nitro Enclaves is dispatcher's path to a **measured agent on AWS**. EC2 SEV-SNP
-measures only the guest firmware and has no vTPM, so the scp'd agent there is not
-attested (see `docs/confidential-attestation-plan.md`). A Nitro enclave is
+measures only the guest firmware and has no vTPM, so a post-boot agent there
+cannot be measured — which is why the unmeasured standard path was removed. A
+Nitro enclave is
 different: the **enclave image itself is measured** — PCR0 is the whole image,
 PCR1 the kernel+bootstrap, PCR2 the application — and attested by the AWS Nitro
 hypervisor's PKI. Pinning PCR0 attests the exact agent+workload image.

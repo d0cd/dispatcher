@@ -19,7 +19,7 @@ import (
 // raw SEV-SNP report. The measured Confidential Space runtime attests the
 // workload CONTAINER's image digest and binds a caller-supplied nonce via
 // `eat_nonce`, so trust reduces to the JWS signature (Google's JWKS) plus these
-// claims. This is the "vendor" path for GCP (see confidential-attestation-plan.md):
+// claims. This is the "vendor" path for GCP (see confidential-computing.md):
 // no raw AMD chain, no per-image launch-measurement capture — the attested
 // identity is the container image digest, allowlisted like a measurement.
 const csIssuer = "https://confidentialcomputing.googleapis.com"
