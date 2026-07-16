@@ -11,6 +11,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestOCIImageShapeHint(t *testing.T) {
+	// OCI's raw arch-mismatch error is cryptic; the hint must name the required
+	// architecture and the env var to fix so the operator can act.
+	armErr := fmt.Errorf(`ServiceError: {"message": "Shape VM.Standard.A1.Flex is not valid for image ocid1.image.x86"}`)
+	got := ociImageShapeHint("VM.Standard.A1.Flex", "ocid1.image.x86", armErr)
+	assert.Contains(t, got.Error(), "aarch64")
+	assert.Contains(t, got.Error(), "DISPATCHER_OCI_IMAGE_ID")
+
+	// An x86 shape names x86_64.
+	x86 := ociImageShapeHint("VM.Standard.E4.Flex", "img", fmt.Errorf("launch: not valid for image"))
+	assert.Contains(t, x86.Error(), "x86_64")
+
+	// Unrelated errors pass through untouched.
+	other := fmt.Errorf("quota exceeded")
+	assert.Equal(t, "quota exceeded", ociImageShapeHint("VM.Standard.A1.Flex", "img", other).Error())
+}
+
 func TestOCIShapeAndPlatformConfig(t *testing.T) {
 	decode := func(b []byte) map[string]any {
 		if b == nil {

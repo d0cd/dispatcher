@@ -59,6 +59,30 @@ func ociFlexSizing(shape string) (ocpus int, memoryGB float64) {
 	return 2, 16
 }
 
+// ociImageShapeHint augments an OCI launch error that failed on a shape/image
+// architecture mismatch with the actionable cause. OCI's raw error ("Shape X is
+// not valid for image Y") never says why: the planner may select an ARM shape
+// (Ampere A1/A2 — often the cheapest, so the default pick) while
+// DISPATCHER_OCI_IMAGE_ID points at an x86 image, or the reverse. Unrelated
+// errors pass through unchanged.
+func ociImageShapeHint(shape, image string, err error) error {
+	if err == nil || !strings.Contains(err.Error(), "not valid for image") {
+		return err
+	}
+	arch := "x86_64"
+	if isOCIArmShape(shape) {
+		arch = "aarch64 (ARM)"
+	}
+	return fmt.Errorf("%w\nshape %s needs a %s image; set DISPATCHER_OCI_IMAGE_ID to an image matching the shape architecture (current image %s does not)", err, shape, arch, image)
+}
+
+// isOCIArmShape reports whether an OCI shape is Ampere ARM (aarch64). OCI's ARM
+// shapes are the A1/A2 families (e.g. VM.Standard.A1.Flex, BM.Standard.A1.160);
+// everything else (E-series, standard Intel) is x86_64.
+func isOCIArmShape(shape string) bool {
+	return strings.Contains(shape, ".A1.") || strings.Contains(shape, ".A2.")
+}
+
 // reapByRunTag best-effort destroys any instance carrying this run's
 // dispatcher-run-id tag — used to clean up a launch whose OCID we never captured
 // (e.g. the blocking --wait-for-state was cancelled after the instance existed).
@@ -245,7 +269,7 @@ func (o *OCIProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		// (its OCID isn't in our output), so reap any instance carrying this run's
 		// tag before returning. Best-effort — nothing exists if launch failed early.
 		o.reapByRunTag(opts.Tags)
-		return nil, wrapExecError("oci compute instance launch", err)
+		return nil, ociImageShapeHint(shape, image, wrapExecError("oci compute instance launch", err))
 	}
 
 	var launched struct {
