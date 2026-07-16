@@ -1,10 +1,14 @@
 package attest
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"testing"
 
@@ -79,4 +83,51 @@ func TestATLS_CSVerifierRejectsWrongMeasurement(t *testing.T) {
 	wrongDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	require.Error(t, atls.ClientAttest(ctx, client, CSValidator(keys, []string{wrongDigest}, "")),
 		"a token whose image digest isn't allowlisted must be rejected through aTLS")
+}
+
+// TestATLS_NitroVerifierEndToEnd runs the real Nitro COSE verifier through the
+// atls primitive over live loopback TLS: the enclave's document binds bindData in
+// its public_key field, and NitroValidator checks it matches THIS session.
+func TestATLS_NitroVerifierEndToEnd(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+
+	issuer := agent.IssuerFromAttest(func(_ context.Context, nonce, bindData []byte) (string, error) {
+		cose := signedNitroDoc(t, root, rootKey, func(d *nitroDoc) {
+			d.Nonce = nonce
+			d.PublicKey = bindData
+		})
+		return base64.StdEncoding.EncodeToString(cose), nil
+	})
+
+	client, server, spki := atlsLoopback(t)
+	ctx := context.Background()
+	go func() { _ = atls.ServerAttest(ctx, server, spki, issuer) }()
+
+	validator := NitroValidator(pool, map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))})
+	require.NoError(t, atls.ClientAttest(ctx, client, validator), "honest Nitro agent over aTLS must verify")
+}
+
+// TestAzureSNPValidator exercises the azure-snp Validator adapter directly (the
+// TLS transport is proven by the CS/primitive tests): a real SNP+vTPM bundle bound
+// to bindData verifies, and one bound to a different session is rejected.
+func TestAzureSNPValidator(t *testing.T) {
+	nonce := bytes.Repeat([]byte{0x5a}, 32)
+	bindData := bytes.Repeat([]byte{0x9a}, 32)
+	pcr11 := make48(0xAB)[:32]
+
+	ev, roots := azureEvidence(t, nonce, bindData, pcr11, nil)
+	raw, err := json.Marshal(ev)
+	require.NoError(t, err)
+	evidence := []byte(base64.StdEncoding.EncodeToString(raw))
+
+	val := AzureSNPValidator(roots, map[int]string{11: hex.EncodeToString(pcr11)}, 0)
+	ctx := context.Background()
+	require.NoError(t, val.Validate(ctx, evidence, bindData, nonce),
+		"a bundle bound to this session's bindData must verify")
+
+	other := bytes.Repeat([]byte{0x11}, 32)
+	require.Error(t, val.Validate(ctx, evidence, other, nonce),
+		"a bundle bound to a different session must be rejected")
 }
