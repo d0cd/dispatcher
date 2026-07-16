@@ -154,5 +154,5 @@ func firstCertDER(pemBytes []byte) ([]byte, error) {
 
 // RunAgent serves the sealed-exchange API on addr.
 func RunAgent(addr string) error {
-	return agent.RunServer(addr, attestFunc())
+	return agent.RunServerATLS(addr, attestFunc())
 }

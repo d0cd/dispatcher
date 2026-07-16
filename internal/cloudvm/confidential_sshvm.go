@@ -3,18 +3,13 @@ package cloudvm
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/attest"
-	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/types"
 )
-
-// runSealedExchange is a seam over agent.RunSealedExchange so adapter
-// orchestration tests can drive the flow without a live in-TEE agent (the agent
-// + exchange are tested end-to-end in the attest package).
-var runSealedExchange = agent.RunSealedExchange
 
 // sshConfidentialDeps are the collaborators for an SSH-VM confidential run
 // (azure-snp, AWS Nitro). The provider-specific verification is a closure so the
@@ -34,10 +29,10 @@ type sshConfidentialDeps struct {
 	sshUser       string
 	startAgent    func(ctx context.Context, vm *VMInfo) (baseURL string, err error)
 	waitReady     func(ctx context.Context, baseURL string) error
-	// verify runs the provider's attester over the agent endpoint (MAA for Azure,
-	// raw SEV-SNP for AWS, Nitro doc for enclaves) and returns the verdict + the
-	// channel key to seal to.
-	verify func(ctx context.Context, vm *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error)
+	// validator builds the provider's aTLS attestation validator (azure-snp SNP+
+	// vTPM, Nitro doc) for a run; it records the verified verdict as it validates
+	// the evidence delivered over the attested TLS session.
+	validator func(req types.ConfidentialRequirement) *attest.AttestValidator
 }
 
 // executeSSHConfidential is the shared SSH-VM confidential orchestration:
@@ -110,20 +105,16 @@ func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types
 		return nil, fmt.Errorf("confidential agent endpoint not reachable: %w", err)
 	}
 
-	// Verify attestation BEFORE anything is sealed or shipped.
-	result, err := d.verify(ctx, vm, baseURL, w.Requirements.Confidential)
+	// Attest AND deliver over one attested TLS session: verification, workload
+	// delivery, and the result all ride the aTLS session bound to the agent's key.
+	// Nothing is shipped before verification (runOverATLS aborts on a bad peer).
+	v := d.validator(w.Requirements.Confidential)
+	runRes, err := runOverATLS(ctx, strings.TrimPrefix(baseURL, "http://"), v, payload)
 	if err != nil {
-		return nil, fmt.Errorf("attestation verification failed: %w", err)
+		return nil, fmt.Errorf("attested aTLS run: %w", err)
 	}
-	if !result.Verified {
-		return nil, fmt.Errorf("attestation rejected: %s", result.Verdict)
-	}
+	result := v.Result
 	dlog.L().Info("sshconf.attested", "run", p.Metadata.ID, "vm_id", vm.ID, "measurement", result.Measurement)
-
-	runRes, err := runSealedExchange(ctx, baseURL, result.ChannelKey, payload)
-	if err != nil {
-		return nil, fmt.Errorf("sealed run exchange: %w", err)
-	}
 
 	destroyOnErr = false
 	return &confidentialRunState{

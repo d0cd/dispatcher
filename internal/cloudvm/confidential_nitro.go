@@ -46,8 +46,8 @@ func executeNitroConfidential(ctx context.Context, d nitroDeps, p *types.Plan) (
 		provider: d.provider, image: d.image, enclave: true, instanceType: d.instanceType,
 		sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
-		verify: func(ctx context.Context, _ *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
-			return attest.NewAWSNitroAttester(map[int]string{0: d.pcr0}, baseURL).Verify(ctx, req)
+		validator: func(_ types.ConfidentialRequirement) *attest.AttestValidator {
+			return attest.NitroValidatorPinned(map[int]string{0: d.pcr0})
 		},
 	}
 	return executeSSHConfidential(ctx, deps, p, fmt.Sprintf("dispatcher-nitro-%s", adapter.SanitizeName(p.Workload.Name)))

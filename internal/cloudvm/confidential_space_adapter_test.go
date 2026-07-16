@@ -61,20 +61,6 @@ func stubATLSRun(t *testing.T, attRes attest.AttestationResult, got *agent.Paylo
 	t.Cleanup(func() { runOverATLS = prev })
 }
 
-// stubExchange replaces the sealed-exchange seam still used by the SSH-VM
-// confidential path (azure-snp, nitro) and records the payload it was handed.
-func stubExchange(t *testing.T, got *agent.Payload, res agent.Result, err error) {
-	t.Helper()
-	prev := runSealedExchange
-	runSealedExchange = func(_ context.Context, _ string, _ []byte, p agent.Payload) (agent.Result, error) {
-		if got != nil {
-			*got = p
-		}
-		return res, err
-	}
-	t.Cleanup(func() { runSealedExchange = prev })
-}
-
 // TestExecuteConfidentialSpace_HappyPath drives the whole dispatcher-side
 // orchestration: build image → provision → attest+verify → seal source/.env →
 // run → sealed result.

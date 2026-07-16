@@ -32,8 +32,8 @@ func executeAzureSNPConfidential(ctx context.Context, d azureSNPDeps, p *types.P
 		provider: d.provider, image: d.image, confidential: "sev-snp", secureBootOff: true,
 		sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
-		verify: func(ctx context.Context, _ *VMInfo, baseURL string, req types.ConfidentialRequirement) (attest.AttestationResult, error) {
-			return attest.NewAzureSNPAttester(d.pcrs, baseURL).Verify(ctx, req)
+		validator: func(req types.ConfidentialRequirement) *attest.AttestValidator {
+			return attest.AzureSNPValidatorPinned(d.pcrs, req.MinTCB)
 		},
 	}
 	return executeSSHConfidential(ctx, deps, p, fmt.Sprintf("dispatcher-azsnp-%s", adapter.SanitizeName(p.Workload.Name)))

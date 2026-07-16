@@ -51,5 +51,5 @@ func RunAgent(port uint32) error {
 	if err != nil {
 		return fmt.Errorf("listen vsock:%d: %w", port, err)
 	}
-	return agent.Serve(l, attestFunc())
+	return agent.ServeATLSOn(l, attestFunc())
 }

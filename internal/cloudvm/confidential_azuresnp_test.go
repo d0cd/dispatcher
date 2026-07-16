@@ -52,7 +52,7 @@ func TestAzureSNPCleanup_DestroysVM(t *testing.T) {
 // requests Secure Boot off (the unsigned custom UKI image needs it), verified
 // against the provider's recorded VMOptions.
 func TestExecuteSSHConfidential_ThreadsSecureBootOff(t *testing.T) {
-	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+	stubATLSRun(t, attest.AttestationResult{Verified: true}, nil, agent.Result{ExitCode: 0}, nil)
 	provider := NewMockProvider(ProviderAzure)
 	deps := sshConfidentialDeps{
 		provider:      provider,
@@ -61,7 +61,7 @@ func TestExecuteSSHConfidential_ThreadsSecureBootOff(t *testing.T) {
 		image:         "/gallery/measured",
 		startAgent:    func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
 		waitReady:     func(context.Context, string) error { return nil },
-		verify:        cannedVerify(attest.AttestationResult{Verified: true, Measurement: "pcr11", ChannelKey: []byte("k")}, nil),
+		validator:     cannedValidator,
 	}
 	_, err := executeSSHConfidential(context.Background(), deps, sshConfTestPlan(t, "run-snp", []string{"true"}), "dispatcher-azsnp-job")
 	require.NoError(t, err)

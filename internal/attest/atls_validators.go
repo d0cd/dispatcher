@@ -88,6 +88,18 @@ func AzureSNPValidator(roots []*x509.Certificate, pcrs map[int]string, minTCB ui
 	}}
 }
 
+// NitroValidatorPinned builds a NitroValidator against the pinned AWS Nitro root
+// (the production trust anchor), mirroring NewAWSNitroAttester.
+func NitroValidatorPinned(pcrs map[int]string) *AttestValidator {
+	return NitroValidator(awsNitroRoots, pcrs)
+}
+
+// AzureSNPValidatorPinned builds an AzureSNPValidator against the pinned AMD ARK
+// roots, mirroring NewAzureSNPAttester.
+func AzureSNPValidatorPinned(pcrs map[int]string, minTCB uint64) *AttestValidator {
+	return AzureSNPValidator(amdRoots, pcrs, minTCB)
+}
+
 // parseAzureSNPEvidence accepts either raw JSON or the base64(JSON) the producer
 // emits.
 func parseAzureSNPEvidence(evidence []byte) (agent.AzureSNPEvidence, error) {

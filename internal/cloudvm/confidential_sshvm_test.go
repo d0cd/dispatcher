@@ -49,13 +49,10 @@ func sshConfTestPlan(t *testing.T, id string, command []string) *types.Plan {
 	}
 }
 
-// cannedVerify returns a verify seam yielding a fixed verdict, so the shared
-// SSH-VM orchestration (Azure MAA, AWS SEV-SNP) can be driven without a live TEE
-// agent — the attesters themselves are covered in the attest package.
-func cannedVerify(res attest.AttestationResult, err error) func(context.Context, *VMInfo, string, types.ConfidentialRequirement) (attest.AttestationResult, error) {
-	return func(context.Context, *VMInfo, string, types.ConfidentialRequirement) (attest.AttestationResult, error) {
-		return res, err
-	}
+// cannedValidator supplies the deps a validator; its recorded verdict (Result) is
+// set by stubATLSRun (the aTLS run seam), so tests drive the verdict there.
+func cannedValidator(types.ConfidentialRequirement) *attest.AttestValidator {
+	return &attest.AttestValidator{}
 }
 
 // TestExecuteSSHConfidential_HappyPath drives the shared SSH-VM confidential
@@ -63,14 +60,14 @@ func cannedVerify(res attest.AttestationResult, err error) func(context.Context,
 // sealed result. The VM stays up until Cleanup.
 func TestExecuteSSHConfidential_HappyPath(t *testing.T) {
 	var got agent.Payload
-	stubExchange(t, &got, agent.Result{ExitCode: 0, Stdout: []byte("ran")}, nil)
+	stubATLSRun(t, attest.AttestationResult{Verified: true, Measurement: "pcr-11:abcd"}, &got, agent.Result{ExitCode: 0, Stdout: []byte("ran")}, nil)
 
 	provider := NewMockProvider(ProviderAzure)
 	deps := sshConfidentialDeps{
 		provider:   provider,
 		startAgent: func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
 		waitReady:  func(context.Context, string) error { return nil },
-		verify:     cannedVerify(attest.AttestationResult{Verified: true, Measurement: "pcr-11:abcd", ChannelKey: []byte("channel-key")}, nil),
+		validator:  cannedValidator,
 	}
 
 	state, err := executeSSHConfidential(context.Background(), deps, sshConfTestPlan(t, "run-1", []string{"sh", "main.sh"}), "dispatcher-cvm-job")
@@ -88,14 +85,14 @@ func TestExecuteSSHConfidential_HappyPath(t *testing.T) {
 // against an unbounded bill if the dispatcher CLI is killed mid-run. The TTL
 // must honor the plan's WatchdogTTL.
 func TestExecuteSSHConfidential_InstallsWatchdog(t *testing.T) {
-	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+	stubATLSRun(t, attest.AttestationResult{Verified: true}, nil, agent.Result{ExitCode: 0}, nil)
 
 	provider := NewMockProvider(ProviderAzure)
 	deps := sshConfidentialDeps{
 		provider:   provider,
 		startAgent: func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
 		waitReady:  func(context.Context, string) error { return nil },
-		verify:     cannedVerify(attest.AttestationResult{Verified: true, Measurement: "pcr-11", ChannelKey: []byte("k")}, nil),
+		validator:  cannedValidator,
 	}
 	plan := sshConfTestPlan(t, "run-wd", []string{"true"})
 	plan.Constraints.WatchdogTTL = 15 * time.Minute
@@ -115,7 +112,7 @@ func TestExecuteSSHConfidential_RefusesGPUWorkload(t *testing.T) {
 	// Stub the exchange to SUCCEED so the only path to an error (and to VMCount 0)
 	// is the GPU guard refusing before provisioning — not a downstream failure
 	// whose deferred teardown would coincidentally leave VMCount at 0.
-	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+	stubATLSRun(t, attest.AttestationResult{Verified: true}, nil, agent.Result{ExitCode: 0}, nil)
 
 	provider := NewMockProvider(ProviderAWS)
 	deps := sshConfidentialDeps{
@@ -123,7 +120,7 @@ func TestExecuteSSHConfidential_RefusesGPUWorkload(t *testing.T) {
 		confidential: "sev-snp",
 		startAgent:   func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
 		waitReady:    func(context.Context, string) error { return nil },
-		verify:       cannedVerify(attest.AttestationResult{Verified: true, ChannelKey: []byte("k")}, nil),
+		validator:    cannedValidator,
 	}
 	plan := sshConfTestPlan(t, "run-gpu", []string{"true"})
 	plan.Workload.Requirements.GPU = types.GPURequirement{Required: true, Model: "a100"}
@@ -138,7 +135,7 @@ func TestExecuteSSHConfidential_RefusesGPUWorkload(t *testing.T) {
 // instance type and NO memory-encryption type (the enclave is the TEE, not the
 // parent), while the CVM paths keep ConfidentialType.
 func TestExecuteSSHConfidential_ThreadsEnclaveShape(t *testing.T) {
-	stubExchange(t, nil, agent.Result{ExitCode: 0}, nil)
+	stubATLSRun(t, attest.AttestationResult{Verified: true}, nil, agent.Result{ExitCode: 0}, nil)
 
 	provider := NewMockProvider(ProviderAWS)
 	deps := sshConfidentialDeps{
@@ -147,7 +144,7 @@ func TestExecuteSSHConfidential_ThreadsEnclaveShape(t *testing.T) {
 		instanceType: "c6a.xlarge",
 		startAgent:   func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
 		waitReady:    func(context.Context, string) error { return nil },
-		verify:       cannedVerify(attest.AttestationResult{Verified: true, Measurement: "pcr0", ChannelKey: []byte("k")}, nil),
+		validator:    cannedValidator,
 	}
 	_, err := executeSSHConfidential(context.Background(), deps, sshConfTestPlan(t, "run-enc", []string{"true"}), "dispatcher-nitro-job")
 	require.NoError(t, err)
@@ -159,37 +156,33 @@ func TestExecuteSSHConfidential_ThreadsEnclaveShape(t *testing.T) {
 // TestExecuteSSHConfidential_UnverifiedTearsDown is the security gate: an
 // unverified verdict seals and runs nothing and tears the VM down.
 func TestExecuteSSHConfidential_UnverifiedTearsDown(t *testing.T) {
-	ran := false
-	prevExchange := runSealedExchange
-	runSealedExchange = func(context.Context, string, []byte, agent.Payload) (agent.Result, error) {
-		ran = true
-		return agent.Result{}, nil
-	}
-	t.Cleanup(func() { runSealedExchange = prevExchange })
+	// A real RunOverATLS attests first and returns this error WITHOUT delivering
+	// (the no-run-on-unverified-TEE guarantee is proven in the attest packages).
+	stubATLSRun(t, attest.AttestationResult{}, nil, agent.Result{}, assertErr("measurement mismatch"))
 
 	provider := NewMockProvider(ProviderAzure)
 	deps := sshConfidentialDeps{
 		provider:   provider,
 		startAgent: func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
 		waitReady:  func(context.Context, string) error { return nil },
-		verify:     cannedVerify(attest.AttestationResult{Verified: false, Verdict: "measurement mismatch"}, nil),
+		validator:  cannedValidator,
 	}
 
 	_, err := executeSSHConfidential(context.Background(), deps, sshConfTestPlan(t, "run-2", []string{"true"}), "dispatcher-cvm-job")
 	require.Error(t, err)
-	assert.False(t, ran, "a workload must never run on an unverified TEE")
 	assert.Equal(t, 0, provider.VMCount(), "the VM must be torn down on attestation rejection")
 }
 
 // TestExecuteSSHConfidential_VerifyErrorTearsDown: a verifier error (not just a
 // negative verdict) must also tear the VM down and never seal.
 func TestExecuteSSHConfidential_VerifyErrorTearsDown(t *testing.T) {
+	stubATLSRun(t, attest.AttestationResult{}, nil, agent.Result{}, assertErr("token signature invalid"))
 	provider := NewMockProvider(ProviderAzure)
 	deps := sshConfidentialDeps{
 		provider:   provider,
 		startAgent: func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
 		waitReady:  func(context.Context, string) error { return nil },
-		verify:     cannedVerify(attest.AttestationResult{}, assertErr("token signature invalid")),
+		validator:  cannedValidator,
 	}
 
 	_, err := executeSSHConfidential(context.Background(), deps, sshConfTestPlan(t, "run-3", []string{"true"}), "dispatcher-cvm-job")
