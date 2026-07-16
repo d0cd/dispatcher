@@ -14,10 +14,11 @@ obstacle entirely and lets us pin **PCR11** — where a UKI's components land �
 instead of forcing the agent into PCR4. The verifier is built and TDD'd
 (`verifyAzureSNP`, `internal/attest/azure_snp.go`): SEV-SNP report (genuine AMD)
 → `REPORT_DATA = SHA-256(runtime data)` → the vTPM AK (HCLAkPub) → an AK-signed
-TPM quote over the PCRs → pin PCR11. Remaining: the in-CVM agent that gathers this
-evidence (reuse `go-azguestattestation` + `go-tpm`), the mkosi UKI image, and live
-validation. The PCR4/MAA discussion below is retained as background on *why* we
-pivoted.
+TPM quote over the PCRs → pin PCR11. The in-CVM agent (`go-tpm` + direct SNP+vTPM,
+`internal/attest/agent/azuresnp`), the mkosi UKI image, and live validation are all
+shipped and hardware-validated; the run attests and delivers the workload over an
+attested TLS session (aTLS). The PCR4/MAA discussion below is retained as background
+on *why* we pivoted.
 
 ## Why PCR4, and why a UKI
 
@@ -131,7 +132,7 @@ so re-capture and re-pin per image.
 
 **✅ COMPLETE — measured boot live-validated end-to-end.**
 
-- ✅ Verifier (`verifyAzureSNP` / `NewAzureSNPAttester`) + agent
+- ✅ Verifier (`verifyAzureSNP` / `AzureSNPValidatorPinned`) + agent
   (`dispatcher-attest-azuresnp`) — direct SNP+vTPM, no MAA, pins PCR11.
 - ✅ **Measured image built + live-validated.** A custom mkosi image bakes the
   agent into a **dm-verity root**; mkosi injects the verity **roothash into the UKI

@@ -102,19 +102,20 @@ only if control-plane starvation is ever actually observed).
 Design: [confidential-computing.md](confidential-computing.md). Provisioning
 (GCP SEV-SNP + AMD Milan pin, AWS `AmdSevSnp`, Azure ConfidentialVM), the typed
 `confidential:` model, verifier cores, pinned AMD ARK/AWS roots, **and the live
-evidence path** have landed on all three clouds: the measured in-TEE agent
-(`internal/attest/agent` + `cmd/dispatcher-attest*`) binds the per-run nonce +
-in-TEE key (`REPORT_DATA=H(N‖key)`) and returns the report/token, and a
-`required` run verifies before shipping any secret — GCP Confidential Space,
-Azure MAA (JWKS pinned) + measured direct-SNP (`profile: azure-snp`), AWS
-SEV-SNP (`VLEK→ASK→ARK`) + Nitro (`profile: nitro`). The `dispatcher
+attested-TLS evidence path** have landed on all three measured backends: dispatcher
+dials the measured in-TEE agent (`internal/attest/agent` + `cmd/dispatcher-attest*`)
+over attested TLS, the agent binds the per-run nonce + the TLS session
+(`REPORT_DATA=H(N‖bindData)`) into the report/token, and a `required` run verifies
+before delivering any secret over that session — GCP Confidential Space, Azure
+measured direct SNP+vTPM (`profile: azure-snp`), AWS Nitro Enclaves
+(`profile: nitro`) — each hardware-validated. The `dispatcher
 confidential pins|pin|capture|build|check` pipeline manages measured-image pins.
 The **GCP SEV-SNP golden capture is validated on real hardware**. Secret release
 fails closed unless the plan selects a measured backend: Nitro on AWS,
-`profile: azure-snp` on Azure, or Confidential Space on GCP. The standard AWS
-SEV-SNP and Azure MAA routes no longer execute because their SSH-delivered agent
-is outside the measured launch chain. **MAA per-component TCB** and **AMD KDS CRL
-revocation** remain implemented for verifier reuse. Remaining:
+`profile: azure-snp` on Azure, or Confidential Space on GCP. The unmeasured
+standard AWS SEV-SNP and Azure MAA routes were removed — their SSH-delivered agent
+sat outside the measured launch chain. **AMD KDS CRL revocation** remains,
+enforced on the `azure-snp` path. Remaining:
 
 | Item | Effort | Impact |
 |---|---|---|

@@ -34,8 +34,8 @@ internal/
   approval/           # Per-run Unix-socket approval gate (audit Record embedded in run state)
   adapter/            # TargetAdapter interface, shared utilities, local/docker/ssh adapters
   cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima/Firecracker), watchdog, gc, bill, confidential adapters
-  attest/             # Attestation verifiers (SNP/MAA/Nitro), pinned roots, in-TEE agent
-  confidential/       # HPKE (RFC 9180) payload sealing + measured-image pin registry
+  attest/             # Attestation verifiers (SNP/Nitro/CS-JWS) + per-cloud aTLS validators, pinned roots, in-TEE agent + attested-TLS transport
+  confidential/       # Measured-image pin registry (input-hash drift guard)
   shard/              # Sharding / fan-out
   planner/            # AI planner, tool registry, LLM backend (aitelier)
   state/              # State-dir resolution + 0700 enforcement
@@ -90,5 +90,5 @@ gofmt -l .                            # Find unformatted files
 - Go 1.25, Cobra (CLI), Viper (config), go-yaml
 - Standard library testing + testify
 - fatih/color for terminal output
-- cloudflare/circl for HPKE (RFC 9180) confidential-payload sealing
+- Standard-library `crypto/tls` for the attested-TLS (aTLS) confidential channel — no external crypto dep
 - Cloud provider CLIs (hcloud, aws, gcloud, az) for VM management

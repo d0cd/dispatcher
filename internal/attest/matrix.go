@@ -43,7 +43,7 @@ const (
 	ControlGenuineTEE     Control = "Genuine TEE (signature + chain to pinned root)"
 	ControlMeasurement    Control = "Measurement/identity on exact allowlist (empty fails closed)"
 	ControlNonce          Control = "Per-run nonce freshness"
-	ControlChannelBinding Control = "Channel-key binding (sealed only to the attested key)"
+	ControlChannelBinding Control = "Session binding (evidence bound to the attested TLS session)"
 	ControlDebugOff       Control = "Debug disabled"
 	ControlMigrationOff   Control = "Migration disabled"
 	ControlMinTCB         Control = "Minimum TCB / firmware floor"

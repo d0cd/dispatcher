@@ -19,9 +19,10 @@ A Nitro enclave is a stripped VM carved from the parent instance:
   agent's exec runner, but cannot `pip install` / `apt get` / fetch at run time —
   bake everything it needs into the enclave image (`deploy/nitro/Dockerfile`).
 
-These are inherent to Nitro. The sealed exchange (attest → seal source/.env → run
-→ sealed result) is identical to the other clouds; only the transport (vsock) and
-the attestation format (Nitro COSE doc) differ.
+These are inherent to Nitro. The attested run (attest over aTLS → deliver
+source/.env → run → result) is identical to the other clouds; only the transport
+(aTLS tunnelled over vsock by the parent proxy) and the attestation format (Nitro
+COSE doc) differ.
 
 ## Pieces
 
@@ -29,7 +30,7 @@ the attestation format (Nitro COSE doc) differ.
 | --- | --- | --- |
 | `dispatcher-attest-nitro` | inside the enclave | `internal/attest/agent/nitro` (vsock + NSM) |
 | `dispatcher-nitro-proxy` | the parent instance | `cmd/dispatcher-nitro-proxy` |
-| verifier | dispatcher | `attest.NewAWSNitroAttester` (pinned Root-G1 + PCR pins) |
+| verifier | dispatcher | `attest.NitroValidatorPinned` (pinned Root-G1 + PCR pins) |
 
 ## Live validation runbook
 
@@ -84,13 +85,13 @@ the attestation format (Nitro COSE doc) differ.
   build EIF → capture PCR0 → run enclave + proxy → fetch the real NSM attestation
   doc → verify (chain to Root-G1 + COSE signature + nonce + PCR0) → seal → run the
   workload inside the enclave → open the sealed result. Verifier
-  (`attest.NewAWSNitroAttester`), pinned Root-G1, in-enclave agent (vsock + NSM),
+  (`attest.NitroValidatorPinned`), pinned Root-G1, in-enclave agent (vsock + NSM),
   parent proxy, and EIF packaging all confirmed against hardware.
   - Finding: the NSM emits an *untagged* COSE_Sign1 (no CBOR tag 18); the verifier
     accepts either form.
 - ✅ **Dispatcher-side adapter** (`AWSNitroConfidentialAdapter`): `dispatcher run`
   with `confidential.profile: nitro` provisions the parent, installs nitro-cli, ships
-  the pinned EIF + proxy, runs the enclave, and drives the sealed exchange —
-  **live-validated end-to-end** (`TestGolden_NitroLiveAdapter`, us-east-1): sealed
-  .env + source reached the enclave, the workload ran, the sealed result came back,
+  the pinned EIF + proxy, runs the enclave, and drives the attested run over aTLS —
+  **live-validated end-to-end** (`TestGolden_NitroLiveAdapter`, us-east-1): the
+  .env + source reached the enclave over the attested session, the workload ran, the result came back,
   and Cleanup reaped the parent. The AWS measured-agent path is complete.

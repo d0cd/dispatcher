@@ -108,8 +108,8 @@ internal/
   approval/           # Per-run Unix-socket approval gate (audit Record embedded in run state)
   adapter/            # TargetAdapter interface, shared utilities, local/docker/ssh adapters
   cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima/Firecracker), watchdog, catalog, gc, bill, confidential adapters
-  attest/             # Attestation verifiers (SEV-SNP/MAA/Nitro), pinned AMD/AWS roots, in-TEE agent + sealed exchange
-  confidential/       # HPKE (RFC 9180) payload sealing + measured-image pin registry
+  attest/             # Attestation verifiers (SEV-SNP/Nitro/CS-JWS) + per-cloud aTLS validators, pinned AMD/AWS roots, in-TEE agent + attested-TLS transport
+  confidential/       # Measured-image pin registry (input-hash drift guard)
   shard/              # Shard planning (count/discover), bounded-parallel fan-out engine
   planner/            # AI planner, tool registry, aitelier backend, MCP server
   state/              # State-dir resolution + 0700 enforcement

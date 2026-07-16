@@ -56,10 +56,11 @@ dispatcher guarantees:
   the SEV-SNP path (`profile: azure-snp`) and is n/a on the
   Nitro and Confidential Space paths (see the enforcement matrix).
 - **G3 — Fresh and bound.** The attestation answered this run's random nonce and
-  committed the in-TEE channel key — so it is not a replayed or relayed proof from
-  another machine; dispatcher provably talked to *that* TEE.
+  committed the attested TLS session (`bindData`) — so it is not a replayed or
+  relayed proof from another machine; dispatcher provably talked to *that* TEE over
+  *this* session.
 - **G4 — Secret-after-proof.** No workload source, `.env`, or output crossed the
-  channel before G1–G3 verified.
+  session before G1–G3 verified.
 - **G5 — Auditable.** The verdict (verified, type, measurement, TCB, nonce) is
   recorded on the run, shown in `status --json`, and rendered in human-readable
   `status` and `diagnose` output.
@@ -95,7 +96,7 @@ edit by hand. TestMatrix_DocInSync fails if this drifts from the code. -->
 | Genuine TEE (signature + chain to pinned root) | ✓ | ✓ | ✓ |
 | Measurement/identity on exact allowlist (empty fails closed) | ✓ | ✓ | ✓ |
 | Per-run nonce freshness | ✓ | ✓ | ✓ |
-| Channel-key binding (sealed only to the attested key) | ✓ | ✓ | ✓ |
+| Session binding (evidence bound to the attested TLS session) | ✓ | ✓ | ✓ |
 | Debug disabled | ✓ | ✓ | n/a |
 | Migration disabled | n/a | ✓ | n/a |
 | Minimum TCB / firmware floor | fail-closed | ✓ | n/a |
@@ -137,42 +138,45 @@ operator (dispatcher, outside the TEE)              cloud TEE VM (untrusted unti
         offered (else warn — N1)
       - policy: debug off, migration off
       - NO secrets in cloud-init/user-data      ── boots inside the TEE ──▶
-3.3 connect over SSH (untrusted; used ONLY to
-    drive the agent and fetch evidence).
-3.4 challenge the measured in-TEE agent:        ──▶ agent generates an EPHEMERAL
-      send N; agent binds its in-TEE key            keypair *inside* the TEE, reads the
-                                                     HW report (/dev/sev-guest) or calls
-                                                     MAA with
-                                                     REPORT_DATA = H(N ‖ agent_pubkey)
+3.3 dial the measured in-TEE agent over TLS
+    (untrusted transport; trust is attestation,
+    not PKI — InsecureSkipVerify).
+3.4 challenge the agent over the session:       ──▶ agent serves TLS with an EPHEMERAL
+      send N; the agent binds the session           cert whose key never leaves the TEE,
+                                                     derives bindData = H(certSPKI ‖ exporter),
+                                                     reads the HW report (/dev/sev-guest) or
+                                                     calls the NSM/teeserver with
+                                                     REPORT_DATA = H(N ‖ bindData)
                                                 ◀── returns report/token + cert chain
-                                                     + agent_pubkey
 3.5 VERIFY (ALL must hold, else destroy + fail):
       a. signature chains to vendor root; TCB ≥
          minimum; certs not revoked (AMD KDS CRL on
-         the AWS and Azure-SNP paths — see matrix).
+         the Azure-SNP path — see matrix).
       b. TEE type == requested
       c. policy: debug off; migration off (on every
          SEV-SNP path — azure-snp;
          n/a on Nitro/CS — see the matrix)
       d. measurement ∈ allowlist (EXACT)
-      e. REPORT_DATA == H(N ‖ agent_pubkey)
-         → freshness (N) + binding (agent_pubkey)
+      e. REPORT_DATA == H(N ‖ bindData), where
+         dispatcher recomputes bindData from the cert
+         it handshook with + its own exporter
+         → freshness (N) + session binding
     Record AttestationResult.
-3.6 wrap workload source + .env to agent_pubkey
-    (or RA-TLS to it) and run the command.        ──▶ workload runs in the TEE
-3.7 retrieve outputs over the bound channel.       (leaves the TEE on arrival — N2)
+3.6 deliver workload source + .env over the
+    attested session and run the command.         ──▶ workload runs in the TEE
+3.7 retrieve outputs over the attested session.    (leaves the TEE on arrival — N2)
 3.8 teardown.
 
 Any failure in 3.4–3.5 ⇒ destroy the VM, send nothing, fail the run.
 ```
 
-**Why this is sound.** The untrusted SSH connection in 3.3–3.4 is used *only* to
-fetch evidence — nothing secret is sent until 3.5e proves the channel key was
-generated **inside** the genuine, freshly-challenged TEE (so a host that terminates
-SSH and relays our nonce to a real TEE elsewhere cannot bind *its own* key). The
-agent is part of the **measured** image (3.2), so the host can't swap it for a
-relaying one. The exact-measurement allowlist (3.5d) stops the host from booting a
-malicious genuinely-SEV-SNP image.
+**Why this is sound.** The untrusted TLS transport in 3.3–3.4 carries nothing
+secret until 3.5e proves the evidence committed to *this* TLS session's `bindData`
+inside the genuine, freshly-challenged TEE (so a host that relays our nonce to a
+real TEE elsewhere cannot bind *its own* session — the evidence would commit to a
+`bindData` dispatcher never handshook with). The agent is part of the **measured**
+image (3.2), so the host can't swap it for a relaying one. The exact-measurement
+allowlist (3.5d) stops the host from booting a malicious genuinely-SEV-SNP image.
 
 ---
 
@@ -181,10 +185,10 @@ malicious genuinely-SEV-SNP image.
 | # | Requirement | Why |
 |---|---|---|
 | R1 | Per-run random nonce in `REPORT_DATA` | replay/relay resistance (G3) |
-| R2 | `REPORT_DATA` commits an **in-TEE-generated** channel key (not a host-injectable one) | channel binding (G3) |
+| R2 | `REPORT_DATA` commits the attested TLS session's `bindData` = H(agent-cert-SPKI ‖ RFC 5705 exporter), tied to an **in-TEE** key (not a host-injectable one) | session binding (G3) |
 | R3 | Verify full cert chain to the vendor root | report is genuine hardware (G1) |
 | R4 | Check certificate revocation (AMD KDS CRL) | revoked platforms rejected — enforced on the AMD-cert-chain path (Azure `profile: azure-snp`); delegated to the cloud service on GCP CS; n/a on Nitro (ephemeral certs) — see the matrix |
-| R5 | Enforce a minimum reported TCB/firmware version | reject out-of-date silicon (G2) — the raw-report paths and the MAA path (recombined from per-component SVN claims); GCP CS has no reported TCB, so it fails closed when `minTCB` is set |
+| R5 | Enforce a minimum reported TCB/firmware version | reject out-of-date silicon (G2) — the SNP report path (`profile: azure-snp`); GCP CS carries no reported TCB, so it fails closed when `minTCB` is set, and Nitro is n/a (see the matrix) |
 | R6 | Require `policy.debug == false`, `policy.migration == false` | a debuggable/migratable VM isn't confidential (G2) — verified on the SEV-SNP path (azure-snp); n/a on Nitro/CS |
 | R7 | Measurement ∈ **exact allowlist** of known-good vendor confidential images | host can't boot a malicious image (G2) |
 | R8 | TEE type in report == requested type | a `tdx` job isn't silently SEV (G1) |
@@ -231,8 +235,8 @@ confidential:
 
 **What a run does:** `plan` shows feasibility + the confidential-SKU cost premium;
 `run` provisions → boots → challenges the in-TEE agent with a fresh nonce → verifies
-(chain, TCB, policy, exact measurement, type, freshness+binding — plus cert
-revocation on the AMD-cert-chain paths, AWS and Azure `profile: azure-snp`) → only
+(chain, TCB, policy, exact measurement, type, freshness+session-binding — plus cert
+revocation on the AMD-cert-chain path, Azure `profile: azure-snp`) → only
 then sends source/secrets and runs → retrieves outputs → tears down.
 
 **Failure modes the operator sees (all fail closed):**
@@ -241,7 +245,7 @@ then sends source/secrets and runs → retrieves outputs → tears down.
   pinned image for the provider → refused **before** provisioning (no VM billed).
 - Measurement not on the allowlist → **rejected**, showing the actual measurement so
   a legitimate new image can be added.
-- Policy/TCB/type/binding failure (plus revocation on the AWS and Azure-SNP paths)
+- Policy/TCB/type/binding failure (plus revocation on the Azure-SNP path)
   → VM **destroyed**, run fails with the verdict.
 - Provider without host-opaque disk (GCP/AWS) → **warning** (N1), run proceeds.
 
@@ -261,14 +265,15 @@ warned.
   allowlist fails closed).
 - **Guest-agent delivery — vendor image (C), custom-image escape hatch (B), drop
   cloud-init (A).** Use the pinned vendor confidential image's built-in, **measured**
-  attestation agent (Azure guest-attestation/MAA, GCP Confidential Space, AWS image
-  with `snpguest`). For a custom image, the operator bakes the agent in and registers
+  attestation agent (Azure direct SNP+vTPM `profile: azure-snp`, GCP Confidential
+  Space, AWS Nitro Enclaves `profile: nitro`). For a custom image, the operator bakes the agent in and registers
   its measurement. A cloud-init-injected agent is **rejected** — it runs after the
   measured boot, so it's host-swappable and defeats R7.
-- **Verifiers — multiple formats** behind the `Attester` interface: the SEV-SNP
-  hardware report (hand-rolled stdlib on the azure-snp path, `snp.go`), a COSE chain
-  to the pinned Nitro root on the nitro path, and token JWS for GCP Confidential Space
-  (`go-jose/v4`, see `internal/attest/jws.go`); shared nonce/measurement/policy/binding
-  checks via `applyPolicy`.
+- **Verifiers — multiple formats** behind the per-cloud aTLS validators
+  (`atls_validators.go`): the SEV-SNP hardware report (hand-rolled stdlib on the
+  azure-snp path, `snp.go`), a COSE chain to the pinned Nitro root on the nitro path,
+  and token JWS for GCP Confidential Space (`go-jose/v4`, see `internal/attest/jws.go`);
+  shared nonce/measurement/policy/binding checks via `applyPolicy`. Each validator
+  verifies evidence supplied by the attested TLS exchange.
 - **Disk-at-rest — allow both, warn (R10/N1).** Confidential disk where the provider
   offers it; elsewhere run but warn + record that disk-at-rest isn't host-opaque.

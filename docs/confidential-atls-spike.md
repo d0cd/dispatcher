@@ -1,8 +1,22 @@
 # Spike: attested-TLS agent channel (sizing)
 
-**Status: spike, not wired into the run path.** Code lives in
-`internal/attest/atls/` (an unwired package + a passing end-to-end test); nothing
-imports it. This document sizes turning it into the real fix.
+**Status: shipped.** The aTLS channel is now the transport for all three measured
+backends (GCP Confidential Space, AWS Nitro, Azure SNP+vTPM), and the HTTP/HPKE
+sealed exchange it replaced has been retired. Each backend was live-validated on
+real hardware. The current execution path is in
+[`confidential-space-execution.md`](confidential-space-execution.md); the code is
+`internal/attest/atls/` (the primitive), `internal/attest/agent/atls_transport.go`
+(the agent + dispatcher transport), and `internal/attest/atls_validators.go` (the
+per-cloud validators).
+
+**Outcome vs. the plan below.** It landed close to the sizing: the agents serve
+`RunServerATLS`/`ServeATLSOn`; dispatcher dials `RunOverATLS` (and `AttestOverATLS`
+for capture); the per-cloud `Attester` types were replaced by `AttestValidator`s
+that verify evidence supplied by the TLS exchange. The **client-side preemption**
+caveat still holds: aTLS closes the relay/MITM class, and the fail-closed per-run
+firewall remains the boundary against a rogue client (mutual aTLS / single-accept
+not yet added). The rest of this document is the original proposal, kept as the
+design record.
 
 ## The gap it closes
 
