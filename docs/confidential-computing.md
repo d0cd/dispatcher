@@ -206,15 +206,16 @@ malicious genuinely-SEV-SNP image.
 confidential:
   type: sev-snp          # sev | sev-snp | tdx | any   (default: any)
   attestation: required  # required | off              (default: required)
-  profile: azure-snp     # (optional) azure-snp | nitro — select a measured-boot
-                         # backend whose launch measurement includes the agent.
-                         # Unset uses the provider's standard confidential path.
-                         # azure-snp pins target azure-vm; nitro pins aws-vm.
+  profile: azure-snp     # azure-snp | nitro — select a measured-boot backend
+                         # whose launch measurement includes the agent. Required
+                         # on aws-vm/azure-vm for an attested run; GCP Confidential
+                         # Space needs none. azure-snp pins azure-vm; nitro pins aws-vm.
 ```
 
 **Images & measurements (consequence of exact attestation):**
-- **Default — pinned vendor image.** dispatcher provisions a known vendor
-  confidential image (Azure CVM, GCP Confidential Space, an AWS SEV-SNP image) whose
+- **Default — pinned vendor image.** dispatcher provisions a known measured
+  image (the azure-snp CVM image, a GCP Confidential Space container, an AWS Nitro
+  enclave) whose
   launch measurement and built-in (measured) attestation agent dispatcher ships in
   its allowlist. No image work for the operator.
   > **Shipped.** The three **measured** backends are live: GCP Confidential
@@ -261,13 +262,13 @@ warned.
 - The **verify-and-gate flow**: pluggable per-provider `Attester`, post-boot
   verify that **destroys the VM** on failure, verdict recorded on run state.
 - **Verifier cores** behind the per-provider `Attester`: raw SEV-SNP report parse
-  + ECDSA-P384/SHA-384 signature + VCEK←ASK←ARK (VLEK←ASVK←ARK on AWS) chain — **hand-rolled on Go
-  stdlib** (`crypto/ecdsa`/`x509`/`encoding/binary`, `internal/attest/snp.go`) on
-  the **Azure measured direct-SNP** path, and via **go-sev-guest** on the **AWS**
-  VLEK path; token JWS (`go-jose/v4`) for **Azure MAA** (compliance/type/measurement
-  claims) and **GCP Confidential Space** (Google-signed EAT + container image-digest
-  allowlist). Each enforces R3–R8 + freshness/binding (R1/R2) via `applyPolicy` (or,
-  for Confidential Space, the digest allowlist + nonce/channel-key binding).
+  + ECDSA-P384/SHA-384 signature + VCEK←ASK←ARK chain — **hand-rolled on Go stdlib**
+  (`crypto/ecdsa`/`x509`/`encoding/binary`, `internal/attest/snp.go`) on the
+  **azure-snp** path; token JWS (`go-jose/v4`) for **GCP Confidential Space**
+  (Google-signed EAT + container image-digest allowlist); and a COSE chain to the
+  pinned **AWS Nitro** root (PCR0) on the **nitro** path. Each enforces R3–R8 +
+  freshness/binding (R1/R2) via `applyPolicy` (or, for Confidential Space, the digest
+  allowlist + nonce/channel-key binding).
 - **Measurement allowlist + minTCB** config (`confidential.measurements` /
   `minTCB`), threaded to the verifier (R7); empty allowlist fails closed.
 - **Pinned AMD ARK roots** (Milan/Genoa/Turin), embedded from AMD's KDS; the
@@ -289,17 +290,9 @@ warned.
   offered + warn (R10/N1), explicit policy bits (R6).
 - **Format bind** — ✅ the raw SEV-SNP report parser is golden-validated against a
   real captured **v4** report (taken on GCP hardware) through the coded ABI offsets
-  + VCEK→ASK→ARK-Milan; this parser backs the **Azure measured direct-SNP** path.
-  GCP's own run path is **Confidential Space** (Google-signed EAT/JWS + image-digest
-  allowlist), not the raw report. ✅ **Azure MAA** claim names + JWKS fetch/pinning +
-  guest agent implemented; ✅ **AWS VLEK** — AWS masks the chip id and signs with VLEK
-  not VCEK, so verification uses a `VLEK→ASVK→ARK` path (via go-sev-guest; ARK/ASK-Milan
-  roots match).
-- **MAA TCB mapping** — MAA reports per-component SVNs rather than one packed TCB,
-  so the MAA attester recombines the `x-ms-sevsnpvm-{bootloader,tee,snpfw,microcode}-svn`
-  claims into the SEV-SNP `REPORTED_TCB` layout and compares it per component against
-  `minTCB` (identical to the direct-SNP paths). A token missing those claims yields 0,
-  failing any positive floor closed.
+  + VCEK→ASK→ARK-Milan; this parser backs the **azure-snp** path. GCP's run path is
+  **Confidential Space** (Google-signed EAT/JWS + image-digest allowlist) and AWS's is
+  **nitro** (COSE + PCR0), neither of which uses the raw report.
 - **Revocation** (R4) — enforced on the AMD-cert-chain path (Azure `profile:
   azure-snp`): the ARK-signed CRL at the ASK's AMD KDS distribution point,
   fail-closed if unreachable. Delegated to the cloud service on GCP CS;
@@ -324,7 +317,7 @@ provisions encrypted memory with no proof (N4).
 | ✅ | Audit surfacing in `status`/`diagnose` (R13) | usability + audit |
 | 1 | Provision hardening: pinned vendor images, confidential disk + warn, policy bits | safe, known launch |
 | 2 | In-TEE agent evidence fetch: nonce + ephemeral in-TEE key, `REPORT_DATA=H(N‖key)` (vendor-image agent, measured); flips attesters to ready | bound, fresh evidence |
-| ~ | Format bind + revocation: GCP SEV-SNP layout confirmed on a real capture ✅; MAA claims ✅, AWS **VLEK** path ✅, AMD KDS CRL revocation (AWS + azure-snp) ✅; MAA per-component TCB ✅ | live trust |
+| ~ | Format bind + revocation: SEV-SNP report layout confirmed on a real capture ✅; AMD KDS CRL revocation (azure-snp) ✅ | live trust |
 | 4 | Channel binding: trust the channel key only after R2 verifies; wrap secrets to it (R9) | no MITM/relay |
 
 Each verifier core is unit-tested against synthetic evidence; the binary/claim
@@ -336,20 +329,20 @@ increment 2/3) is trusted.
 ## 8. Decisions
 
 - **Measurement bar — EXACT (R7).** Allowlist of known-good launch measurements per
-  pinned vendor confidential image; reject anything else. dispatcher ships **no** base
-  allowlist: on the standard SEV-SNP / MAA paths the operator supplies
-  `confidential.measurements` (an empty allowlist fails closed), and the measured
-  `profile` backends resolve it from the pin registry (§5).
+  pinned measured image; reject anything else. dispatcher ships **no** base
+  allowlist: the measured `profile` backends resolve it from the pin registry (§5),
+  and a custom image supplies its own via `confidential.measurements` (an empty
+  allowlist fails closed).
 - **Guest-agent delivery — vendor image (C), custom-image escape hatch (B), drop
   cloud-init (A).** Use the pinned vendor confidential image's built-in, **measured**
   attestation agent (Azure guest-attestation/MAA, GCP Confidential Space, AWS image
   with `snpguest`). For a custom image, the operator bakes the agent in and registers
   its measurement. A cloud-init-injected agent is **rejected** — it runs after the
   measured boot, so it's host-swappable and defeats R7.
-- **Verifiers — BOTH formats** behind the `Attester` interface: SEV-SNP hardware
-  report (hand-rolled stdlib on the Azure measured-SNP path, `snp.go`; go-sev-guest
-  on AWS VLEK) and token JWS for Azure MAA and GCP Confidential Space (`go-jose/v4`,
-  see `internal/attest/jws.go`); shared nonce/measurement/policy/binding checks via
-  `applyPolicy`.
+- **Verifiers — multiple formats** behind the `Attester` interface: the SEV-SNP
+  hardware report (hand-rolled stdlib on the azure-snp path, `snp.go`), a COSE chain
+  to the pinned Nitro root on the nitro path, and token JWS for GCP Confidential Space
+  (`go-jose/v4`, see `internal/attest/jws.go`); shared nonce/measurement/policy/binding
+  checks via `applyPolicy`.
 - **Disk-at-rest — allow both, warn (R10/N1).** Confidential disk where the provider
   offers it; elsewhere run but warn + record that disk-at-rest isn't host-opaque.

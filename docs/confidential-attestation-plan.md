@@ -1,16 +1,21 @@
 # Making confidential attestation operational
 
-**Status:** all three major clouds are operational and live-validated end-to-end
-(build/provision → attest → seal → run-in-TEE → sealed result → teardown):
+**Status:** the three **measured** backends are operational and live-validated
+end-to-end (build/provision → attest → seal → run-in-TEE → sealed result → teardown):
 - **GCP Confidential Space** — vendor CS token; container path.
-- **Azure MAA** — vendor MAA token (nested schema, client-payload binding);
+- **Azure `profile: azure-snp`** — SEV-SNP report + vTPM, agent measured into PCR11;
   SSH-VM path (`docs/confidential-azure-maa.md`).
-- **AWS SEV-SNP** — raw report verified with `go-sev-guest` + the VLEK/ASVK KDS
-  chain; SSH-VM path.
+- **AWS `profile: nitro`** — Nitro Enclave; COSE chain to the pinned Nitro root (PCR0).
 
-All verification uses **vetted libraries** — go-jose (JWS), cloudflare/circl
+> **Note:** the unmeasured standard SEV-SNP / MAA paths (post-boot scp'd agent, not
+> in the launch measurement) were **removed**. Sections below that describe them
+> (the design fork, `maaFetch`, the AWS VLEK path) are a record of the build journey,
+> not the current code — see [confidential-computing.md](confidential-computing.md)
+> for the current spec.
+
+Verification uses **vetted libraries** — go-jose (JWS), cloudflare/circl
 (HPKE), google/go-sev-guest (SEV-SNP), edgelesssys/go-azguestattestation (Azure
-vTPM/MAA) — no hand-rolled crypto in any operational path. This doc is the
+vTPM) — no hand-rolled crypto in any operational path. This doc is the
 "how/why" — requirements R1–R13 + threat model live in
 [confidential-computing.md](confidential-computing.md).
 
@@ -77,8 +82,8 @@ independent security review** (an app-logic review, not a crypto audit).
   and channel key (`REPORT_DATA = H(N‖key)`), and a `required` run verifies
   before shipping any secret. Measured images exist for all three clouds (GCP
   Confidential Space digest, Azure `profile: azure-snp` PCR11, AWS `profile:
-  nitro` PCR0). Residual: the *standard* AWS SEV-SNP / Azure MAA agent is scp'd,
-  not folded into the launch measurement — the measured backends close that.
+  nitro` PCR0). The unmeasured standard SEV-SNP / MAA paths (scp'd agent not folded
+  into the launch measurement) were removed — the measured backends are the answer.
 
 ## The trust-bootstrap chain (target)
 
@@ -218,16 +223,16 @@ container-based execution path (CS is container-shaped, no SSH), wiring the
 1. **GCP Confidential Space, end-to-end** — ✅ verifier + golden capture + container
    run-integration + seal-to-`Kpub`. First real guarantee, delivered.
 2. **Secret sealing (R9)** — ✅ generalized (HPKE, `internal/confidential`), reused by all paths.
-3. **AWS raw SEV-SNP + VLEK** — ✅ agent (`/dev/sev-guest`), pinned image + measurement
-   capture, `VLEK→ASK→ARK` path; plus a measured Nitro Enclaves backend (`profile: nitro`).
-4. **Azure MAA** — ✅ guest-attestation agent, JWKS pin + `exp`/`iss`; plus a measured
-   direct-SNP backend (`profile: azure-snp`, PCR11). Per-component TCB mapping wired.
+3. **AWS `profile: nitro`** — ✅ measured Nitro Enclaves backend (enclave image, COSE
+   chain, pinned PCR0).
+4. **Azure `profile: azure-snp`** — ✅ measured direct-SNP backend (SEV-SNP report +
+   vTPM, agent in PCR11; per-component TCB mapping).
 5. Cheap hardening folded in as each path landed.
 
-The remaining honest caveat is narrow: on the *standard* AWS SEV-SNP / Azure MAA
-paths the scp'd agent is not itself in the launch measurement — the measured
-`profile` backends (and GCP Confidential Space) close it. `attestation: off`
-stays the explicit opt-out that provisions the TEE without verification.
+The unmeasured standard SEV-SNP / MAA paths (scp'd agent not in the launch
+measurement) were removed; the measured `profile` backends and GCP Confidential
+Space are the supported story. `attestation: off` stays the explicit opt-out that
+provisions the TEE without verification.
 
 ## Decisions (approved)
 
