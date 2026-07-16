@@ -417,9 +417,10 @@ func BuiltinTargets() []types.TargetConfig {
 					CPU:    true,
 					Memory: true,
 					GPU:    types.GPUCapability{Supported: false},
-					// OCI BYAS verification is not implemented. Do not advertise
-					// confidential support or let planning treat encryption alone as
-					// an attested secret-release boundary.
+					// OCI is a plain provisioning target: it does not support
+					// dispatcher's confidential model (its SEV-SNP reports do not
+					// verify against AMD KDS, and it has no vTPM/measured path — see
+					// docs/SECURITY.md), so advertise no confidential capability.
 					Confidential: types.ConfidentialCapability{Supported: false},
 				},
 				Networking: types.NetworkingCapability{

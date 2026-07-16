@@ -78,9 +78,8 @@ var defaultInstances = []InstanceType{
 	// servers, not provisionable via the Cloud API), so no Hetzner GPU row.
 
 	// --- Oracle Cloud (OCI) ---
-	// Non-confidential flex shapes only. OCI confidential planning is disabled
-	// until BYAS verification and the VM.Standard.E5/E6 Flex path are live-tested,
-	// so no shape below advertises the Confidential capability.
+	// Provisioning only: OCI does not support dispatcher's confidential model
+	// (see docs/SECURITY.md), so no shape advertises the Confidential capability.
 	{Name: "VM.Standard.A1.Flex", Provider: ProviderOCI, VCPUs: 2, MemoryGB: 12, PricePerHour: 0.012, Arch: "arm64"},
 	{Name: "VM.Standard.E4.Flex", Provider: ProviderOCI, VCPUs: 2, MemoryGB: 16, PricePerHour: 0.074, Arch: "x86_64"},
 	{Name: "VM.Standard.E5.Flex", Provider: ProviderOCI, VCPUs: 4, MemoryGB: 32, PricePerHour: 0.148, Arch: "x86_64"},
