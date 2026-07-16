@@ -31,7 +31,7 @@ func tokenMinter(t *testing.T, signKey crypto.Signer) agent.AttestFunc {
 // HTTP and confirms the returned token binds both the run nonce and the agent's
 // channel key — the exact contract the dispatcher-side verifier enforces.
 func TestConfidentialAgent_AttestBindsChannelKey(t *testing.T) {
-	signKey, keys := maaSigningKey(t)
+	signKey, keys := jwtSigningKey(t)
 	ag, err := agent.NewAgent(tokenMinter(t, signKey), nil)
 	require.NoError(t, err)
 	srv := httptest.NewServer(ag.Handler())
@@ -56,7 +56,7 @@ func TestConfidentialAgent_AttestBindsChannelKey(t *testing.T) {
 // a real agent (fake runner): attest+verify, seal the payload to the attested
 // channel key, POST it, and pull back a result sealed to dispatcher's result key.
 func TestConfidentialExchange_SealedRoundTrip(t *testing.T) {
-	signKey, keys := maaSigningKey(t)
+	signKey, keys := jwtSigningKey(t)
 
 	var gotPayload agent.Payload
 	ag, err := agent.NewAgent(tokenMinter(t, signKey), func(_ context.Context, p agent.Payload) agent.Result {

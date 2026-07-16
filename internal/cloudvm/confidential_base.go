@@ -18,8 +18,8 @@ import (
 )
 
 // confidentialVMAdapter carries the fields and TargetAdapter methods shared by
-// the SSH-VM confidential adapters (AWS SEV-SNP, Azure MAA, Azure measured-SNP,
-// AWS Nitro). Each embeds it and adds its own Execute plus provisioning fields,
+// the SSH-VM confidential adapters (Azure measured-SNP, AWS Nitro). Each embeds
+// it and adds its own Execute plus provisioning fields,
 // so a change to the shared post-run lifecycle (Status/Logs/Artifacts/Cleanup)
 // lands in one place instead of four. EstimateCost's only per-adapter variation
 // is the TEE-type assumption line, carried in costAssumption.

@@ -1,18 +1,14 @@
 package attest
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/sha512"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"math/big"
-
-	"github.com/d0cd/dispatcher/internal/attest/agent"
 )
 
 // AMD SEV-SNP ATTESTATION_REPORT ABI offsets (Table 22, "SEV Secure Nested
@@ -130,34 +126,4 @@ func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) erro
 		}
 	}
 	return fmt.Errorf("snp ASK chains to none of the %d pinned AMD roots", len(roots))
-}
-
-// snpEvidence is what the per-VM fetch returns: the raw report and the in-TEE
-// channel public key the report binds. The ARK is pinned on the attester, not
-// fetched from the guest.
-type snpEvidence struct {
-	report     []byte
-	channelKey []byte
-}
-
-// snpFetch obtains attestation evidence from a booted confidential VM, binding
-// the verifier's per-run nonce. It needs a live guest agent (the measured
-// image), so it is the one part that cannot be unit-tested offline.
-type snpFetch func(ctx context.Context, nonce []byte) (snpEvidence, error)
-
-// endpointSNPFetch reads SEV-SNP evidence (a base64 report+cert-table) from the
-// in-TEE agent's /attest endpoint over the untrusted channel, binding the run
-// nonce. The AMD cert chain is supplied by the attester (pinned/KDS), not the guest.
-func endpointSNPFetch(baseURL string) snpFetch {
-	return func(ctx context.Context, nonce []byte) (snpEvidence, error) {
-		token, channelKey, err := agent.FetchAttestation(ctx, baseURL, nonce)
-		if err != nil {
-			return snpEvidence{}, err
-		}
-		report, err := base64.StdEncoding.DecodeString(token)
-		if err != nil {
-			return snpEvidence{}, err
-		}
-		return snpEvidence{report: report, channelKey: channelKey}, nil
-	}
 }

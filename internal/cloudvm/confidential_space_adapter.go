@@ -58,7 +58,7 @@ type agentFirewaller interface {
 }
 
 // confidentialRunState is the persisted handle state for a confidential run,
-// shared by all three providers (GCP Confidential Space, Azure MAA, AWS SEV-SNP).
+// shared by the confidential backends (GCP Confidential Space, azure-snp, AWS Nitro).
 // The run is already finished by the time Execute returns, so this carries the
 // captured result plus what Cleanup needs to tear the VM down. ImageRef is only
 // set on the GCP container path.

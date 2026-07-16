@@ -5,9 +5,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/d0cd/dispatcher/internal/adapter"
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // OpenAgentPort authorizes the agent port on the instance's security group from
@@ -36,29 +33,4 @@ func (a *AWSProvider) OpenAgentPort(ctx context.Context, vmID string, port int, 
 // awsPortOpener is the optional Provider capability the AWS start-agent uses.
 type awsPortOpener interface {
 	OpenAgentPort(ctx context.Context, vmID string, port int, cidr string) error
-}
-
-// AWSConfidentialAdapter runs a workload on an AWS SEV-SNP VM, attested via a raw
-// report (go-sev-guest + VLEK chain) and sealed (R9).
-type AWSConfidentialAdapter struct {
-	confidentialVMAdapter
-	agentBin string
-	region   string
-}
-
-// NewAWSConfidentialAdapter builds the adapter. agentBin is the cross-compiled
-// dispatcher-attest-aws binary dispatcher scps onto the instance.
-func NewAWSConfidentialAdapter(provider Provider, agentBin string, cfg Config) *AWSConfidentialAdapter {
-	return &AWSConfidentialAdapter{
-		confidentialVMAdapter: confidentialVMAdapter{
-			targetID: string(cfg.ProviderID) + "-confidential",
-			provider: provider, config: cfg,
-			costAssumption: "confidential (SEV-SNP) VM",
-		},
-		agentBin: agentBin, region: cfg.Region,
-	}
-}
-
-func (a *AWSConfidentialAdapter) Execute(context.Context, *types.Plan) (*adapter.RunHandle, error) {
-	return nil, fmt.Errorf("standard AWS SEV-SNP execution is disabled: its post-boot agent is not measured; use confidential.profile: nitro")
 }

@@ -66,8 +66,8 @@ type ConfidentialRequirement struct {
 	Type string `yaml:"type,omitempty" json:"type,omitempty"`
 	// Profile selects a measured-boot attestation backend, orthogonal to Type:
 	// "azure-snp" (direct SNP+vTPM, agent measured into PCR11) or "nitro" (AWS
-	// Nitro Enclaves). Empty means the target's standard backend (GCP
-	// Confidential Space, Azure MAA, or AWS SEV-SNP).
+	// Nitro Enclaves). Empty is valid only for GCP Confidential Space (which needs
+	// no profile); attested runs on aws-vm/azure-vm require an explicit profile.
 	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
 	// Attestation is "required" (default — the run only proceeds after the TEE
 	// report verifies) or "off" (provision the TEE but skip verification).

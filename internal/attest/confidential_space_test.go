@@ -37,7 +37,7 @@ func csPolicy() CSPolicy {
 }
 
 func TestVerifyCSToken_Accepts(t *testing.T) {
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	tok := mintJWT(t, "maa1", "RS256", key, validCSClaims())
 
 	digest, _, err := verifyCSToken(tok, keys, csPolicy())
@@ -47,7 +47,7 @@ func TestVerifyCSToken_Accepts(t *testing.T) {
 
 // eat_nonce may be a bare string, not just an array.
 func TestVerifyCSToken_AcceptsStringNonce(t *testing.T) {
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	c := validCSClaims()
 	c["eat_nonce"] = hex.EncodeToString(csNonce) // single string form
 	_, _, err := verifyCSToken(mintJWT(t, "maa1", "RS256", key, c), keys, csPolicy())
@@ -55,8 +55,8 @@ func TestVerifyCSToken_AcceptsStringNonce(t *testing.T) {
 }
 
 func TestVerifyCSToken_RejectsBadSignature(t *testing.T) {
-	key, _ := maaSigningKey(t)
-	_, otherKeys := maaSigningKey(t)
+	key, _ := jwtSigningKey(t)
+	_, otherKeys := jwtSigningKey(t)
 	tok := mintJWT(t, "maa1", "RS256", key, validCSClaims())
 	_, _, err := verifyCSToken(tok, otherKeys, csPolicy())
 	require.Error(t, err, "a token not signed by a trusted Google key must be rejected")
@@ -81,7 +81,7 @@ func TestVerifyCSToken_Rejects(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			key, keys := maaSigningKey(t)
+			key, keys := jwtSigningKey(t)
 			c := validCSClaims()
 			if tc.mutate != nil {
 				tc.mutate(c)
@@ -103,7 +103,7 @@ func TestVerifyCSToken_ChannelKeyBinding(t *testing.T) {
 	keyNonce := hex.EncodeToString(sum[:])
 
 	t.Run("accepts when eat_nonce commits to the channel key", func(t *testing.T) {
-		key, keys := maaSigningKey(t)
+		key, keys := jwtSigningKey(t)
 		c := validCSClaims()
 		c["eat_nonce"] = []string{hex.EncodeToString(csNonce), keyNonce}
 		p := csPolicy()
@@ -113,7 +113,7 @@ func TestVerifyCSToken_ChannelKeyBinding(t *testing.T) {
 	})
 
 	t.Run("rejects when the channel key is not committed (relay/substitution)", func(t *testing.T) {
-		key, keys := maaSigningKey(t)
+		key, keys := jwtSigningKey(t)
 		c := validCSClaims() // only the run nonce, no channel-key commitment
 		p := csPolicy()
 		p.ChannelKey = channelKey
@@ -123,7 +123,7 @@ func TestVerifyCSToken_ChannelKeyBinding(t *testing.T) {
 	})
 
 	t.Run("nil channel key skips the binding (verify-only path)", func(t *testing.T) {
-		key, keys := maaSigningKey(t)
+		key, keys := jwtSigningKey(t)
 		_, _, err := verifyCSToken(mintJWT(t, "maa1", "RS256", key, validCSClaims()), keys, csPolicy())
 		require.NoError(t, err, "the golden verify-only path must keep working")
 	})
@@ -135,7 +135,7 @@ func TestVerifyCSToken_ChannelKeyBinding(t *testing.T) {
 func TestCSAttester_MinTCBFailsClosed(t *testing.T) {
 	channelKey := bytes.Repeat([]byte{0x22}, 32)
 	sum := sha256.Sum256(channelKey)
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims()
@@ -152,7 +152,7 @@ func TestCSAttester_MinTCBFailsClosed(t *testing.T) {
 func TestCSAttester_BindsChannelKey(t *testing.T) {
 	channelKey := bytes.Repeat([]byte{0x22}, 32)
 	sum := sha256.Sum256(channelKey)
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims()
@@ -167,7 +167,7 @@ func TestCSAttester_BindsChannelKey(t *testing.T) {
 }
 
 func TestCSAttester_RejectsUncommittedChannelKey(t *testing.T) {
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims()
@@ -185,7 +185,7 @@ func TestCSAttester_RejectsUncommittedChannelKey(t *testing.T) {
 func TestCSAttester_VerifyAccepts(t *testing.T) {
 	channelKey := bytes.Repeat([]byte{0x44}, 32)
 	sum := sha256.Sum256(channelKey)
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims()
@@ -201,7 +201,7 @@ func TestCSAttester_VerifyAccepts(t *testing.T) {
 }
 
 func TestCSAttester_RejectsReplay(t *testing.T) {
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, _ []byte) (csEvidence, error) {
 			c := validCSClaims() // eat_nonce is a STALE nonce, not this run's
@@ -226,7 +226,7 @@ func TestCSAttester_NotReadyAndNoFetch(t *testing.T) {
 func TestCSAttester_RejectsTypeDowngrade(t *testing.T) {
 	channelKey := bytes.Repeat([]byte{0x22}, 32)
 	sum := sha256.Sum256(channelKey)
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims() // hwmodel GCP_AMD_SEV
@@ -248,7 +248,7 @@ func TestCSAttester_RejectsTypeDowngrade(t *testing.T) {
 // The run path always seals to a channel key, so an absent key must fail closed
 // at the verifier (not skip the binding check) — matching the matrix's "Enforced".
 func TestCSAttester_RejectsAbsentChannelKey(t *testing.T) {
-	key, keys := maaSigningKey(t)
+	key, keys := jwtSigningKey(t)
 	att := &csAttester{keys: keys,
 		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
 			c := validCSClaims()

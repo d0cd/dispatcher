@@ -13,10 +13,11 @@ import (
 // table into the doc so a code change that isn't reflected in the docs fails CI.
 //
 // Every cell here must match the corresponding verifier: csAttester
-// (confidential_space.go), azureAttester (maa.go), azureSNPAttester
-// (azure_snp.go), awsSNPAttester (aws_snp.go), nitroAttester (nitro.go), and the
-// shared applyPolicy (attestation_policy.go). TestMatrix_GroundedInCode ties the
-// security-critical cells to the actual verifier behavior.
+// (confidential_space.go), azureSNPAttester (azure_snp.go), nitroAttester
+// (nitro.go), and the shared applyPolicy (attestation_policy.go).
+// TestMatrix_GroundedInCode ties the security-critical cells to the actual
+// verifier behavior. Only the measured backends are supported; the unmeasured
+// standard SEV-SNP / MAA paths were removed (see docs/SECURITY.md).
 
 // Enforcement is how strongly a backend applies a security control at attestation
 // time.
@@ -98,26 +99,6 @@ var ConfidentialMatrix = []Backend{
 		},
 	},
 	{
-		ID: "azure-maa", Short: "Azure MAA", Anchor: "pinned MAA issuer + JWKS",
-		Controls: map[Control]Enforcement{
-			ControlGenuineTEE:     Enforced,
-			ControlMeasurement:    Enforced,
-			ControlNonce:          Enforced,
-			ControlChannelBinding: Enforced,
-			ControlDebugOff:       Enforced,
-			ControlMigrationOff:   Enforced,
-			ControlMinTCB:         Enforced,
-			ControlRevocation:     NotApplicable,
-			ControlMeasuredAgent:  NotEnforced,
-		},
-		Notes: map[Control]string{
-			ControlMigrationOff:  "verified via the x-ms-sevsnpvm-migration-allowed token claim",
-			ControlMinTCB:        "reconstructed from the token's per-component SEV-SNP SVN claims and compared per component",
-			ControlRevocation:    "delegated to the Azure MAA service; dispatcher validates no AMD cert chain locally",
-			ControlMeasuredAgent: "the standard path scp's the agent; measured only when a custom measured image + PCR pins are configured",
-		},
-	},
-	{
 		ID: "azure-snp", Short: "Azure SNP", Anchor: "pinned AMD ARK",
 		Controls: map[Control]Enforcement{
 			ControlGenuineTEE:     Enforced,
@@ -134,24 +115,6 @@ var ConfidentialMatrix = []Backend{
 			ControlMeasurement:   "PCR11 (the UKI carrying the agent), pinned",
 			ControlRevocation:    "the ARK-signed CRL at the ASK's AMD KDS distribution point; a revoked VCEK/ASK is rejected, fail-closed if the CRL is missing or unreachable",
 			ControlMeasuredAgent: "PCR11 = the UKI carrying the agent",
-		},
-	},
-	{
-		ID: "aws-sev-snp", Short: "AWS SNP", Anchor: "pinned AMD ARK (go-sev-guest)",
-		Controls: map[Control]Enforcement{
-			ControlGenuineTEE:     Enforced,
-			ControlMeasurement:    Enforced,
-			ControlNonce:          Enforced,
-			ControlChannelBinding: Enforced,
-			ControlDebugOff:       Enforced,
-			ControlMigrationOff:   Enforced,
-			ControlMinTCB:         Enforced,
-			ControlRevocation:     Enforced,
-			ControlMeasuredAgent:  NotEnforced,
-		},
-		Notes: map[Control]string{
-			ControlRevocation:    "ASVK CRL checked against the pinned ARK (via go-sev-guest)",
-			ControlMeasuredAgent: "the standard path scp's the agent; it is not folded into the launch measurement (use profile: nitro)",
 		},
 	},
 	{

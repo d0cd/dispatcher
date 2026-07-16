@@ -18,6 +18,15 @@ import (
 
 func b64url(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
+// jwtSigningKey generates an RSA key and the JWKS keys map (kid "maa1") used by
+// the JWT/JWS-based verifier tests (Confidential Space, exchange).
+func jwtSigningKey(t *testing.T) (*rsa.PrivateKey, map[string]crypto.PublicKey) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	return key, map[string]crypto.PublicKey{"maa1": &key.PublicKey}
+}
+
 func leftPad(b []byte, n int) []byte {
 	if len(b) >= n {
 		return b

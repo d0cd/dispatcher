@@ -16,7 +16,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
-	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/cost"
 	"github.com/d0cd/dispatcher/internal/plan"
@@ -490,23 +489,6 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 			cloudvm.NewGCPProvider(gcpProject(), ""),
 			nil, nil,
 			cloudvm.Config{ProviderID: cloudvm.ProviderGCP},
-		), nil
-	case "azure-confidential":
-		// Reconnect only needs VM lifecycle; keys/agent (Execute-only) are nil.
-		rg := os.Getenv("DISPATCHER_AZURE_RG")
-		if rg == "" {
-			rg = "dispatcher-rg"
-		}
-		return cloudvm.NewAzureConfidentialAdapter(
-			cloudvm.NewAzureProvider(rg, os.Getenv("DISPATCHER_AZURE_LOCATION")),
-			nil, "", "", "", attest.MAAMeasuredBoot{},
-			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "dispatcher"},
-		), nil
-	case "aws-confidential":
-		// Reconnect only needs VM lifecycle; the agent binary (Execute-only) is nil.
-		return cloudvm.NewAWSConfidentialAdapter(
-			cloudvm.NewAWSProvider(os.Getenv("DISPATCHER_AWS_REGION")), "",
-			cloudvm.Config{ProviderID: cloudvm.ProviderAWS, SSHUser: "ubuntu"},
 		), nil
 	case "firecracker-vm":
 		return cloudvm.NewCloudVMAdapter(

@@ -71,6 +71,3 @@ func TestGolden_SNPReport(t *testing.T) {
 	assert.Len(t, claims.Measurement, 2*snpLenMeas, "measurement must be a 48-byte hex string")
 	t.Logf("verified real SEV-SNP report: measurement=%s tcb=%d debug=%v", claims.Measurement, claims.TCB, claims.DebugEnabled)
 }
-
-// The MAA golden test lives in confidential_maa_golden_test.go (it verifies the
-// real nested-schema token via verifyMAAToken + parseJWKS).

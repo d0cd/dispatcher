@@ -16,16 +16,16 @@ import (
 // + exchange are tested end-to-end in the attest package).
 var runSealedExchange = agent.RunSealedExchange
 
-// sshConfidentialDeps are the collaborators for an SSH-VM confidential run (Azure
-// MAA, AWS SEV-SNP). The provider-specific verification is a closure so the same
-// orchestration serves both; the live ops (provision, start-agent, endpoint
+// sshConfidentialDeps are the collaborators for an SSH-VM confidential run
+// (azure-snp, AWS Nitro). The provider-specific verification is a closure so the
+// same orchestration serves both; the live ops (provision, start-agent, endpoint
 // reachability) are seams so the verify-before-seal ordering is unit-testable.
 type sshConfidentialDeps struct {
 	provider Provider
 	image    string // optional VM image override (AWS pins a SEV-SNP 24.04 AMI)
 	// confidential is VMOptions.ConfidentialType: "sev-snp" for a memory-encrypted
-	// CVM (Azure MAA, AWS SEV-SNP), or "" for a Nitro Enclaves parent (the parent
-	// is a plain instance — the measured enclave it launches is the TEE).
+	// CVM (azure-snp), or "" for a Nitro Enclaves parent (the parent is a plain
+	// instance — the measured enclave it launches is the TEE).
 	confidential  string
 	enclave       bool   // request Nitro Enclaves support on the parent
 	secureBootOff bool   // Secure Boot off (the Azure direct-SNP unsigned UKI image)

@@ -1,6 +1,6 @@
 # Spec: Confidential computing (secure jobs)
 
-**Status:** Implemented end-to-end on all three clouds — provisioning + verifier cores + pinned ARK/AWS roots + the in-TEE measured agent and live evidence fetch. The raw SEV-SNP report parser is golden-validated against a report captured on GCP hardware (GCP's own run path uses Confidential Space). Residual: on the standard AWS SEV-SNP / Azure MAA paths the scp'd agent isn't in the launch measurement (the measured `profile` backends and GCP Confidential Space close it). Cert revocation is enforced on the AMD-cert-chain paths (AWS, Azure `profile: azure-snp`) via the AMD KDS CRL, and the MAA path enforces `minTCB` by recombining the token's per-component SVN claims.
+**Status:** Implemented end-to-end on the three **measured** backends — GCP Confidential Space, Azure `profile: azure-snp` (SEV-SNP + vTPM, agent in PCR11), and AWS `profile: nitro` (COSE + pinned PCR0) — provisioning + verifier cores + pinned ARK/AWS roots + the in-TEE measured agent and live evidence fetch, all hardware-validated. The raw SEV-SNP report parser is golden-validated against a report captured on GCP hardware. The **unmeasured** standard SEV-SNP / MAA paths (post-boot scp'd agent, not in the launch measurement) were **removed**: an attested run on aws-vm/azure-vm requires the measured `profile`, and `attestation: off` is the escape hatch for encrypted-memory-without-verification. Cert revocation is enforced on the AMD-cert-chain path (`profile: azure-snp`) via the AMD KDS CRL.
 **Related:** [ROADMAP](ROADMAP.md) → "Confidential computing (secure jobs)".
 
 Run a workload on a TEE-backed VM (hardware-encrypted memory) so the cloud
@@ -54,7 +54,7 @@ dispatcher guarantees:
 - **G2 — Known-good, safe launch.** The VM booted a measurement on the allowlist,
   with debug disabled and TCB ≥ the configured minimum — the host did not substitute
   a malicious image or a debuggable/migratable VM. Migration-disabled is verified on
-  every SEV-SNP path (AWS, Azure MAA, Azure `profile: azure-snp`) and is n/a on the
+  the SEV-SNP path (`profile: azure-snp`) and is n/a on the
   Nitro and Confidential Space paths (see the enforcement matrix).
 - **G3 — Fresh and bound.** The attestation answered this run's random nonce and
   committed the in-TEE channel key — so it is not a replayed or relayed proof from
@@ -91,34 +91,28 @@ backend actually checks*.
 <!-- BEGIN generated matrix — source of truth: internal/attest/matrix.go; do not
 edit by hand. TestMatrix_DocInSync fails if this drifts from the code. -->
 
-| Control | GCP CS | Azure MAA | Azure SNP | AWS SNP | AWS Nitro |
-|---|---|---|---|---|---|
-| Genuine TEE (signature + chain to pinned root) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Measurement/identity on exact allowlist (empty fails closed) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Per-run nonce freshness | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Channel-key binding (sealed only to the attested key) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Debug disabled | ✓ | ✓ | ✓ | ✓ | n/a |
-| Migration disabled | n/a | ✓ | ✓ | ✓ | n/a |
-| Minimum TCB / firmware floor | fail-closed | ✓ | ✓ | ✓ | n/a |
-| Certificate revocation | n/a | n/a | ✓ | ✓ | n/a |
-| Attestation agent folded into the measured boot | ✓ | ✗ | ✓ | ✗ | ✓ |
+| Control | GCP CS | Azure SNP | AWS Nitro |
+|---|---|---|---|
+| Genuine TEE (signature + chain to pinned root) | ✓ | ✓ | ✓ |
+| Measurement/identity on exact allowlist (empty fails closed) | ✓ | ✓ | ✓ |
+| Per-run nonce freshness | ✓ | ✓ | ✓ |
+| Channel-key binding (sealed only to the attested key) | ✓ | ✓ | ✓ |
+| Debug disabled | ✓ | ✓ | n/a |
+| Migration disabled | n/a | ✓ | n/a |
+| Minimum TCB / firmware floor | fail-closed | ✓ | n/a |
+| Certificate revocation | n/a | ✓ | n/a |
+| Attestation agent folded into the measured boot | ✓ | ✓ | ✓ |
 
-**Roots of trust:** GCP CS = Google JWKS; Azure MAA = pinned MAA issuer + JWKS; Azure SNP = pinned AMD ARK; AWS SNP = pinned AMD ARK (go-sev-guest); AWS Nitro = pinned AWS Nitro root.
+**Roots of trust:** GCP CS = Google JWKS; Azure SNP = pinned AMD ARK; AWS Nitro = pinned AWS Nitro root.
 
 - **GCP CS — Measurement/identity on exact allowlist (empty fails closed):** the attested identity is the container image digest
 - **GCP CS — Migration disabled:** the Confidential Space token exposes no migration claim
 - **GCP CS — Minimum TCB / firmware floor:** the CS token carries no reported TCB, so a run that sets minTCB is rejected (GCP has no measured-TCB backend)
 - **GCP CS — Certificate revocation:** delegated to the Google Confidential Space service; dispatcher validates no AMD cert chain locally
 - **GCP CS — Attestation agent folded into the measured boot:** the measured container image is the workload
-- **Azure MAA — Migration disabled:** verified via the x-ms-sevsnpvm-migration-allowed token claim
-- **Azure MAA — Minimum TCB / firmware floor:** reconstructed from the token's per-component SEV-SNP SVN claims and compared per component
-- **Azure MAA — Certificate revocation:** delegated to the Azure MAA service; dispatcher validates no AMD cert chain locally
-- **Azure MAA — Attestation agent folded into the measured boot:** the standard path scp's the agent; measured only when a custom measured image + PCR pins are configured
 - **Azure SNP — Measurement/identity on exact allowlist (empty fails closed):** PCR11 (the UKI carrying the agent), pinned
 - **Azure SNP — Certificate revocation:** the ARK-signed CRL at the ASK's AMD KDS distribution point; a revoked VCEK/ASK is rejected, fail-closed if the CRL is missing or unreachable
 - **Azure SNP — Attestation agent folded into the measured boot:** PCR11 = the UKI carrying the agent
-- **AWS SNP — Certificate revocation:** ASVK CRL checked against the pinned ARK (via go-sev-guest)
-- **AWS SNP — Attestation agent folded into the measured boot:** the standard path scp's the agent; it is not folded into the launch measurement (use profile: nitro)
 - **AWS Nitro — Measurement/identity on exact allowlist (empty fails closed):** PCR0 (the enclave image), pinned
 - **AWS Nitro — Debug disabled:** Nitro enclaves have no SEV-SNP debug/migration policy bits
 - **AWS Nitro — Certificate revocation:** AWS uses ephemeral certs (leaf valid ~3h) instead of CRLs and instructs validators to disable CRL checking; short validity is the revocation mechanism, enforced by chain-validity checking
@@ -159,7 +153,7 @@ operator (dispatcher, outside the TEE)              cloud TEE VM (untrusted unti
          the AWS and Azure-SNP paths — see matrix).
       b. TEE type == requested
       c. policy: debug off; migration off (on every
-         SEV-SNP path — AWS, Azure MAA, azure-snp;
+         SEV-SNP path — azure-snp;
          n/a on Nitro/CS — see the matrix)
       d. measurement ∈ allowlist (EXACT)
       e. REPORT_DATA == H(N ‖ agent_pubkey)
@@ -190,9 +184,9 @@ malicious genuinely-SEV-SNP image.
 | R1 | Per-run random nonce in `REPORT_DATA` | replay/relay resistance (G3) |
 | R2 | `REPORT_DATA` commits an **in-TEE-generated** channel key (not a host-injectable one) | channel binding (G3) |
 | R3 | Verify full cert chain to the vendor root | report is genuine hardware (G1) |
-| R4 | Check certificate revocation (AMD KDS CRL / MAA keys) | revoked platforms rejected — enforced on the AMD-cert-chain paths (AWS SEV-SNP, Azure `profile: azure-snp`); delegated to the cloud service on GCP CS / MAA; n/a on Nitro (ephemeral certs) — see the matrix |
+| R4 | Check certificate revocation (AMD KDS CRL) | revoked platforms rejected — enforced on the AMD-cert-chain path (Azure `profile: azure-snp`); delegated to the cloud service on GCP CS; n/a on Nitro (ephemeral certs) — see the matrix |
 | R5 | Enforce a minimum reported TCB/firmware version | reject out-of-date silicon (G2) — the raw-report paths and the MAA path (recombined from per-component SVN claims); GCP CS has no reported TCB, so it fails closed when `minTCB` is set |
-| R6 | Require `policy.debug == false`, `policy.migration == false` | a debuggable/migratable VM isn't confidential (G2) — verified on every SEV-SNP path (AWS, Azure MAA, azure-snp); n/a on Nitro/CS |
+| R6 | Require `policy.debug == false`, `policy.migration == false` | a debuggable/migratable VM isn't confidential (G2) — verified on the SEV-SNP path (azure-snp); n/a on Nitro/CS |
 | R7 | Measurement ∈ **exact allowlist** of known-good vendor confidential images | host can't boot a malicious image (G2) |
 | R8 | TEE type in report == requested type | a `tdx` job isn't silently SEV (G1) |
 | R9 | Send **no secret** before R1–R8 pass; wrap secrets to the in-TEE key | secret-after-proof (G4) |
@@ -223,15 +217,13 @@ confidential:
   confidential image (Azure CVM, GCP Confidential Space, an AWS SEV-SNP image) whose
   launch measurement and built-in (measured) attestation agent dispatcher ships in
   its allowlist. No image work for the operator.
-  > **Partially shipped.** The three **measured** backends are live: GCP Confidential
+  > **Shipped.** The three **measured** backends are live: GCP Confidential
   > Space (measurement = the measured container-image digest, resolved from the pin
   > registry), Azure `profile: azure-snp` (PCR11), and AWS `profile: nitro` (PCR0) —
   > their measurement comes from the built image / pin registry, not `dispatcher.yaml`.
-  > Only the **standard** (no-`profile`) AWS SEV-SNP and Azure MAA paths still boot a
-  > stock image and scp the agent (so the agent isn't in the launch measurement — see
-  > §6). dispatcher ships **no base measurement allowlist**, so on those standard paths
-  > measurements come from the operator's `dispatcher.yaml` and an empty allowlist
-  > fails closed.
+  > The unmeasured standard (no-`profile`) SEV-SNP / MAA paths — stock image + scp'd
+  > agent, so the agent isn't in the launch measurement (see §6) — were removed; an
+  > attested run on aws-vm/azure-vm requires the measured `profile`.
 - **Custom image — escape hatch.** To run your own image, build it with the in-TEE
   attestation agent, capture its launch measurement, and register it in dispatcher's
   measurement allowlist (config). A confidential run on an unlisted measurement is
@@ -308,9 +300,9 @@ warned.
   claims into the SEV-SNP `REPORTED_TCB` layout and compares it per component against
   `minTCB` (identical to the direct-SNP paths). A token missing those claims yields 0,
   failing any positive floor closed.
-- **Revocation** (R4) — enforced on the AMD-cert-chain paths (AWS SEV-SNP and Azure
-  `profile: azure-snp`): the ARK-signed CRL at the ASK's AMD KDS distribution point,
-  fail-closed if unreachable. Delegated to the cloud service on GCP CS / Azure MAA;
+- **Revocation** (R4) — enforced on the AMD-cert-chain path (Azure `profile:
+  azure-snp`): the ARK-signed CRL at the ASK's AMD KDS distribution point,
+  fail-closed if unreachable. Delegated to the cloud service on GCP CS;
   n/a on Nitro (ephemeral certs).
 
 A verified confidential run works today given the operator-supplied agent /
