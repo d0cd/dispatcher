@@ -61,7 +61,7 @@ func TestATLS_CSVerifierEndToEnd(t *testing.T) {
 	ctx := context.Background()
 	go func() { _ = atls.ServerAttest(ctx, server, spki, issuer) }()
 
-	require.NoError(t, atls.ClientAttest(ctx, client, CSValidator(keys, []string{csDigest}, "")),
+	require.NoError(t, atls.ClientAttest(ctx, client, CSValidator(keys, []string{csDigest}, "", 0)),
 		"honest CS agent over aTLS must verify")
 }
 
@@ -81,7 +81,7 @@ func TestATLS_CSVerifierRejectsWrongMeasurement(t *testing.T) {
 	go func() { _ = atls.ServerAttest(ctx, server, spki, issuer) }()
 
 	wrongDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
-	require.Error(t, atls.ClientAttest(ctx, client, CSValidator(keys, []string{wrongDigest}, "")),
+	require.Error(t, atls.ClientAttest(ctx, client, CSValidator(keys, []string{wrongDigest}, "", 0)),
 		"a token whose image digest isn't allowlisted must be rejected through aTLS")
 }
 

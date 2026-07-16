@@ -37,9 +37,14 @@ func (v *AttestValidator) Validate(_ context.Context, evidence, bindData, nonce 
 }
 
 // CSValidator verifies a Confidential Space token from the aTLS exchange; the
-// token's eat_nonce must commit to this session's bindData + nonce.
-func CSValidator(keys map[string]crypto.PublicKey, imageDigests []string, expectedType string) *AttestValidator {
+// token's eat_nonce must commit to this session's bindData + nonce. The CS token
+// carries no reported TCB, so a configured minTCB floor cannot be enforced — the
+// validator fails closed rather than silently ignore it.
+func CSValidator(keys map[string]crypto.PublicKey, imageDigests []string, expectedType string, minTCB uint64) *AttestValidator {
 	return &AttestValidator{verify: func(evidence, bindData, nonce []byte) (AttestationResult, error) {
+		if minTCB > 0 {
+			return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: "minTCB cannot be enforced on the GCP Confidential Space path (the attestation token carries no reported TCB)"}, nil
+		}
 		digest, teeType, err := verifyCSToken(string(evidence), keys, CSPolicy{
 			Nonce: nonce, ImageDigests: imageDigests, ChannelKey: bindData, ExpectedType: expectedType,
 		})

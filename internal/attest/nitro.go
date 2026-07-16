@@ -2,18 +2,12 @@ package attest
 
 import (
 	"bytes"
-	"context"
-	"crypto/rand"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 
 	"github.com/fxamacker/cbor/v2"
 	cose "github.com/veraison/go-cose"
-
-	"github.com/d0cd/dispatcher/internal/attest/agent"
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // AWS Nitro Enclaves attestation is a COSE_Sign1 document whose CBOR payload the
@@ -122,62 +116,4 @@ func verifyNitroDoc(coseBytes []byte, roots *x509.CertPool, p NitroPolicy) (meas
 	}
 
 	return hex.EncodeToString(doc.PCRs[0]), doc.PublicKey, nil
-}
-
-// nitroFetch obtains a raw COSE_Sign1 attestation document from a booted Nitro
-// enclave, binding the verifier's per-run nonce. It needs a live enclave, so it is
-// the one part not unit-testable offline.
-type nitroFetch func(ctx context.Context, nonce []byte) ([]byte, error)
-
-// nitroAttester verifies AWS Nitro Enclaves attestation documents. roots is the
-// pinned AWS Nitro Enclaves root; pcrs pins the known-good enclave image PCRs.
-type nitroAttester struct {
-	roots *x509.CertPool
-	pcrs  map[int]string
-	fetch nitroFetch
-}
-
-// NewAWSNitroAttester verifies AWS Nitro Enclaves attestation documents from the
-// in-enclave agent endpoint, chaining to the embedded, pinned AWS Nitro root and
-// pinning the known-good enclave PCRs (PCR0 = the enclave image carrying the agent).
-func NewAWSNitroAttester(pcrs map[int]string, baseURL string) Attester {
-	return &nitroAttester{roots: awsNitroRoots, pcrs: pcrs, fetch: endpointNitroFetch(baseURL)}
-}
-
-func (a *nitroAttester) Verify(ctx context.Context, _ types.ConfidentialRequirement) (AttestationResult, error) {
-	if a.fetch == nil {
-		return AttestationResult{}, fmt.Errorf("nitro attester has no evidence fetch wired")
-	}
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return AttestationResult{}, fmt.Errorf("generate attestation nonce: %w", err)
-	}
-	coseBytes, err := a.fetch(ctx, nonce)
-	if err != nil {
-		return AttestationResult{}, fmt.Errorf("fetch nitro attestation: %w", err)
-	}
-	measurement, channelKey, err := verifyNitroDoc(coseBytes, a.roots, NitroPolicy{Nonce: nonce, PCRs: a.pcrs})
-	if err != nil {
-		return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
-	}
-	return AttestationResult{
-		Verified:    true,
-		Type:        "nitro",
-		Measurement: measurement,
-		Nonce:       hex.EncodeToString(nonce),
-		Verdict:     "verified",
-		ChannelKey:  channelKey,
-	}, nil
-}
-
-// endpointNitroFetch reads a base64 COSE_Sign1 document from the in-enclave agent's
-// /attest endpoint (proxied over vsock by the parent instance).
-func endpointNitroFetch(baseURL string) nitroFetch {
-	return func(ctx context.Context, nonce []byte) ([]byte, error) {
-		token, _, err := agent.FetchAttestation(ctx, baseURL, nonce)
-		if err != nil {
-			return nil, err
-		}
-		return base64.StdEncoding.DecodeString(token)
-	}
 }

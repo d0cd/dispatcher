@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
-	"encoding/hex"
 	"os"
 	"strings"
 	"testing"
@@ -13,7 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/attest/agent"
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // Every backend must define every control (no missing cells) with a known
@@ -83,13 +81,8 @@ func TestMatrix_GroundedInCode(t *testing.T) {
 	assert.Equal(t, FailClosed, cellFor(t, "gcp-confidential-space", ControlMinTCB))
 	key, keys := jwtSigningKey(t)
 	ck := bytes.Repeat([]byte{0x9A}, 32)
-	cs := &csAttester{keys: keys,
-		fetch: func(_ context.Context, n []byte) (csEvidence, error) {
-			c := validCSClaims()
-			c["eat_nonce"] = []string{hex.EncodeToString(n)}
-			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: ck}, nil
-		}}
-	_, csErr := cs.Verify(context.Background(), types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}, MinTCB: 7})
+	tok := mintJWT(t, "maa1", "RS256", key, validCSClaims())
+	csErr := CSValidator(keys, []string{csDigest}, "sev-snp", 7).Validate(context.Background(), []byte(tok), ck, csNonce)
 	require.Error(t, csErr, "gcp-confidential-space minTCB must fail closed, matching the matrix")
 
 	// Revocation is enforced on the AMD-cert-chain path (azure-snp) and is n/a on

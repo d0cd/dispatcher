@@ -3,6 +3,7 @@ package attest
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
 	"testing"
@@ -10,8 +11,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 var csNonce = bytes.Repeat([]byte{0xAB}, 32)
@@ -129,134 +128,80 @@ func TestVerifyCSToken_ChannelKeyBinding(t *testing.T) {
 	})
 }
 
-// The Confidential Space token carries no reported TCB, so the CS path cannot
-// enforce a minTCB floor. It must fail closed (loudly) when one is configured
-// rather than silently ignore it — mirroring the Azure MAA path.
-func TestCSAttester_MinTCBFailsClosed(t *testing.T) {
-	channelKey := bytes.Repeat([]byte{0x22}, 32)
-	sum := sha256.Sum256(channelKey)
-	key, keys := jwtSigningKey(t)
-	att := &csAttester{keys: keys,
-		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
-			c := validCSClaims()
-			c["eat_nonce"] = []string{hex.EncodeToString(nonce), hex.EncodeToString(sum[:])}
-			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev", Measurements: []string{csDigest}, MinTCB: 7}
+// csTokenBoundTo mints a CS token whose eat_nonce echoes the run nonce and commits
+// to the aTLS session bindData (SHA-256(bindData)) — what the honest agent emits.
+func csTokenBoundTo(t *testing.T, key crypto.Signer, bindData []byte, mutate func(map[string]any)) string {
+	t.Helper()
+	sum := sha256.Sum256(bindData)
+	c := validCSClaims()
+	c["eat_nonce"] = []string{hex.EncodeToString(csNonce), hex.EncodeToString(sum[:])}
+	if mutate != nil {
+		mutate(c)
+	}
+	return mintJWT(t, "maa1", "RS256", key, c)
+}
 
-	_, err := att.Verify(context.Background(), req)
+// The Confidential Space token carries no reported TCB, so the aTLS CS validator
+// cannot enforce a minTCB floor. It must fail closed (loudly) when one is
+// configured rather than silently ignore it — mirroring the Azure SNP path.
+func TestCSValidator_MinTCBFailsClosed(t *testing.T) {
+	key, keys := jwtSigningKey(t)
+	bindData := bytes.Repeat([]byte{0x22}, 32)
+	tok := csTokenBoundTo(t, key, bindData, nil)
+
+	err := CSValidator(keys, []string{csDigest}, "sev", 7).Validate(context.Background(), []byte(tok), bindData, csNonce)
 	require.Error(t, err, "minTCB set on the GCP CS path must fail closed, not be ignored")
 	assert.Contains(t, err.Error(), "minTCB")
 }
 
-func TestCSAttester_BindsChannelKey(t *testing.T) {
-	channelKey := bytes.Repeat([]byte{0x22}, 32)
-	sum := sha256.Sum256(channelKey)
+// A token committing to the aTLS session bindData verifies, and the recorded
+// verdict carries the attested image digest + the real platform type.
+func TestCSValidator_AcceptsBoundToken(t *testing.T) {
 	key, keys := jwtSigningKey(t)
-	att := &csAttester{keys: keys,
-		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
-			c := validCSClaims()
-			c["eat_nonce"] = []string{hex.EncodeToString(nonce), hex.EncodeToString(sum[:])}
-			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev", Measurements: []string{csDigest}}
+	bindData := bytes.Repeat([]byte{0x44}, 32)
+	tok := csTokenBoundTo(t, key, bindData, nil)
 
-	res, err := att.Verify(context.Background(), req)
-	require.NoError(t, err)
-	assert.True(t, res.Verified, "a token committing to the agent's channel key verifies")
+	v := CSValidator(keys, []string{csDigest}, "sev", 0)
+	require.NoError(t, v.Validate(context.Background(), []byte(tok), bindData, csNonce))
+	assert.True(t, v.Result.Verified)
+	assert.Equal(t, csDigest, v.Result.Measurement)
+	assert.Equal(t, "sev", v.Result.Type)
 }
 
-func TestCSAttester_RejectsUncommittedChannelKey(t *testing.T) {
+// A token that does not commit to this session's bindData is a relay/substitution
+// and must be rejected.
+func TestCSValidator_RejectsUncommittedBindData(t *testing.T) {
 	key, keys := jwtSigningKey(t)
-	att := &csAttester{keys: keys,
-		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
-			c := validCSClaims()
-			c["eat_nonce"] = []string{hex.EncodeToString(nonce)} // nonce echoed, key NOT committed
-			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: bytes.Repeat([]byte{0x33}, 32)}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev", Measurements: []string{csDigest}}
+	// Token commits to a DIFFERENT bindData than the session presents.
+	tok := csTokenBoundTo(t, key, bytes.Repeat([]byte{0x33}, 32), nil)
 
-	res, err := att.Verify(context.Background(), req)
-	require.NoError(t, err)
-	assert.False(t, res.Verified, "an unbound sealing key must be rejected — the host could have substituted it")
-	assert.Contains(t, res.Verdict, "channel key")
+	err := CSValidator(keys, []string{csDigest}, "sev", 0).Validate(context.Background(), []byte(tok), bytes.Repeat([]byte{0x22}, 32), csNonce)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "channel key")
 }
 
-func TestCSAttester_VerifyAccepts(t *testing.T) {
-	channelKey := bytes.Repeat([]byte{0x44}, 32)
-	sum := sha256.Sum256(channelKey)
+// A token not echoing this run's nonce (a replay) is rejected.
+func TestCSValidator_RejectsReplay(t *testing.T) {
 	key, keys := jwtSigningKey(t)
-	att := &csAttester{keys: keys,
-		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
-			c := validCSClaims()
-			c["eat_nonce"] = []string{hex.EncodeToString(nonce), hex.EncodeToString(sum[:])} // echo nonce + commit key
-			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev", Measurements: []string{csDigest}}
+	bindData := bytes.Repeat([]byte{0x44}, 32)
+	sum := sha256.Sum256(bindData)
+	c := validCSClaims()
+	c["eat_nonce"] = []string{"deadbeef", hex.EncodeToString(sum[:])} // stale run nonce
+	tok := mintJWT(t, "maa1", "RS256", key, c)
 
-	res, err := att.Verify(context.Background(), req)
-	require.NoError(t, err)
-	assert.True(t, res.Verified)
-	assert.Equal(t, csDigest, res.Measurement)
-}
-
-func TestCSAttester_RejectsReplay(t *testing.T) {
-	key, keys := jwtSigningKey(t)
-	att := &csAttester{keys: keys,
-		fetch: func(_ context.Context, _ []byte) (csEvidence, error) {
-			c := validCSClaims() // eat_nonce is a STALE nonce, not this run's
-			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: bytes.Repeat([]byte{0x44}, 32)}, nil
-		}}
-	req := types.ConfidentialRequirement{Required: true, Type: "sev", Measurements: []string{csDigest}}
-
-	res, err := att.Verify(context.Background(), req)
-	require.NoError(t, err)
-	assert.False(t, res.Verified, "a token not echoing this run's nonce is rejected")
-	assert.Contains(t, res.Verdict, "nonce")
-}
-
-func TestCSAttester_NotReadyAndNoFetch(t *testing.T) {
-	_, err := (&csAttester{}).Verify(context.Background(),
-		types.ConfidentialRequirement{Required: true, Type: "sev"})
-	require.Error(t, err, "no fetch wired must error, not panic")
+	err := CSValidator(keys, []string{csDigest}, "sev", 0).Validate(context.Background(), []byte(tok), bindData, csNonce)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nonce")
 }
 
 // GCP Confidential Space provisions plain SEV, so a sev-snp/tdx request must be
-// rejected (not silently downgraded) and the recorded type must be the real one.
-func TestCSAttester_RejectsTypeDowngrade(t *testing.T) {
-	channelKey := bytes.Repeat([]byte{0x22}, 32)
-	sum := sha256.Sum256(channelKey)
+// rejected (not silently downgraded).
+func TestCSValidator_RejectsTypeDowngrade(t *testing.T) {
 	key, keys := jwtSigningKey(t)
-	att := &csAttester{keys: keys,
-		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
-			c := validCSClaims() // hwmodel GCP_AMD_SEV
-			c["eat_nonce"] = []string{hex.EncodeToString(nonce), hex.EncodeToString(sum[:])}
-			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: channelKey}, nil
-		}}
+	bindData := bytes.Repeat([]byte{0x22}, 32)
+	tok := csTokenBoundTo(t, key, bindData, nil) // hwmodel GCP_AMD_SEV → "sev"
 
-	res, err := att.Verify(context.Background(), types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{csDigest}})
-	require.NoError(t, err)
-	assert.False(t, res.Verified, "a sev-snp request on a SEV platform must be rejected, not downgraded")
-	assert.Contains(t, res.Verdict, "type")
-
-	res, err = att.Verify(context.Background(), types.ConfidentialRequirement{Required: true, Type: "sev", Measurements: []string{csDigest}})
-	require.NoError(t, err)
-	assert.True(t, res.Verified)
-	assert.Equal(t, "sev", res.Type, "the recorded TEE type must be the real attested platform (SEV), not a hardcoded sev-snp")
-}
-
-// The run path always seals to a channel key, so an absent key must fail closed
-// at the verifier (not skip the binding check) — matching the matrix's "Enforced".
-func TestCSAttester_RejectsAbsentChannelKey(t *testing.T) {
-	key, keys := jwtSigningKey(t)
-	att := &csAttester{keys: keys,
-		fetch: func(_ context.Context, nonce []byte) (csEvidence, error) {
-			c := validCSClaims()
-			c["eat_nonce"] = []string{hex.EncodeToString(nonce)}
-			return csEvidence{token: mintJWT(t, "maa1", "RS256", key, c), channelKey: nil}, nil // no channel key
-		}}
-	res, err := att.Verify(context.Background(), types.ConfidentialRequirement{Required: true, Type: "sev", Measurements: []string{csDigest}})
-	require.NoError(t, err)
-	assert.False(t, res.Verified, "an absent channel key must be rejected, not silently skip the binding")
-	assert.Contains(t, res.Verdict, "channel key")
+	err := CSValidator(keys, []string{csDigest}, "sev-snp", 0).Validate(context.Background(), []byte(tok), bindData, csNonce)
+	require.Error(t, err, "a sev-snp request on a SEV platform must be rejected, not downgraded")
+	assert.Contains(t, err.Error(), "type")
 }

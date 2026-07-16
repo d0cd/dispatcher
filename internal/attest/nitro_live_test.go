@@ -10,17 +10,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/attest/agent"
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// TestGolden_NitroLiveExchange drives the full AWS Nitro path against a live
-// enclave running dispatcher-attest-nitro, reached via dispatcher-nitro-proxy on
-// the parent: fetch + verify the real Nitro attestation document (chain to the
-// pinned Root-G1 + COSE signature + nonce + pinned PCR0), seal source/.env to the
-// doc's public_key, run inside the enclave, and open the sealed result. Gated on
-// the live endpoint so CI stays offline.
+// TestGolden_NitroLiveExchange drives the full AWS Nitro path over aTLS against a
+// live enclave running dispatcher-attest-nitro, reached via dispatcher-nitro-proxy
+// on the parent: attest (COSE document chained to the pinned Root-G1, nonce +
+// pinned PCR0, committed to the aTLS session's bindData) and deliver+run the sealed
+// workload over the same attested TLS session — exactly the Nitro adapter's path
+// (NitroValidatorPinned + RunOverATLS), minus provisioning. Gated on the live
+// endpoint so CI stays offline.
 //
-//	DISPATCHER_NITRO_LIVE_ENDPOINT=http://<parent-ip>:8443 \
+//	DISPATCHER_NITRO_LIVE_ENDPOINT=<parent-ip>:8443 \
 //	DISPATCHER_NITRO_LIVE_PCR0=<pcr0 hex from build-eif.sh> \
 //	go test ./internal/attest -run TestGolden_NitroLiveExchange -v
 func TestGolden_NitroLiveExchange(t *testing.T) {
@@ -30,20 +30,18 @@ func TestGolden_NitroLiveExchange(t *testing.T) {
 	}
 	pcr0 := strings.TrimSpace(os.Getenv("DISPATCHER_NITRO_LIVE_PCR0"))
 	require.NotEmpty(t, pcr0, "DISPATCHER_NITRO_LIVE_PCR0 is required")
-
+	addr := strings.TrimPrefix(endpoint, "http://")
 	ctx := context.Background()
-	att := NewAWSNitroAttester(map[int]string{0: pcr0}, endpoint)
-	res, err := att.Verify(ctx, types.ConfidentialRequirement{Required: true, Type: "nitro"})
-	require.NoError(t, err)
-	require.True(t, res.Verified, res.Verdict)
-	require.NotEmpty(t, res.ChannelKey, "a verified result carries the bound channel key to seal to")
-	assert.Equal(t, pcr0, res.Measurement, "the attested measurement is the pinned enclave PCR0")
 
-	result, err := agent.RunSealedExchange(ctx, endpoint, res.ChannelKey, agent.Payload{
+	v := NitroValidatorPinned(map[int]string{0: pcr0})
+	result, err := agent.RunOverATLS(ctx, addr, v, agent.Payload{
 		Command: []string{"sh", "-c", "echo hi from enclave; echo secret=$SECRET"},
 		DotEnv:  []byte("SECRET=nitro-sealed\n"),
 	})
 	require.NoError(t, err)
+	require.True(t, v.Result.Verified, v.Result.Verdict)
+	assert.Equal(t, "nitro", v.Result.Type)
+	assert.Equal(t, pcr0, v.Result.Measurement, "the attested measurement is the pinned enclave PCR0")
 	assert.Equal(t, 0, result.ExitCode)
 	assert.Contains(t, string(result.Stdout), "hi from enclave")
 	assert.Contains(t, string(result.Stdout), "secret=nitro-sealed", "the sealed .env reached the workload inside the enclave")

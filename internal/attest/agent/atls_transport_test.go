@@ -79,3 +79,40 @@ type rejectValidator struct{}
 func (rejectValidator) Validate(context.Context, []byte, []byte, []byte) error {
 	return context.Canceled
 }
+
+// capturingValidator records the attested evidence — the shape a measurement
+// capture uses to derive a pin from a booted TEE without running a workload.
+type capturingValidator struct{ evidence []byte }
+
+func (c *capturingValidator) Validate(_ context.Context, evidence, bindData, nonce []byte) error {
+	want := append(append([]byte(nil), bindData...), nonce...)
+	if !bytes.Equal(evidence, want) {
+		return context.Canceled
+	}
+	c.evidence = evidence
+	return nil
+}
+
+// TestAttestOverATLS_CapturesEvidence proves the attest-only client path completes
+// the binding exchange and hands the validator the session-bound evidence, without
+// delivering a payload or running anything.
+func TestAttestOverATLS_CapturesEvidence(t *testing.T) {
+	cfg, spki, err := atls.NewServerConfig()
+	require.NoError(t, err)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+
+	ran := make(chan struct{}, 1)
+	runner := func(context.Context, Payload) Result { ran <- struct{}{}; return Result{} }
+	go func() { _ = ServeATLS(ln, cfg, spki, synthAttest, runner) }()
+
+	capture := &capturingValidator{}
+	require.NoError(t, AttestOverATLS(context.Background(), ln.Addr().String(), capture))
+	require.NotEmpty(t, capture.evidence, "the validator must receive the session-bound evidence")
+	select {
+	case <-ran:
+		t.Fatal("attest-only path must not run a workload")
+	default:
+	}
+}

@@ -4,59 +4,14 @@ import (
 	"context"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/d0cd/dispatcher/internal/attest"
-	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/types"
 )
-
-// TestGolden_CSLiveExchange drives the FULL Phase 2 execution model against a
-// live Confidential Space VM running dispatcher-attest: attest over the untrusted
-// endpoint, verify the Google-signed token (signature + nonce + channel-key
-// binding + image digest), seal a payload to the attested channel key, run it
-// inside the TEE, and open the sealed result. Gated on the live endpoint env vars
-// so CI stays offline.
-//
-//	DISPATCHER_CS_LIVE_ENDPOINT=http://<vm-ip>:8443 \
-//	DISPATCHER_CS_LIVE_DIGEST=sha256:<attested-image-digest> \
-//	go test ./internal/cloudvm -run TestGolden_CSLiveExchange -v
-func TestGolden_CSLiveExchange(t *testing.T) {
-	endpoint := os.Getenv("DISPATCHER_CS_LIVE_ENDPOINT")
-	if endpoint == "" {
-		t.Skip("set DISPATCHER_CS_LIVE_ENDPOINT (and DISPATCHER_CS_LIVE_DIGEST) to run against a live CS VM")
-	}
-	digest := strings.TrimSpace(os.Getenv("DISPATCHER_CS_LIVE_DIGEST"))
-	require.NotEmpty(t, digest, "DISPATCHER_CS_LIVE_DIGEST is required")
-
-	ctx := context.Background()
-	keys, err := attest.LoadGoogleCSKeys(ctx)
-	require.NoError(t, err, "the live Google Confidential Space JWKS must load")
-
-	// Attest over the untrusted endpoint + verify the real token: signature (live
-	// JWKS) + nonce + channel-key binding + the attested image digest on the allowlist.
-	att := attest.NewCSAttester(keys, endpoint)
-	res, err := att.Verify(ctx,
-		types.ConfidentialRequirement{Required: true, Type: "sev-snp", Measurements: []string{digest}})
-	require.NoError(t, err, "the live token must verify with the channel-key binding")
-	require.True(t, res.Verified, res.Verdict)
-	assert.Equal(t, digest, res.Measurement)
-	require.NotEmpty(t, res.ChannelKey)
-
-	// Seal a payload to the attested key, run it inside the TEE, open the result.
-	result, err := agent.RunSealedExchange(ctx, endpoint, res.ChannelKey, agent.Payload{
-		Command: []string{"sh", "-c", "echo hello from TEE; echo secret=$SECRET"},
-		DotEnv:  []byte("SECRET=live-sealed\n"),
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 0, result.ExitCode)
-	assert.Contains(t, string(result.Stdout), "hello from TEE")
-	assert.Contains(t, string(result.Stdout), "secret=live-sealed", "the sealed .env reached the workload inside the TEE")
-}
 
 // TestGolden_CSLiveAdapter exercises the FULLY INTEGRATED ConfidentialSpaceAdapter
 // against real GCP: build+push the measured agent image, provision the CS VM

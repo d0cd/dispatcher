@@ -1,18 +1,13 @@
 package attest
 
 import (
-	"context"
 	"crypto"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
-
-	"github.com/d0cd/dispatcher/internal/attest/agent"
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // GCP Confidential Space attestation is a Google-signed OIDC/EAT token — not a
@@ -170,80 +165,4 @@ func containsFold(hay []string, needle string) bool {
 		}
 	}
 	return false
-}
-
-// csEvidence is what the Confidential Space fetch returns: the Google-signed
-// attestation token (binding the verifier's nonce in eat_nonce) and the in-TEE
-// channel public key secrets are later sealed to.
-type csEvidence struct {
-	token      string
-	channelKey []byte
-}
-
-// csFetch obtains a Confidential Space attestation token from a booted CS VM
-// (via the container-launcher teeserver socket), passing the per-run nonce. It
-// needs the measured CS runtime, so it is the one part not unit-testable offline.
-type csFetch func(ctx context.Context, nonce []byte) (csEvidence, error)
-
-// csEndpointFetch reads the Google-signed Confidential Space token from the
-// in-TEE agent's /attest endpoint over the untrusted channel, binding the run nonce.
-func csEndpointFetch(baseURL string) csFetch {
-	return func(ctx context.Context, nonce []byte) (csEvidence, error) {
-		token, channelKey, err := agent.FetchAttestation(ctx, baseURL, nonce)
-		if err != nil {
-			return csEvidence{}, err
-		}
-		return csEvidence{token: token, channelKey: channelKey}, nil
-	}
-}
-
-// csAttester verifies GCP Confidential Space attestation tokens. keys are the
-// trusted Google signing keys (JWKS). Verify fails closed when no evidence fetch
-// is wired (fetch == nil). The run's
-// ConfidentialRequirement.Measurements carries the accepted container image
-// digests (the CS analog of a launch-measurement allowlist).
-type csAttester struct {
-	keys  map[string]crypto.PublicKey
-	fetch csFetch
-}
-
-func (a *csAttester) Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error) {
-	if a.fetch == nil {
-		return AttestationResult{}, fmt.Errorf("cs attester has no evidence fetch wired")
-	}
-	// The Confidential Space token exposes no reported TCB, so this path cannot
-	// enforce a minTCB floor. Fail closed rather than silently ignore the control
-	// the operator configured (there is no measured-TCB backend on GCP today).
-	if req.MinTCB > 0 {
-		return AttestationResult{}, fmt.Errorf("minTCB cannot be enforced on the GCP Confidential Space path (the attestation token carries no reported TCB)")
-	}
-	nonce := make([]byte, 32)
-	if _, err := rand.Read(nonce); err != nil {
-		return AttestationResult{}, fmt.Errorf("generate attestation nonce: %w", err)
-	}
-	ev, err := a.fetch(ctx, nonce)
-	if err != nil {
-		return AttestationResult{}, fmt.Errorf("fetch cs evidence: %w", err)
-	}
-	// The run path always seals to a channel key, so an absent one must fail closed
-	// here — otherwise verifyCSToken's `len(ChannelKey)>0` gate would skip the
-	// binding check and emit a "verified" verdict the matrix claims is Enforced.
-	// (A host on the untrusted channel could relay a genuine token with key = nil.)
-	if len(ev.channelKey) == 0 {
-		return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: "cs evidence carries no channel key to bind the sealed exchange"}, nil
-	}
-	digest, teeType, err := verifyCSToken(ev.token, a.keys, CSPolicy{Nonce: nonce, ImageDigests: req.Measurements, ChannelKey: ev.channelKey, ExpectedType: req.Type})
-	if err != nil {
-		// A token that fails verification is a verdict (abort the run), not a
-		// fetch fault — surface the reason.
-		return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
-	}
-	return AttestationResult{
-		Verified:    true,
-		Type:        teeType, // the attested platform (CS provisions plain SEV)
-		Measurement: digest,  // the attested container image digest
-		Nonce:       hex.EncodeToString(nonce),
-		Verdict:     "verified",
-		ChannelKey:  ev.channelKey, // verified-bound; the adapter seals to it
-	}, nil
 }

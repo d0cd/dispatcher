@@ -93,3 +93,17 @@ func RunOverATLS(ctx context.Context, addr string, validator atls.Validator, pay
 	}
 	return res, nil
 }
+
+// AttestOverATLS dials the agent and runs ONLY the attestation phase, validating
+// the peer via validator — no payload is delivered and nothing runs. It is the
+// capture-time counterpart to RunOverATLS: derive a measured image's pinned value
+// from a booted TEE without executing a workload.
+func AttestOverATLS(ctx context.Context, addr string, validator atls.Validator) error {
+	raw, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return fmt.Errorf("dial agent: %w", err)
+	}
+	conn := tls.Client(raw, atls.NewClientConfig())
+	defer conn.Close()
+	return atls.ClientAttest(ctx, conn, validator)
+}

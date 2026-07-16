@@ -1,10 +1,7 @@
 package attest
 
 import (
-	"context"
 	"encoding/json"
-
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // AttestationResult records the outcome of verifying a TEE's attestation report.
@@ -38,13 +35,4 @@ func AttestationFromHandleState(raw json.RawMessage) *AttestationResult {
 		return nil
 	}
 	return s.Attestation
-}
-
-// Attester fetches and verifies a TEE's attestation evidence over the in-TEE
-// agent's endpoint. Implementations are per-provider (CS token, MAA token, raw
-// SEV-SNP report). A returned Verified=false (or an error) means the run must not
-// proceed. The verification crypto is unit-testable; only the fetch needs a live
-// TEE.
-type Attester interface {
-	Verify(ctx context.Context, req types.ConfidentialRequirement) (AttestationResult, error)
 }

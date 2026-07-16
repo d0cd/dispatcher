@@ -18,10 +18,8 @@ go build -o dispatcher ./cmd/dispatcher
 ```
 cmd/
   dispatcher/            # CLI entry point (main.go)
-  dispatcher-attest/     # in-TEE attestation agent (generic)
-  dispatcher-attest-aws/ # per-cloud measured agents (aws/azure/azuresnp/nitro)
-  dispatcher-attest-azure/
-  dispatcher-attest-azuresnp/
+  dispatcher-attest/     # in-TEE attestation agent (GCP Confidential Space)
+  dispatcher-attest-azuresnp/ # per-cloud measured agents (azuresnp/nitro)
   dispatcher-attest-nitro/
   dispatcher-nitro-proxy/ # parent-side vsock<->TCP proxy for Nitro enclaves
 internal/

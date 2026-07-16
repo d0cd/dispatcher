@@ -70,7 +70,8 @@ func TestHashInputs_MissingPathFailsClosed(t *testing.T) {
 // editing an unrelated cloud's agent doesn't spuriously invalidate this pin.
 func TestInputsHash_ExcludesSiblingSubpackages(t *testing.T) {
 	root := t.TempDir()
-	writeFile(t, root, "internal/attest/agent/agent.go", "package agent\n")         // shared core
+	writeFile(t, root, "internal/attest/agent/agent.go", "package agent\n") // shared core
+	writeFile(t, root, "internal/attest/atls/atls.go", "package atls\n")
 	writeFile(t, root, "internal/attest/agent/nitro/n.go", "package nitro\n")       // AWSNitro's own
 	writeFile(t, root, "internal/attest/agent/azuresnp/a.go", "package azuresnp\n") // sibling (Azure)
 	writeFile(t, root, "internal/attest/agent/azure/m.go", "package azure\n")       // sibling (MAA)
@@ -133,6 +134,7 @@ func TestHashInputs_DetectsRenameAndContentSwap(t *testing.T) {
 func TestCheckPins_PerTargetAndMultiStale(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "internal/attest/agent/agent.go", "package agent\n")
+	writeFile(t, root, "internal/attest/atls/atls.go", "package atls\n")
 	writeFile(t, root, "internal/attest/agent/nitro/n.go", "package nitro\n")
 	writeFile(t, root, "internal/attest/agent/azuresnp/a.go", "package azuresnp\n")
 	writeFile(t, root, "cmd/dispatcher-attest-nitro/main.go", "package main\n")
@@ -230,6 +232,7 @@ func TestInputsHash_PerTarget(t *testing.T) {
 	root := t.TempDir()
 	// minimal stand-ins for the real repo paths
 	writeFile(t, root, "internal/attest/agent/agent.go", "package agent\n")
+	writeFile(t, root, "internal/attest/atls/atls.go", "package atls\n")
 	writeFile(t, root, "cmd/dispatcher-attest-nitro/main.go", "package main\n")
 	writeFile(t, root, "cmd/dispatcher-nitro-proxy/main.go", "package main\n")
 	writeFile(t, root, "cmd/dispatcher-attest-azuresnp/main.go", "package main\n")
@@ -256,6 +259,7 @@ func TestInputsHash_PerTarget(t *testing.T) {
 func TestCheckPins(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "internal/attest/agent/agent.go", "package agent\n")
+	writeFile(t, root, "internal/attest/atls/atls.go", "package atls\n")
 	writeFile(t, root, "cmd/dispatcher-attest-nitro/main.go", "package main\n")
 	writeFile(t, root, "cmd/dispatcher-nitro-proxy/main.go", "package main\n")
 	writeFile(t, root, "deploy/nitro/Dockerfile", "FROM x\n")

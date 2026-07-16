@@ -177,7 +177,7 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 	// comes back over the same session. Nothing is shipped before verification
 	// (RunOverATLS aborts if the peer doesn't verify).
 	req := w.Requirements.Confidential
-	v := attest.CSValidator(d.keys, []string{imageDigest}, req.Type)
+	v := attest.CSValidator(d.keys, []string{imageDigest}, req.Type, req.MinTCB)
 	runRes, err := runOverATLS(ctx, strings.TrimPrefix(baseURL, "http://"), v, payload)
 	if err != nil {
 		return nil, fmt.Errorf("attested aTLS run: %w", err)

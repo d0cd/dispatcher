@@ -23,6 +23,7 @@ import (
 var measurementInputs = map[Target][]string{
 	AWSNitro: {
 		"internal/attest/agent", // agent-core (linked into the enclave agent)
+		"internal/attest/atls",  // attested-TLS transport the agent serves
 		"cmd/dispatcher-attest-nitro",
 		"cmd/dispatcher-nitro-proxy",
 		"deploy/nitro",
@@ -30,6 +31,7 @@ var measurementInputs = map[Target][]string{
 	},
 	AzureSNP: {
 		"internal/attest/agent",
+		"internal/attest/atls", // attested-TLS transport the agent serves
 		"cmd/dispatcher-attest-azuresnp",
 		"deploy/azure-uki/mkosi",
 		"go.mod", "go.sum",
@@ -40,8 +42,8 @@ var measurementInputs = map[Target][]string{
 // binary (confirmed via the build's import closure), excluded from its hash so an
 // unrelated cloud's agent edit doesn't spuriously invalidate this target's pin.
 var measurementInputExclude = map[Target][]string{
-	AWSNitro: {"internal/attest/agent/azure", "internal/attest/agent/aws", "internal/attest/agent/azuresnp"},
-	AzureSNP: {"internal/attest/agent/azure", "internal/attest/agent/aws", "internal/attest/agent/nitro"},
+	AWSNitro: {"internal/attest/agent/azuresnp"},
+	AzureSNP: {"internal/attest/agent/nitro"},
 }
 
 // InputsHash hashes a target's measurement inputs under repoRoot. It returns an

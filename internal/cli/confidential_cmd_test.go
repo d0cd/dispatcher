@@ -75,6 +75,7 @@ func TestBuildNitro_RequiresProxy(t *testing.T) {
 func TestRunConfidentialCheck(t *testing.T) {
 	repo := t.TempDir()
 	writeCheckFile(t, repo, "internal/attest/agent/agent.go", "package agent\n")
+	writeCheckFile(t, repo, "internal/attest/atls/atls.go", "package atls\n")
 	writeCheckFile(t, repo, "cmd/dispatcher-attest-nitro/main.go", "package main\n")
 	writeCheckFile(t, repo, "cmd/dispatcher-nitro-proxy/main.go", "package main\n")
 	writeCheckFile(t, repo, "deploy/nitro/Dockerfile", "FROM x\n")
@@ -116,6 +117,7 @@ func nitroRepo(t *testing.T) string {
 	repo := t.TempDir()
 	writeCheckFile(t, repo, "internal/attest/agent/agent.go", "package agent\n")
 	writeCheckFile(t, repo, "internal/attest/agent/nitro/n.go", "package nitro\n")
+	writeCheckFile(t, repo, "internal/attest/atls/atls.go", "package atls\n")
 	writeCheckFile(t, repo, "cmd/dispatcher-attest-nitro/main.go", "package main\n")
 	writeCheckFile(t, repo, "cmd/dispatcher-nitro-proxy/main.go", "package main\n")
 	writeCheckFile(t, repo, "deploy/nitro/Dockerfile", "FROM x\n")

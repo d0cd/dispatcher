@@ -1,6 +1,7 @@
 package attest
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -8,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"math/big"
@@ -18,8 +20,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	cose "github.com/veraison/go-cose"
-
-	"github.com/d0cd/dispatcher/internal/types"
 )
 
 // nitroTestPKI builds a synthetic Nitro attestation PKI: a self-signed P-384 root
@@ -179,27 +179,26 @@ func TestVerifyNitroDoc_RejectsNonceMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "nonce")
 }
 
-// TestNitroAttester_VerifyBindsFreshNonce drives the full attester path: it
-// generates its own nonce, the (stubbed) enclave returns a document echoing that
-// nonce, and Verify returns a verified verdict carrying the bound channel key.
-func TestNitroAttester_VerifyBindsFreshNonce(t *testing.T) {
+// TestNitroValidator_BindsSessionAndNonce drives the aTLS validator path: the
+// enclave document must echo this run's nonce AND carry the aTLS session's bindData
+// as its public_key, or the session is rejected as a relay/substitution.
+func TestNitroValidator_BindsSessionAndNonce(t *testing.T) {
 	root, rootKey := nitroTestPKI(t)
 	pool := x509.NewCertPool()
 	pool.AddCert(root)
 
-	att := &nitroAttester{
-		roots: pool,
-		pcrs:  map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))},
-		// The enclave stub binds whatever nonce the attester challenges with.
-		fetch: func(_ context.Context, nonce []byte) ([]byte, error) {
-			return signedNitroDoc(t, root, rootKey, func(d *nitroDoc) { d.Nonce = nonce }), nil
-		},
-	}
-	res, err := att.Verify(context.Background(), types.ConfidentialRequirement{Required: true})
-	require.NoError(t, err)
-	require.True(t, res.Verified, res.Verdict)
-	assert.Equal(t, "nitro", res.Type)
-	assert.Equal(t, []byte("channel-public-key-bytes-32-xxxx"), res.ChannelKey)
+	nonce := bytes.Repeat([]byte{0x5C}, 32)
+	bindData := []byte("channel-public-key-bytes-32-xxxx")
+	doc := signedNitroDoc(t, root, rootKey, func(d *nitroDoc) { d.Nonce = nonce; d.PublicKey = bindData })
+	ev := []byte(base64.StdEncoding.EncodeToString(doc))
+
+	v := NitroValidator(pool, map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))})
+	require.NoError(t, v.Validate(context.Background(), ev, bindData, nonce))
+	assert.True(t, v.Result.Verified, v.Result.Verdict)
+	assert.Equal(t, "nitro", v.Result.Type)
+
+	// A document not bound to this session's bindData must be rejected.
+	require.Error(t, v.Validate(context.Background(), ev, []byte("a-different-32-byte-bind-value!!"), nonce))
 }
 
 // TestVerifyNitroDoc_RejectsTamperedPayload: flipping a PCR after signing breaks
