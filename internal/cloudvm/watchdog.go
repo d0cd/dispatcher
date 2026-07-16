@@ -35,13 +35,23 @@ const watchdogDeadlinePath = "/var/lib/dispatcher/watchdog-deadline"
 // is `dispatcher gc` (which reaps stopped-but-allocated Azure VMs). Making the
 // Azure watchdog auto-deallocate (managed identity + IMDS token → REST) is
 // tracked in ROADMAP.
-func WatchdogCloudInit(initialTTL time.Duration) string {
+func WatchdogCloudInit(initialTTL time.Duration, loginUser string) string {
 	ttlSeconds := int(initialTTL.Seconds())
+	// cloud-init runs as root, so the deadline file it writes is root-owned.
+	// Renewal (ExtendWatchdogViaSSH) connects as the login user, which is
+	// non-root on most clouds (ubuntu/dispatcher/ec2-user); hand the file to
+	// that user so its `echo > deadline` can write. When the login user is
+	// already root the chown is a no-op and is omitted.
+	chownDeadline := ""
+	if loginUser != "" && loginUser != "root" {
+		chownDeadline = fmt.Sprintf("chown %s %s", loginUser, watchdogDeadlinePath)
+	}
 	return fmt.Sprintf(`#!/bin/sh
 # Dispatcher watchdog: self-destruct if deadline not extended.
 # Deadline is computed at boot so provisioning delays don't pre-expire it.
 mkdir -p /var/log/dispatcher /var/lib/dispatcher
 echo $(($(date +%%s) + %d)) > %s
+%s
 
 cat > /usr/local/bin/dispatcher-watchdog.sh <<'WATCHDOG_EOF'
 #!/bin/sh
@@ -73,7 +83,7 @@ UNIT_EOF
 
 systemctl daemon-reload
 systemctl enable --now dispatcher-watchdog.service
-`, ttlSeconds, watchdogDeadlinePath, watchdogDeadlinePath)
+`, ttlSeconds, watchdogDeadlinePath, chownDeadline, watchdogDeadlinePath)
 }
 
 // ExtendWatchdogViaSSH updates the deadline file on the remote VM.

@@ -303,7 +303,7 @@ func TestCloudVMState_Serialization(t *testing.T) {
 }
 
 func TestWatchdogCloudInit(t *testing.T) {
-	script := WatchdogCloudInit(30 * time.Minute)
+	script := WatchdogCloudInit(30*time.Minute, "ubuntu")
 	assert.Contains(t, script, "watchdog-deadline")
 	assert.Contains(t, script, "shutdown -h now")
 	assert.Contains(t, script, "sleep 60")
@@ -318,6 +318,19 @@ func TestWatchdogCloudInit(t *testing.T) {
 	// shell.
 	assert.Contains(t, script, "systemctl enable")
 	assert.Contains(t, script, "Restart=always")
+
+	// cloud-init writes the deadline as root; renewal SSHes in as the login
+	// user (non-root on AWS/GCP/Azure/OCI), so the file must be handed to that
+	// user or `echo > deadline` fails with permission denied and the
+	// self-destruct never renews.
+	assert.Contains(t, script, "chown ubuntu "+watchdogDeadlinePath)
+}
+
+func TestWatchdogCloudInit_RootLoginNeedsNoChown(t *testing.T) {
+	// Where the login user is root (Hetzner/Firecracker) the file is already
+	// root-owned, so no chown is emitted.
+	script := WatchdogCloudInit(30*time.Minute, "root")
+	assert.NotContains(t, script, "chown root")
 }
 
 func TestProviderBaseRates(t *testing.T) {
