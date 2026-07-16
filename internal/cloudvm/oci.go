@@ -21,10 +21,6 @@ import (
 // and a base image — so they are supplied by the operator via DISPATCHER_OCI_*
 // env vars rather than discovered. CreateVM fails closed with a clear message
 // when a required one is missing.
-//
-// NOTE (needs live validation): the exact `oci` argv, the confidential
-// platform-config `type` enum for SEV vs SEV-SNP, and the VNIC public-IP lookup
-// are modeled from the OCI CLI docs but have not been run against a live tenancy.
 type OCIProvider struct {
 	region             string
 	compartmentID      string
@@ -130,42 +126,15 @@ func (o *OCIProvider) CheckCLI(ctx context.Context) error {
 	return nil
 }
 
-// ociShapeAndPlatformConfig resolves the compute shape and the optional
-// platform-config JSON for a VM. Confidential requests map to memory-encrypted
-// shapes. `sev-snp` uses an E5 Flex VM; OCI bare-metal confidentiality protects
-// the physical host but does not automatically create a guest-scoped TEE.
-// Attestation is intentionally handled elsewhere and currently fails closed.
-// An explicit InstanceType wins.
-//
-// NOTE (needs live validation): the platform-config `type` enum values differ by
-// CLI version and shape family; confirm with
-// `oci compute instance launch --generate-param-json-input platform-config`.
-func ociShapeAndPlatformConfig(opts VMOptions) (shape string, platformConfig []byte, err error) {
-	shape = opts.InstanceType
-	switch opts.ConfidentialType {
-	case "":
-		if shape == "" {
-			shape = "VM.Standard.E4.Flex"
-		}
-		return shape, nil, nil
-	case "sev", "any":
-		if shape == "" {
-			shape = "VM.Standard.E4.Flex"
-		}
-		pc, _ := json.Marshal(map[string]any{"type": "AMD_VM", "isMemoryEncryptionEnabled": true})
-		return shape, pc, nil
-	case "sev-snp":
-		if shape == "" {
-			shape = "VM.Standard.E5.Flex"
-		}
-		if strings.HasPrefix(shape, "BM.") {
-			return "", nil, fmt.Errorf("oci sev-snp requires a VM.Standard.E5/E6 Flex guest; bare-metal confidentiality is not a VM-scoped TEE")
-		}
-		pc, _ := json.Marshal(map[string]any{"type": "AMD_VM", "isMemoryEncryptionEnabled": true})
-		return shape, pc, nil
-	default:
-		return "", nil, fmt.Errorf("oci does not support confidential type %q (use sev or sev-snp)", opts.ConfidentialType)
+// ociShape resolves the compute shape for a VM: the operator's InstanceType, or a
+// general-purpose default. OCI is a plain provisioning target — confidential
+// execution is not offered (its SEV-SNP reports do not verify against AMD KDS;
+// see docs/SECURITY.md) — so there is no platform-config.
+func ociShape(opts VMOptions) string {
+	if opts.InstanceType != "" {
+		return opts.InstanceType
 	}
+	return "VM.Standard.E4.Flex"
 }
 
 func (o *OCIProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
@@ -183,10 +152,7 @@ func (o *OCIProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		return nil, fmt.Errorf("oci requires an image: set DISPATCHER_OCI_IMAGE_ID or the plan's InstanceType image")
 	}
 
-	shape, platformConfig, err := ociShapeAndPlatformConfig(opts)
-	if err != nil {
-		return nil, err
-	}
+	shape := ociShape(opts)
 
 	// SSH key + cloud-init ride in instance metadata. Write the metadata as a
 	// file:// input so neither the key nor the (secret-bearing) user-data appears
@@ -248,15 +214,6 @@ func (o *OCIProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		}
 		defer os.Remove(f)
 		args = append(args, "--freeform-tags", "file://"+f)
-	}
-
-	if platformConfig != nil {
-		f, err := adapter.WriteSecureTempFile("dispatcher-oci-platform-*.json", platformConfig)
-		if err != nil {
-			return nil, fmt.Errorf("write platform config: %w", err)
-		}
-		defer os.Remove(f)
-		args = append(args, "--platform-config", "file://"+f)
 	}
 
 	// Launch is NOT retried: OCI has no idempotency token here, so re-running a

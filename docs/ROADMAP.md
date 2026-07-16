@@ -150,7 +150,7 @@ the first REST provider is the real investment (it establishes an HTTP-based
 
 | Provider | Access | Fits cloud-VM adapter? | Distinct value | Effort |
 |---|---|---|---|---|
-| **Oracle Cloud (OCI)** | `oci` CLI, SSH VMs | ✅ near-identical to AWS/GCP | Large always-free tier (Ampere ARM) for CI; cheap ARM | **disabled — needs live validation** |
+| **Oracle Cloud (OCI)** | `oci` CLI, SSH VMs | ✅ near-identical to AWS/GCP | Large always-free tier (Ampere ARM) for CI; cheap ARM | **done — validated + enabled (provisioning only)** |
 | **Vultr** | `vultr-cli` + API, SSH VMs | ✅ | Cheap general + many regions; some GPU | M (low) |
 | **Lambda Cloud** | REST API (no rich CLI), SSH VMs | ~ VM lifecycle fits, but HTTP not CLI | On-demand H100/A100 well below hyperscaler list, often more available | M (first REST adapter) |
 | **RunPod** | REST/GraphQL + CLI, SSH-able pods | ~ container/VM hybrid | Very cheap community-cloud GPUs, per-second billing; burst GPU | M–L |
@@ -163,21 +163,21 @@ Azure new subs are capacity-restricted), and **stockout-prone** (L4/n2d shopping
 across zones). The cheap-GPU specialists sidestep all three — the strongest
 argument to prioritize them over more general-compute clouds.
 
-**OCI status:** lifecycle, pricing, CLI wiring, and argv tests are built, but the
-builtin target is disabled until a real account validates the complete lifecycle.
-Confidential execution separately fails closed; OCI BYAS must be implemented
-rather than approximated with AWS evidence semantics.
+**OCI status:** *delivered* as a plain provisioning target — lifecycle validated
+end-to-end on a live tenancy (create → VNIC/IP → SSH → run → artifact → destroy),
+enabled by default. **Confidential execution is not supported and will not be:**
+hardware testing on E5/Genoa showed OCI SEV-SNP reports do not verify against the
+AMD KDS VCEK (reproduced with snpguest, go-sev-guest, and manual verification),
+and OCI forbids a vTPM/measured boot alongside SEV-SNP, so there is no
+measured-agent path. All OCI confidential code was removed; `oci-vm` declares no
+confidential capability. Remaining OCI work is optional polish (a scheduled live
+lane).
 
-| Item | Effort | Impact |
-|---|---|---|
-| **Validate OCI against a real account** — run create → VNIC/IP retry → SSH → destroy end-to-end, confirm image users and billing, and add a scheduled live-provider lane before enabling the target. | M | Medium |
-| **Implement OCI BYAS attestation** — retrieve provider-documented evidence, validate its certificate chain and nonce/channel-key binding, and exercise secret sealing on a VM.Standard.E5/E6 Flex guest. Do not use the bare-metal host or AWS VLEK verifier as substitutes. | L | High |
-
-**Suggested order:** (1) **Oracle** — validate the built adapter live (above); free
-tier gives a no-cost CI lane + a second AMD-SEV confidential target. (2) **Lambda
-Cloud** — highest-value GPU add; builds the reusable REST `Provider` pattern.
-(3) **RunPod** — cheapest burst GPU once REST exists. (4) **Vultr / Thunder** —
-opportunistic. (5) **Modal** — separate serverless track, not a VM provider.
+**Suggested order:** (1) **Oracle** — *done* (validated + enabled; provisioning
+only, confidential not supported); free always-free tier gives a no-cost CI lane.
+(2) **Lambda Cloud** — highest-value GPU add; builds the reusable REST `Provider`
+pattern. (3) **RunPod** — cheapest burst GPU once REST exists. (4) **Vultr /
+Thunder** — opportunistic. (5) **Modal** — separate serverless track, not a VM provider.
 
 GPU backends reuse the driver-baked-image mechanism already built
 (`DISPATCHER_GCP_GPU_IMAGE` / `DISPATCHER_AWS_GPU_IMAGE`); most specialists ship

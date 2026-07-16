@@ -2,7 +2,6 @@ package cloudvm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -28,46 +27,11 @@ func TestOCIImageShapeHint(t *testing.T) {
 	assert.Equal(t, "quota exceeded", ociImageShapeHint("VM.Standard.A1.Flex", "img", other).Error())
 }
 
-func TestOCIShapeAndPlatformConfig(t *testing.T) {
-	decode := func(b []byte) map[string]any {
-		if b == nil {
-			return nil
-		}
-		var m map[string]any
-		require.NoError(t, json.Unmarshal(b, &m))
-		return m
-	}
-
-	// Non-confidential: a default VM shape, no platform-config.
-	shape, pc, err := ociShapeAndPlatformConfig(VMOptions{})
-	require.NoError(t, err)
-	assert.Equal(t, "VM.Standard.E4.Flex", shape)
-	assert.Nil(t, pc)
-
-	// sev: a VM shape with memory encryption on (no attestation report).
-	shape, pc, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "sev"})
-	require.NoError(t, err)
-	assert.True(t, strings.HasPrefix(shape, "VM."), "sev is a VM shape")
-	assert.Equal(t, true, decode(pc)["isMemoryEncryptionEnabled"])
-
-	// sev-snp uses a VM-scoped E5 guest, never the bare-metal host itself.
-	shape, pc, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "sev-snp"})
-	require.NoError(t, err)
-	assert.Equal(t, "VM.Standard.E5.Flex", shape)
-	assert.Equal(t, "AMD_VM", decode(pc)["type"])
-	assert.Equal(t, true, decode(pc)["isMemoryEncryptionEnabled"])
-
-	// An explicit instance type wins over the confidential default.
-	shape, _, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "sev-snp", InstanceType: "VM.Standard.E6.Flex"})
-	require.NoError(t, err)
-	assert.Equal(t, "VM.Standard.E6.Flex", shape)
-
-	_, _, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "sev-snp", InstanceType: "BM.Standard.E6.128"})
-	require.Error(t, err, "bare metal is not automatically a VM-scoped SNP guest")
-
-	// An unsupported confidential type is rejected.
-	_, _, err = ociShapeAndPlatformConfig(VMOptions{ConfidentialType: "tdx"})
-	require.Error(t, err)
+func TestOCIShape(t *testing.T) {
+	// Default general-purpose shape when the operator pins nothing.
+	assert.Equal(t, "VM.Standard.E4.Flex", ociShape(VMOptions{}))
+	// An explicit instance type wins.
+	assert.Equal(t, "VM.Standard.E6.Flex", ociShape(VMOptions{InstanceType: "VM.Standard.E6.Flex"}))
 }
 
 func withOCIEnv(t *testing.T) {
@@ -78,7 +42,7 @@ func withOCIEnv(t *testing.T) {
 	t.Setenv("DISPATCHER_OCI_IMAGE_ID", "ocid1.image.oc1..iiii")
 }
 
-func TestOCICreateVM_ConfidentialArgv(t *testing.T) {
+func TestOCICreateVM_Argv(t *testing.T) {
 	withOCIEnv(t)
 	prev := runCLI
 	t.Cleanup(func() { runCLI = prev })
@@ -99,9 +63,8 @@ func TestOCICreateVM_ConfidentialArgv(t *testing.T) {
 
 	o := NewOCIProvider("us-phoenix-1")
 	vm, err := o.CreateVM(context.Background(), VMOptions{
-		Name:             "dispatcher-snp-job",
-		ConfidentialType: "sev-snp",
-		Tags:             map[string]string{"dispatcher-run-id": "run_1", "dispatcher": "true"},
+		Name: "dispatcher-job",
+		Tags: map[string]string{"dispatcher-run-id": "run_1", "dispatcher": "true"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "ocid1.instance.oc1..vvvv", vm.ID)
@@ -113,8 +76,9 @@ func TestOCICreateVM_ConfidentialArgv(t *testing.T) {
 	assert.Contains(t, a, "--image-id ocid1.image.oc1..iiii")
 	assert.Contains(t, a, "--availability-domain Uocm:PHX-AD-1")
 	assert.Contains(t, a, "--assign-public-ip true")
-	assert.Contains(t, a, "--platform-config file://", "a confidential launch must pass a platform-config")
 	assert.Contains(t, a, "--region us-phoenix-1")
+	// OCI is a plain provisioning target: no confidential platform-config.
+	assert.NotContains(t, a, "--platform-config")
 }
 
 func TestOCICreateVM_RequiresOCIDs(t *testing.T) {

@@ -70,8 +70,6 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 				if c.Profile != "azure-snp" {
 					reasons = append(reasons, "confidential attestation on azure-vm requires profile: azure-snp (the standard MAA agent is unmeasured)")
 				}
-			case "oci-vm":
-				reasons = append(reasons, "confidential attestation is not yet available on oci-vm")
 			}
 		}
 	}

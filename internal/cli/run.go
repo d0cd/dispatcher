@@ -434,8 +434,6 @@ func adapterForPlan(ctx context.Context, p *types.Plan) (adapter.TargetAdapter, 
 				return nil, fmt.Errorf("AWS attestation requires confidential.profile: nitro; the standard SEV-SNP path cannot release secrets because its post-boot agent is not measured")
 			case "azure-vm":
 				return nil, fmt.Errorf("confidential attestation on azure-vm requires confidential.profile: azure-snp; the standard MAA path cannot release secrets because its post-boot agent is not measured")
-			case "oci-vm":
-				return nil, fmt.Errorf("OCI confidential attestation is unavailable until OCI BYAS evidence and certificate-chain verification are implemented and live-validated")
 			default:
 				return nil, fmt.Errorf("confidential attestation required but target %q has no attesting backend", p.Recommendation.Target)
 			}
