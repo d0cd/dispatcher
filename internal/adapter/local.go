@@ -140,6 +140,25 @@ func (l *LocalAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, 
 
 func (l *LocalAdapter) Status(_ context.Context, h *RunHandle) (types.RunState, error) {
 	ls := h.State.(*localState)
+
+	// Ensure the child's output pipe is being drained before Wait: a child that
+	// emits more than the pipe buffer (~64 KiB) blocks on write, so cmd.Wait()
+	// would deadlock. On the first attempt Logs() drains it; on a transient retry
+	// (the executor skips re-streaming logs) nothing does, so drain to io.Discard.
+	ls.mu.Lock()
+	if !ls.logStarted && ls.outR != nil {
+		ls.logStarted = true
+		r := ls.outR
+		done := ls.logDone
+		go func() {
+			_, _ = io.Copy(io.Discard, r)
+			if done != nil {
+				close(done)
+			}
+		}()
+	}
+	ls.mu.Unlock()
+
 	err := ls.cmd.Wait()
 
 	// Close write end so the log-copy goroutine gets EOF, then wait for it

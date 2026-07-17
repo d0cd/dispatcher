@@ -38,6 +38,14 @@ func (r *Run) setFailure(fd adapter.FailureDetails) {
 	r.Failure = fd
 }
 
+// setCleanupError records a teardown failure independently of State (which may
+// already be terminal), under the lock the sampler's ToRecord reads.
+func (r *Run) setCleanupError(msg string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.CleanupError = msg
+}
+
 // beginRetry increments the retry counter and clears the prior failure under the
 // lock (same reason as setFailure).
 func (r *Run) beginRetry() {
@@ -194,8 +202,10 @@ func (e *Executor) Execute(ctx context.Context, r *Run, logWriter io.Writer) (er
 			saveRun(r)
 			return fmt.Errorf("budget exceeded during provisioning (run %s)", r.ID)
 		}
-		r.SetError(types.RunStateExecutionFailed, err)
-		return fmt.Errorf("execution failed: %w", err)
+		// adapter.Execute is the provisioning + staging phase, so a failure here is
+		// a provisioning failure (distinct in the record from a workload failure).
+		r.SetError(types.RunStateProvisioningFailed, err)
+		return fmt.Errorf("provisioning failed: %w", err)
 	}
 	// Stamp the run id onto the handle so adapters that need it (e.g.
 	// CloudVMAdapter.Artifacts placing files under runs/<run-id>/) can
@@ -256,6 +266,19 @@ func (e *Executor) superviseHandle(ctx context.Context, r *Run, handle *adapter.
 		stopSampler:  e.startCostSampler(ctx, r, func() error { return e.adapter.Terminate(context.Background(), handle) }, logWriter),
 		stopWatchdog: e.startEphemeralWatchdog(ctx, r, handle, logWriter),
 	}
+}
+
+// externallyStopped reports whether another process (a `dispatcher stop`) has
+// moved the persisted record to a stopping/terminal state. A transient retry must
+// not resurrect such a run: the SIGTERM that `stop` sends is otherwise
+// indistinguishable from cloud preemption, which we DO retry. Fails open (allows
+// the retry) if the record can't be read.
+func externallyStopped(runID string) bool {
+	rec, err := LoadRecord(runID)
+	if err != nil {
+		return false
+	}
+	return rec.State == types.RunStateStopping || rec.State.IsTerminal()
 }
 
 // retryTransientFailure tears the failed attempt down and re-provisions once,
@@ -373,7 +396,8 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 		if r.Plan.Constraints.RetryTransientFailures &&
 			kind == adapter.FailureTransient &&
 			r.RetryCount == 0 &&
-			!r.GetState().IsTerminal() {
+			!r.GetState().IsTerminal() &&
+			!externallyStopped(r.ID) {
 			// state/err are consumed inside the helper; only the new handle and
 			// success flag matter to the caller from here.
 			handle, _, _, retrySucceeded = e.retryTransientFailure(ctx, r, sup, logWriter)
@@ -735,6 +759,10 @@ func (e *Executor) attemptCleanup(ctx context.Context, r *Run) {
 
 		result, err := e.adapter.Cleanup(ctx, r.Handle)
 		if err == nil && result != nil && result.Success {
+			// Drop the handle so a second cleanup pass (e.g. Execute's panic
+			// recovery after executeEphemeral's deferred cleanup) is a no-op and
+			// can't re-destroy an already-gone resource.
+			r.Handle = nil
 			_ = r.Transition(types.RunStateCompleted)
 			return
 		}
@@ -743,5 +771,10 @@ func (e *Executor) attemptCleanup(ctx context.Context, r *Run) {
 			time.Sleep(time.Duration(1<<uint(i)) * time.Second)
 		}
 	}
+	// SetError is a no-op once the run is already terminal (e.g. ExecutionFailed
+	// from the workload). Record the leaked-resource fact independently so it
+	// surfaces on the run record even when the terminal state can't change —
+	// otherwise a finished-looking run hides an undestroyed billing VM.
+	r.setCleanupError(fmt.Sprintf("cleanup failed after %d retries", maxRetries))
 	r.SetError(types.RunStateCleanupFailed, fmt.Errorf("cleanup failed after %d retries", maxRetries))
 }

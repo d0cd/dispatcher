@@ -59,6 +59,10 @@ type Run struct {
 	// RetryCount is the number of times this workload has been
 	// re-executed via the transient-failure retry path. Capped at 1 today.
 	RetryCount int
+	// CleanupError records a failed teardown independently of State, which may
+	// already be terminal (e.g. ExecutionFailed) and thus unchangeable. Surfaced
+	// on the record so a finished-looking run still flags a leaked resource.
+	CleanupError string
 	// Timeline records the entry time of each state the run passed through,
 	// for `dispatcher trace`. Seeded with Created at NewRun.
 	Timeline []PhaseMark
@@ -219,7 +223,6 @@ var validTransitions = map[types.RunState][]types.RunState{
 	types.RunStatePreparing: {
 		types.RunStateRunning,
 		types.RunStatePackageFailed,
-		types.RunStateProvisioningFailed,
 	},
 	types.RunStateRunning: {
 		types.RunStateCollectingArtifacts,

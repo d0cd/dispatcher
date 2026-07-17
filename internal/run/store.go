@@ -33,6 +33,8 @@ type RunRecord struct {
 	// (OOM, signal, exit code) without re-running anything.
 	Failure    adapter.FailureDetails `json:"failure,omitempty"`
 	RetryCount int                    `json:"retryCount,omitempty"`
+	// CleanupError flags a failed teardown even when State is already terminal.
+	CleanupError string `json:"cleanupError,omitempty"`
 
 	// Timeline records the entry time of each phase, for `dispatcher trace`.
 	Timeline []PhaseMark `json:"timeline,omitempty"`
@@ -64,6 +66,7 @@ func (r *Run) ToRecord() RunRecord {
 		Cost:          r.Cost,
 		Failure:       r.Failure,
 		RetryCount:    r.RetryCount,
+		CleanupError:  r.CleanupError,
 		Timeline:      r.Timeline,
 		HandleID:      r.HandleID,
 		HandleState:   r.HandleState,

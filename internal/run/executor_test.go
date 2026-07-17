@@ -294,7 +294,7 @@ func TestExecutor_ExecuteFailure(t *testing.T) {
 
 	err := exec.Execute(context.Background(), r, io.Discard)
 	assert.Error(t, err)
-	assert.Equal(t, types.RunStateExecutionFailed, r.GetState())
+	assert.Equal(t, types.RunStateProvisioningFailed, r.GetState(), "an adapter.Execute failure is a provisioning failure")
 }
 
 // A single transient Status error while polling must NOT tear down a healthy
