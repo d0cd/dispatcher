@@ -268,7 +268,7 @@ func TestRegistryListOrder(t *testing.T) {
 	assert.Equal(t, "ssh", targets[3].ID)
 	assert.Equal(t, "kubernetes", targets[4].ID)
 	assert.Equal(t, "firecracker-vm", targets[5].ID)
-	assert.Len(t, targets, 11)
+	assert.Len(t, targets, 12)
 }
 
 func TestRuntimeForTarget(t *testing.T) {

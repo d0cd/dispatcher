@@ -375,20 +375,37 @@ var gcProviderCLIs = map[string]string{
 	"oci-vm":     "oci",
 }
 
-// durableAdapters returns cloud VM adapters whose CLIs are actually installed.
+// gcProviderEnv maps REST/env-gated durable targets (no vendor CLI) to the env
+// var whose presence enables gc discovery. Lambda Cloud is HTTP-native, so CLI
+// presence can't gate it — the API key does. Same leak guarantee as
+// gcProviderCLIs: a provisionable target absent from both maps leaks silently.
+var gcProviderEnv = map[string]string{
+	"lambda-vm": "DISPATCHER_LAMBDA_API_KEY",
+}
+
+// durableAdapters returns cloud VM adapters whose CLI (or gating env) is present.
 func durableAdapters() []adapter.DurableAdapter {
 	var result []adapter.DurableAdapter
-	for id, cli := range gcProviderCLIs {
-		if _, err := exec.LookPath(cli); err != nil {
-			continue // CLI not installed, skip silently
-		}
+	add := func(id string) {
 		a, err := adapterForTarget(id)
 		if err != nil {
-			continue
+			return
 		}
 		if d, ok := a.(adapter.DurableAdapter); ok {
 			result = append(result, d)
 		}
+	}
+	for id, cli := range gcProviderCLIs {
+		if _, err := exec.LookPath(cli); err != nil {
+			continue // CLI not installed, skip silently
+		}
+		add(id)
+	}
+	for id, env := range gcProviderEnv {
+		if os.Getenv(env) == "" {
+			continue // not configured, skip
+		}
+		add(id)
 	}
 	return result
 }

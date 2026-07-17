@@ -176,8 +176,11 @@ lane).
 
 **Suggested order:** (1) **Oracle** — *done* (validated + enabled; provisioning
 only, confidential not supported); free always-free tier gives a no-cost CI lane.
-(2) **Lambda Cloud** — highest-value GPU add; builds the reusable REST `Provider`
-pattern. (3) **RunPod** — cheapest burst GPU once REST exists. (4) **Vultr /
+(2) **Lambda Cloud** — *code delivered* (`lambda-vm`): the first REST `Provider`
+(HTTP + API key, not a CLI), with unit tests over a stubbed transport; GPU
+capability advertised, provisioning-only (no confidential, no per-run firewall,
+no in-VM watchdog). Pending live-account validation before it's proven end-to-end.
+(3) **RunPod** — cheapest burst GPU, now that the REST pattern exists. (4) **Vultr /
 Thunder** — opportunistic. (5) **Modal** — separate serverless track, not a VM provider.
 
 GPU backends reuse the driver-baked-image mechanism already built

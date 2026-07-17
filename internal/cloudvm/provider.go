@@ -16,6 +16,7 @@ const (
 	ProviderLima       ProviderID = "lima"
 	ProviderKubernetes ProviderID = "kubernetes"
 	ProviderOCI        ProviderID = "oci"
+	ProviderLambda     ProviderID = "lambda"
 )
 
 // VMOptions describes the VM to create.

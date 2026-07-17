@@ -113,6 +113,14 @@ Manage the measured-image pins that back attested confidential runs (see
 | `gcp-vm` | builtin | `gcloud` |
 | `azure-vm` | builtin | `az` |
 | `hetzner-vm` | builtin | `hcloud` |
+| `lambda-vm` | builtin | `DISPATCHER_LAMBDA_API_KEY` (Lambda Cloud REST API; GPU) |
+
+`lambda-vm` is dispatcher's first REST-based provider — it talks to the Lambda
+Cloud API directly, so it needs `DISPATCHER_LAMBDA_API_KEY` (and optionally
+`DISPATCHER_LAMBDA_REGION`, default `us-east-1`) rather than a vendor CLI. Set
+the instance type via the plan (e.g. `gpu_1x_a100`); Lambda has no safe default.
+Provisioning only — no confidential execution, no per-run SSH firewall, and no
+in-VM watchdog (a dead dispatcher is reclaimed by `dispatcher gc`).
 
 User-defined targets (any SSH host, custom cloud) are added with `dispatcher targets add`.
 

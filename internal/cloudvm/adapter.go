@@ -798,6 +798,8 @@ func providerBaseRate(p ProviderID) float64 {
 		return 0.04 // e2-medium ~$0.03
 	case ProviderAzure:
 		return 0.05 // B2s ~$0.04
+	case ProviderLambda:
+		return 0.75 // GPU cloud: gpu_1x_a100 ~$1.29/hr, gpu_1x_gh200 ~$1.49; floor low
 	default:
 		return 0.10
 	}

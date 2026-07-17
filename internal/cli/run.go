@@ -510,6 +510,11 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 			cloudvm.NewFirecrackerProvider(),
 			cloudvm.Config{ProviderID: cloudvm.ProviderFirecracker, SSHUser: "root"},
 		), nil
+	case "lambda-vm":
+		return cloudvm.NewCloudVMAdapter(
+			cloudvm.NewLambdaProvider(os.Getenv("DISPATCHER_LAMBDA_REGION")),
+			cloudvm.Config{ProviderID: cloudvm.ProviderLambda, SSHUser: "ubuntu"},
+		), nil
 	}
 
 	// For unknown IDs, check the target registry for SSH targets
