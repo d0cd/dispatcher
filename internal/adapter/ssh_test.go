@@ -1,8 +1,10 @@
 package adapter
 
 import (
+	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
@@ -115,6 +117,46 @@ func TestRsyncSSHCmd_SetsStrictHostKeyChecking(t *testing.T) {
 
 	noKey := rsyncSSHCmd(SSHConfig{Host: "h", User: "u", Port: 2222})
 	assert.Contains(t, noKey, "StrictHostKeyChecking=accept-new")
+}
+
+func TestValidateRemoteDir_RejectsShellMetacharacters(t *testing.T) {
+	// Cleanup passes RemoteDir into `ssh ... rm -rf -- <dir>`, which the remote
+	// shell re-tokenizes. A metacharacter like ';' would start a second command
+	// (`rm -rf -- /a/b; rm -rf /`) despite the `--`, so validation must reject it.
+	for _, dir := range []string{
+		"/a/b; rm -rf /",
+		"/a/$(reboot)",
+		"/a/`id`/b",
+		"/a/b && wipe",
+		"/a/b|tee",
+		"/a b/c d", // whitespace
+		"/a/b\nrm",
+	} {
+		if err := validateRemoteDir(dir); err == nil {
+			t.Errorf("validateRemoteDir(%q) = nil, want rejection", dir)
+		}
+	}
+	// A normal absolute path with two components still passes.
+	if err := validateRemoteDir("/home/user/dispatcher"); err != nil {
+		t.Errorf("validateRemoteDir(valid path) = %v, want nil", err)
+	}
+}
+
+func TestSSHAdapter_LogsStreamsSubprocessOutput(t *testing.T) {
+	// The ssh subprocess's stdout/stderr must reach the run's logWriter via Logs;
+	// otherwise remote workload output is silently discarded to /dev/null.
+	pr, pw, err := os.Pipe()
+	require.NoError(t, err)
+	cmd := exec.Command("printf", "hello-remote")
+	cmd.Stdout = pw
+	require.NoError(t, cmd.Start())
+	pw.Close()
+
+	a := NewSSHAdapter(SSHConfig{Host: "h", User: "u", Port: 22})
+	h := &RunHandle{State: &sshState{cmd: cmd, logs: pr}}
+	var buf bytes.Buffer
+	require.NoError(t, a.Logs(context.Background(), h, &buf))
+	assert.Equal(t, "hello-remote", buf.String())
 }
 
 // TestSSHDockerRunScript_QuotedHeredoc guards against remote command injection

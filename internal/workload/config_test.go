@@ -268,6 +268,31 @@ func TestConfig_RejectsInvalidResourceConstraints(t *testing.T) {
 	}
 }
 
+func TestConfig_RejectsUnsafeImageRef(t *testing.T) {
+	// An image ref beginning with '-' would be parsed as a docker flag; one with
+	// whitespace/metacharacters could inject additional argv. Both must fail closed.
+	for name, image := range map[string]string{
+		"leading-dash": "-v/:/host",
+		"space":        "ubuntu latest",
+		"semicolon":    "ubuntu;rm",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, dir, "dispatcher.yaml", "name: bad\nimage: \""+image+"\"\n")
+			_, err := LoadConfig(dir)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "image")
+		})
+	}
+}
+
+func TestConfig_AcceptsValidImageRef(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "dispatcher.yaml", "name: ok\nimage: \"registry.io/org/app:1.2.3@sha256:abc\"\n")
+	_, err := LoadConfig(dir)
+	require.NoError(t, err)
+}
+
 func TestApplyConfig_GPU(t *testing.T) {
 	spec := &types.WorkloadSpec{DetectedKind: types.WorkloadKindScript}
 	ApplyConfig(spec, &DispatcherConfig{

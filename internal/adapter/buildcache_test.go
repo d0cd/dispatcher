@@ -64,6 +64,43 @@ func TestBuildDigest_NoFramingCollision(t *testing.T) {
 	assert.NotEqual(t, d1, d2, "distinct source trees must not share a cache key")
 }
 
+func TestBuildDigest_SensitiveToExecBit(t *testing.T) {
+	// A file's executable bit is part of what lands in the built image, so
+	// flipping it must bust the cache key even when contents are identical.
+	df := filepath.Join(t.TempDir(), "Dockerfile")
+	writeBuildFile(t, df, "FROM scratch\n")
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "run.sh")
+	writeBuildFile(t, script, "#!/bin/sh\necho hi\n")
+	d1, err := buildDigest(df, dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Chmod(script, 0o755))
+	d2, err := buildDigest(df, dir)
+	require.NoError(t, err)
+	assert.NotEqual(t, d1, d2, "flipping the exec bit must bust the cache key")
+}
+
+func TestBuildDigest_SensitiveToSymlinkTarget(t *testing.T) {
+	// Symlinks are copied into the image as links; a change in the link target
+	// (with no regular-file content change) must still bust the cache key.
+	df := filepath.Join(t.TempDir(), "Dockerfile")
+	writeBuildFile(t, df, "FROM scratch\n")
+
+	dir := t.TempDir()
+	link := filepath.Join(dir, "cfg")
+	require.NoError(t, os.Symlink("/etc/a", link))
+	d1, err := buildDigest(df, dir)
+	require.NoError(t, err)
+
+	require.NoError(t, os.Remove(link))
+	require.NoError(t, os.Symlink("/etc/b", link))
+	d2, err := buildDigest(df, dir)
+	require.NoError(t, err)
+	assert.NotEqual(t, d1, d2, "changing a symlink target must bust the cache key")
+}
+
 func TestBuildDigest_IgnoresGitChurn(t *testing.T) {
 	dir := t.TempDir()
 	df := filepath.Join(dir, "Dockerfile")

@@ -174,7 +174,32 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 // MaxCost must be non-negative, MaxTime/WatchdogTTL must parse as
 // durations, etc. Run by LoadConfig; callers constructing DispatcherConfig
 // programmatically can invoke it directly.
+// isSafeImageRef accepts a conservative container image-reference charset
+// ([registry/]repo[:tag][@digest]) and rejects a leading '-' (so the value can't
+// be read as a docker flag) plus any whitespace/shell metacharacter.
+func isSafeImageRef(s string) bool {
+	if s == "" || s[0] == '-' {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.' || r == '_' || r == '/' || r == ':' || r == '@' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (c *DispatcherConfig) Validate() error {
+	// The image ref flows verbatim into `docker run` argv; a value beginning with
+	// '-' (or carrying whitespace/shell metacharacters) would be parsed as a docker
+	// flag (e.g. `-v/:/host` mounts the host root into the container). Fail closed at
+	// the config boundary so an untrusted repo's dispatcher.yaml can't inject flags.
+	if c.Image != "" && !isSafeImageRef(c.Image) {
+		return fmt.Errorf("image %q is not a valid image reference (must not begin with '-' or contain whitespace/metacharacters)", c.Image)
+	}
 	if c.CPU != "" {
 		cpu, err := strconv.Atoi(strings.TrimSpace(c.CPU))
 		if err != nil || cpu <= 0 {

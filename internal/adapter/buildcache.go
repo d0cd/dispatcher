@@ -41,18 +41,40 @@ func buildDigest(dockerfilePath, sourceDir string) (string, error) {
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
 		rel, err := filepath.Rel(sourceDir, path)
 		if err != nil {
 			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		hashChunk(h, []byte(rel))
+		// The file mode (including the exec bit) is copied into the built image,
+		// so fold it in — otherwise a `chmod +x` with no content change would
+		// wrongly reuse a stale image.
+		var modeBuf [4]byte
+		binary.LittleEndian.PutUint32(modeBuf[:], uint32(info.Mode()))
+		hashChunk(h, modeBuf[:])
+
+		if d.Type()&fs.ModeSymlink != 0 {
+			// Symlinks are copied as links; hash the target, not a (nonexistent)
+			// regular-file body, so retargeting the link busts the key.
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			hashChunk(h, []byte("symlink"))
+			hashChunk(h, []byte(target))
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
 		}
 		content, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		hashChunk(h, []byte(rel))
 		hashChunk(h, content)
 		return nil
 	})

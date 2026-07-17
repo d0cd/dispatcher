@@ -66,12 +66,11 @@ func (d *DockerAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	}
 
 	if w.Package.Dockerfile != "" {
-		tag := fmt.Sprintf("dispatcher-%s:latest", SanitizeName(w.Name))
-
 		// Content-addressed skip: if the existing image was built from the same
 		// Dockerfile+source (recorded in a label), the rebuild is a no-op. A
 		// digest error falls back to an unconditional build rather than failing.
 		digest, err := buildDigest(w.Package.Dockerfile, w.Source.Path)
+		tag := dockerBuildTag(w, digest)
 		if err == nil && dockerImageLabel(ctx, tag, buildContentLabel) == digest {
 			return nil
 		}
@@ -90,6 +89,63 @@ func (d *DockerAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 
 	// No Dockerfile — for scripts, we'll run directly
 	return nil
+}
+
+// dockerRunArgs builds the argv for `docker run` for a prepared workload. It is a
+// pure function (no I/O beyond the caller-supplied envFile path) so the mount,
+// image, and command wiring can be asserted directly in tests.
+func dockerRunArgs(w types.WorkloadSpec, containerName, envFile string) ([]string, error) {
+	args := []string{"run", "--name", containerName, "--rm"}
+
+	for _, port := range w.Ports {
+		args = append(args, "-p", fmt.Sprintf("%d:%d", port, port))
+	}
+
+	if envFile != "" {
+		args = append(args, "--env-file", envFile)
+	}
+
+	if w.Package.Dockerfile != "" {
+		digest, _ := buildDigest(w.Package.Dockerfile, w.Source.Path)
+		args = append(args, dockerBuildTag(w, digest))
+		return args, nil
+	}
+	if w.Package.BaseImage == "" {
+		return nil, fmt.Errorf("no image or base image available")
+	}
+
+	// Two flavors converge here:
+	//   - Language base image (python:3.11-slim, etc.) — we mount the
+	//     workload source so its code is visible to the interpreter.
+	//   - Pre-built image (PackageTypeImage from cfg.Image) — the user
+	//     is running a packaged tool, NOT their own code. Mounting
+	//     source would shadow the image's /app and break it.
+	if w.Package.Type != types.PackageTypeImage {
+		// --mount (not -v) so a source path containing ':' isn't split into a
+		// bogus mount spec.
+		args = append(args, "--mount", "type=bind,source="+w.Source.Path+",target=/app", "-w", "/app")
+	}
+	args = append(args, w.Package.BaseImage)
+	if len(w.Command) > 0 {
+		args = append(args, w.Command...)
+	} else if w.Package.Type != types.PackageTypeImage && len(w.Entrypoints) > 0 {
+		// Pre-built images use the image's own ENTRYPOINT/CMD; don't
+		// override unless the user explicitly set `command:` in yaml.
+		args = append(args, runtimeCommand(w.Runtime, w.Entrypoints[0])...)
+	}
+	return args, nil
+}
+
+// dockerBuildTag derives the image tag for a Dockerfile-built workload. The
+// content digest is folded into the tag so two workloads whose names sanitize to
+// the same string don't collide on one `:latest` tag. An empty digest (its
+// computation failed) falls back to `:latest`.
+func dockerBuildTag(w types.WorkloadSpec, digest string) string {
+	base := "dispatcher-" + SanitizeName(w.Name)
+	if digest == "" {
+		return base + ":latest"
+	}
+	return base + ":" + digest
 }
 
 // dockerImageLabel reads a single label off an image via `docker image inspect`,
@@ -119,16 +175,7 @@ func dockerContainerName(w types.WorkloadSpec, planID string) string {
 
 func (d *DockerAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, error) {
 	w := p.Workload
-	var args []string
-
 	containerName := dockerContainerName(w, p.Metadata.ID)
-
-	args = append(args, "run", "--name", containerName, "--rm")
-
-	// Add port mappings
-	for _, port := range w.Ports {
-		args = append(args, "-p", fmt.Sprintf("%d:%d", port, port))
-	}
 
 	// Use --env-file to avoid leaking secret values via `ps`-visible argv.
 	// The temp file's cleanup is owned by the dockerState and runs in Cleanup()
@@ -137,35 +184,11 @@ func (d *DockerAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle,
 	if err != nil {
 		return nil, err
 	}
-	if envFile != "" {
-		args = append(args, "--env-file", envFile)
-	}
 
-	if w.Package.Dockerfile != "" {
-		// Use the built image
-		tag := fmt.Sprintf("dispatcher-%s:latest", SanitizeName(w.Name))
-		args = append(args, tag)
-	} else if w.Package.BaseImage != "" {
-		// Two flavors converge here:
-		//   - Language base image (python:3.11-slim, etc.) — we mount the
-		//     workload source so its code is visible to the interpreter.
-		//   - Pre-built image (PackageTypeImage from cfg.Image) — the user
-		//     is running a packaged tool, NOT their own code. Mounting
-		//     source would shadow the image's /app and break it.
-		if w.Package.Type != types.PackageTypeImage {
-			args = append(args, "-v", w.Source.Path+":/app", "-w", "/app")
-		}
-		args = append(args, w.Package.BaseImage)
-		if len(w.Command) > 0 {
-			args = append(args, w.Command...)
-		} else if w.Package.Type != types.PackageTypeImage && len(w.Entrypoints) > 0 {
-			// Pre-built images use the image's own ENTRYPOINT/CMD; don't
-			// override unless the user explicitly set `command:` in yaml.
-			args = append(args, runtimeCommand(w.Runtime, w.Entrypoints[0])...)
-		}
-	} else {
+	args, err := dockerRunArgs(w, containerName, envFile)
+	if err != nil {
 		envCleanup() // no dockerState will be created to own the env temp file
-		return nil, fmt.Errorf("no image or base image available")
+		return nil, err
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)

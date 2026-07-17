@@ -155,6 +155,12 @@ func WriteDotEnvFile(dir string, extra ...map[string]string) (path string, clean
 	}
 	var buf strings.Builder
 	for k, v := range kv {
+		// One KEY=VALUE per line is the --env-file contract; a newline in a value
+		// would inject a spurious extra variable, so reject it rather than write
+		// it raw.
+		if strings.ContainsAny(v, "\n\r") {
+			return "", noop, fmt.Errorf("env value for %q cannot contain a newline", k)
+		}
 		fmt.Fprintf(&buf, "%s=%s\n", k, v)
 	}
 	name, err := WriteSecureTempFile("dispatcher-env-*.env", []byte(buf.String()))

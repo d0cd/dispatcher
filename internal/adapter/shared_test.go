@@ -61,6 +61,17 @@ func TestWriteDotEnvFile_CleanupRemovesFile(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "cleanup must remove the tempfile")
 }
 
+func TestWriteDotEnvFile_RejectsNewlineInValue(t *testing.T) {
+	// docker --env-file parses one KEY=VALUE per line, so a newline in a value
+	// would inject a spurious extra variable. Reject it rather than write it raw.
+	_, cleanup, err := WriteDotEnvFile(t.TempDir(), map[string]string{"K": "a\nINJECTED=1"})
+	if cleanup != nil {
+		cleanup()
+	}
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "K")
+}
+
 func TestDotEnvExportScript_FormatsAsBashExports(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".env"),

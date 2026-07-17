@@ -59,6 +59,30 @@ func TestDockerAdapter_EnvFileCleanedUpOnNoImageError(t *testing.T) {
 	assert.Empty(t, matches, "the plaintext env temp file must be cleaned up on the no-image error path")
 }
 
+func TestDockerRunArgs_BindMountToleratesColonInPath(t *testing.T) {
+	// A source path containing ':' would corrupt a `-v src:/app` positional mount.
+	// The --mount form keeps source as its own key=value, so the path stays intact.
+	w := types.WorkloadSpec{
+		Name:    "svc",
+		Source:  types.WorkloadSource{Path: "/data/a:b/proj"},
+		Package: types.PackagePlan{BaseImage: "python:3.11-slim"},
+	}
+	args, err := dockerRunArgs(w, "dispatcher-svc-1", "")
+	require.NoError(t, err)
+	joined := strings.Join(args, " ")
+	assert.Contains(t, joined, "type=bind,source=/data/a:b/proj,target=/app")
+	assert.NotContains(t, joined, "-v /data/a:b/proj:/app")
+}
+
+func TestDockerBuildTag_FoldsDigestToAvoidCollision(t *testing.T) {
+	w := types.WorkloadSpec{Name: "my-app"}
+	// Distinct content digests must yield distinct tags even for one name; an
+	// empty digest (computation failed) falls back to :latest.
+	assert.Equal(t, "dispatcher-my-app:abc123", dockerBuildTag(w, "abc123"))
+	assert.Equal(t, "dispatcher-my-app:latest", dockerBuildTag(w, ""))
+	assert.NotEqual(t, dockerBuildTag(w, "aaa"), dockerBuildTag(w, "bbb"))
+}
+
 func TestParseDockerInspect(t *testing.T) {
 	t.Run("OOM kill maps to SIGKILL", func(t *testing.T) {
 		fd := parseDockerInspect("137|true|")
