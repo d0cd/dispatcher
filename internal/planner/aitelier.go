@@ -42,8 +42,10 @@ type AtelierBackend struct {
 	// responseSchema is the JSON schema sent to aitelier as response_format.
 	// Defaults to the plan schema; callers can override via SetResponseSchema
 	// before invoking Diagnose/Audit so the inner agent isn't told to produce
-	// PlanResult-shaped JSON for a non-plan flow.
+	// PlanResult-shaped JSON for a non-plan flow. Guarded by schemaMu because a
+	// shared backend (the agentic/MCP server) can have concurrent Chat readers.
 	responseSchema *responseFormat
+	schemaMu       sync.Mutex
 }
 
 type AtelierConfig struct {
@@ -137,7 +139,16 @@ func readAtelierResponse(r io.Reader) ([]byte, error) {
 // so the inner agent isn't told to produce a PlanResult-shaped object when
 // it's actually doing a different job.
 func (a *AtelierBackend) SetResponseSchema(s *responseFormat) {
+	a.schemaMu.Lock()
 	a.responseSchema = s
+	a.schemaMu.Unlock()
+}
+
+// currentSchema reads the response schema under the lock.
+func (a *AtelierBackend) currentSchema() *responseFormat {
+	a.schemaMu.Lock()
+	defer a.schemaMu.Unlock()
+	return a.responseSchema
 }
 
 // ResponseSchemaPlan exposes the plan schema so callers (Diagnose/Audit) can
@@ -281,7 +292,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 	req := chatCompletionRequest{
 		Model:          a.modelString(),
 		Messages:       toChatMessages(messages),
-		ResponseFormat: a.responseSchema,
+		ResponseFormat: a.currentSchema(),
 		Aitelier: &aitelierOpts{
 			MCPServers: []mcpServerSpec{
 				{Name: mcpServerName, Transport: "http", URL: mcp.URL()},
@@ -487,33 +498,40 @@ func (a *AtelierBackend) listActiveRuns(ctx context.Context) map[string]bool {
 	return out
 }
 
+// cancelNewRuns best-effort cancels the aitelier run this call started, identified
+// as the single run that appeared since the pre-call snapshot. If several runs
+// appeared, a concurrent flow shares this backend and the id-diff can't attribute
+// runs to callers — cancelling would risk killing an unrelated in-flight run, so we
+// skip and let the server reap our abandoned run rather than cross-cancel. (A
+// precise fix needs the run id echoed at request time, not just in the response.)
 func (a *AtelierBackend) cancelNewRuns(before map[string]bool) {
 	bg, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	after := a.listActiveRuns(bg)
-	var wg sync.WaitGroup
-	for id := range after {
-		if before[id] {
-			continue
+	var fresh []string
+	for id := range a.listActiveRuns(bg) {
+		if !before[id] {
+			fresh = append(fresh, id)
 		}
-		wg.Add(1)
-		go func(runID string) {
-			defer wg.Done()
-			req, err := http.NewRequestWithContext(bg, "POST", a.baseURL+"/v1/runs/"+runID+"/cancel", nil)
-			if err != nil {
-				return
-			}
-			a.authorize(req)
-			resp, err := a.client.Do(req)
-			if err != nil {
-				return
-			}
-			resp.Body.Close()
-			dlog.L().Info("aitelier.cancel", "run_id", runID)
-		}(id)
 	}
-	wg.Wait()
+	if len(fresh) != 1 {
+		if len(fresh) > 1 {
+			dlog.L().Warn("aitelier.cancel.ambiguous", "new_runs", len(fresh),
+				"note", "not cancelling — cannot attribute concurrent runs to this call")
+		}
+		return
+	}
+	req, err := http.NewRequestWithContext(bg, "POST", a.baseURL+"/v1/runs/"+fresh[0]+"/cancel", nil)
+	if err != nil {
+		return
+	}
+	a.authorize(req)
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+	dlog.L().Info("aitelier.cancel", "run_id", fresh[0])
 }
 
 // toChatMessages converts the planner's Message list into OpenAI chat messages.

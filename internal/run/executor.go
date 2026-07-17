@@ -29,6 +29,24 @@ func NewExecutor(a adapter.TargetAdapter) *Executor {
 	return &Executor{adapter: a}
 }
 
+// setFailure records failure details under the run lock — the cost sampler
+// goroutine reads r.Failure via ToRecord under RLock, so the write must be guarded
+// too, or it is a data race.
+func (r *Run) setFailure(fd adapter.FailureDetails) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Failure = fd
+}
+
+// beginRetry increments the retry counter and clears the prior failure under the
+// lock (same reason as setFailure).
+func (r *Run) beginRetry() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.RetryCount++
+	r.Failure = adapter.FailureDetails{}
+}
+
 // SetApprovalFunc installs an in-process approver. Nil means the executor
 // only resolves via an external `dispatcher approve <id>` socket.
 func (e *Executor) SetApprovalFunc(fn ApprovalFunc) {
@@ -251,8 +269,7 @@ func (e *Executor) retryTransientFailure(ctx context.Context, r *Run, sup *super
 	if logWriter != nil {
 		fmt.Fprintln(logWriter, "[dispatcher] retrying transient failure once")
 	}
-	r.RetryCount++
-	r.Failure = adapter.FailureDetails{}
+	r.beginRetry()
 	sup.stop()
 
 	// Tear down the failed attempt so its VM/Job doesn't leak while re-provisioning;
@@ -283,7 +300,7 @@ func (e *Executor) retryTransientFailure(ctx context.Context, r *Run, sup *super
 		return retryHandle, state, nil, true
 	}
 	if fr, ok := e.adapter.(adapter.FailureReporter); ok {
-		r.Failure = fr.FailureDetails(retryHandle)
+		r.setFailure(fr.FailureDetails(retryHandle))
 	}
 	return retryHandle, state, err, false
 }
@@ -335,7 +352,7 @@ func (e *Executor) executeEphemeral(ctx context.Context, r *Run,
 	// if retry is disabled. classification gates the optional retry below.
 	if err != nil || state == types.RunStateExecutionFailed {
 		if fr, ok := e.adapter.(adapter.FailureReporter); ok {
-			r.Failure = fr.FailureDetails(handle)
+			r.setFailure(fr.FailureDetails(handle))
 		}
 	}
 

@@ -110,13 +110,12 @@ func atomicWriteLocked(path string, data []byte, perm os.FileMode) error {
 	if err != nil {
 		return fmt.Errorf("open lock %s: %w", lockPath, err)
 	}
-	// Remove the lock file before closing the descriptor: flock still
-	// protects us while the fd lives, and removal stops .lock files from
-	// accumulating across long-lived deployments.
-	defer func() {
-		_ = os.Remove(lockPath)
-		lock.Close()
-	}()
+	// Do NOT unlink the lock file: removing it while holding the flock lets a
+	// second process os.OpenFile a fresh inode at the same path and flock that, so
+	// two writers would both believe they hold the lock. Keeping a stable lock file
+	// is what makes the flock actually mutually exclusive; it is one-per-run-state-
+	// file and reaped with the run dir.
+	defer lock.Close()
 	if err := flockExclusive(lock); err != nil {
 		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
 	}
