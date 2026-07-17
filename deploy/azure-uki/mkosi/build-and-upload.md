@@ -9,8 +9,16 @@ pipx install git+https://github.com/systemd/mkosi.git
 sudo apt-get install -y systemd-boot-efi mtools qemu-utils   # host tools mkosi needs
 ```
 
-Put the cross-compiled `dispatcher-attest-azuresnp` in `mkosi.extra/usr/local/bin/`
-+ its enabled systemd unit, then `sudo mkosi --force build` -> `azurecvm.raw`.
+Build the agent reproducibly in the digest-pinned Go toolchain container (same
+image as the Nitro enclave), which drops it into `mkosi.extra/usr/local/bin/`:
+
+```
+deploy/azure-uki/mkosi/build-agent.sh    # needs docker; pins the toolchain
+```
+
+This keeps the measured agent's toolchain from floating with the builder host.
+With the agent + its enabled systemd unit staged in `mkosi.extra/`, run
+`sudo mkosi --force build` -> `azurecvm.raw`.
 
 ## 2. raw -> fixed VHD (1 MiB aligned)
 

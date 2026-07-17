@@ -17,14 +17,15 @@ import (
 // the pin must be re-captured. Keep this list small and explicit.
 //
 // NOT covered — re-capture periodically, or pin these in deploy/ to close the gap:
-//   - The base image + kernel's floating package versions. A kernel bump changes
-//     the measurement without changing our source. Pin the mkosi/Dockerfile bases
-//     by digest (deploy/nitro/Dockerfile already recommends FROM golang@sha256:…).
+//   - The base image + kernel's floating package versions. The Nitro Dockerfile
+//     bases are now digest-pinned (FROM golang@sha256:… / alpine@sha256:…), but a
+//     kernel/package bump inside the mkosi (azure-snp) image still moves PCR11
+//     without changing our source; re-capture on a base bump.
 //   - The exact Go toolchain. go.mod's `go` directive is a MINIMUM, so a patch bump
-//     of the builder's toolchain changes the artifact without changing go.mod. The
-//     Nitro Dockerfile pins golang:1.25.12 (a hashed input), but the azure-snp agent
-//     is cross-compiled on the builder host — build it in the same pinned-toolchain
-//     container to bring it under this hash.
+//     of the builder's toolchain changes the artifact without changing go.mod. Both
+//     agents are now built in the digest-pinned golang container (Nitro via its
+//     Dockerfile, azure-snp via deploy/azure-uki/mkosi/build-agent.sh), so the
+//     toolchain is a hashed input rather than the builder host's floating Go.
 //
 // GCP is measured per-run (the workload container), so it has no static inputs to pin.
 var measurementInputs = map[Target][]string{
