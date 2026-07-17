@@ -120,7 +120,7 @@ func (l *LocalAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, 
 	cmd.Stderr = outW
 
 	// Set up process group so we can kill the whole tree
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 
 	if err := cmd.Start(); err != nil {
 		outR.Close()
@@ -355,12 +355,7 @@ func (l *LocalAdapter) Terminate(_ context.Context, h *RunHandle) error {
 	if ls.cmd.Process == nil {
 		return nil
 	}
-	// Kill the process group
-	pgid, err := syscall.Getpgid(ls.cmd.Process.Pid)
-	if err == nil {
-		return syscall.Kill(-pgid, syscall.SIGTERM)
-	}
-	return ls.cmd.Process.Kill()
+	return terminateProcess(ls.cmd.Process)
 }
 
 func (l *LocalAdapter) Cleanup(_ context.Context, _ *RunHandle) (*CleanupResult, error) {

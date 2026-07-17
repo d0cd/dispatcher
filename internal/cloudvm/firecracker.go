@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
@@ -343,7 +342,7 @@ func (f *FirecrackerProvider) CreateVM(ctx context.Context, opts VMOptions) (ret
 		firecrackerLaunchArgs(sock, cfgPath)...)...)
 	launch.Stdout = logf
 	launch.Stderr = logf
-	launch.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(launch)
 	if err := launch.Start(); err != nil {
 		logf.Close()
 		// The deferred cleanup tears down the tap/NAT on this error return.

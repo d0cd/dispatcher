@@ -43,6 +43,13 @@ jobs:
       - name: go build
         run: go build ./...
 
+      # Cross-compile smoke test: the tool builds on Windows (a platform we don't
+      # run tests on). This guards against reintroducing an unguarded Unix-only
+      # syscall (umask, process groups, Stat_t) that would break the Windows
+      # build. It validates compilation only, not runtime behavior.
+      - name: windows cross-compile
+        run: GOOS=windows GOARCH=amd64 go build ./...
+
       - name: go test
         env:
           DISPATCHER_DISABLE_LIVE_PRICING: "1"

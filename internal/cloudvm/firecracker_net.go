@@ -41,11 +41,6 @@ func fcNet(runID string) (hostIP, guestIP, mask string) {
 	return fcNetFromIndex(fcSubnetIndex(runID))
 }
 
-// fcNetworkCIDR returns the hash-derived /30 in CIDR form for a run.
-func fcNetworkCIDR(runID string) string {
-	return fcCIDRFromIndex(fcSubnetIndex(runID))
-}
-
 // fcTapName is the host tap interface for a run. Must fit IFNAMSIZ (15 chars);
 // "fc" + 8 hex = 10.
 func fcTapName(runID string) string {
