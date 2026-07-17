@@ -15,7 +15,6 @@ import (
 // AWSProvider implements Provider using the aws CLI.
 type AWSProvider struct {
 	defaultRegion string
-	defaultAMI    string
 }
 
 // NewAWSProvider creates an AWS provider.
@@ -23,13 +22,52 @@ func NewAWSProvider(region string) *AWSProvider {
 	if region == "" {
 		region = "us-east-1"
 	}
-	return &AWSProvider{
-		defaultRegion: region,
-		defaultAMI:    "ami-0c7217cdde317cfec", // Ubuntu 22.04 us-east-1
-	}
+	return &AWSProvider{defaultRegion: region}
 }
 
 func (a *AWSProvider) Name() ProviderID { return ProviderAWS }
+
+// SetRegion re-points the provider so create AND teardown act on the same
+// region — DestroyVM/GetVM key off defaultRegion, so a run in a non-default
+// region would otherwise leak (terminate would query the wrong region).
+func (a *AWSProvider) SetRegion(region string) {
+	if region != "" {
+		a.defaultRegion = region
+	}
+}
+
+// ubuntuAMISSMParam is Canonical's public SSM parameter for the current Ubuntu
+// 22.04 amd64 image. It resolves to the correct AMI id per region, so we never
+// hardcode a region-pinned AMI.
+const ubuntuAMISSMParam = "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"
+
+// resolveUbuntuAMI looks up the region-correct Ubuntu AMI via SSM. AMI ids are
+// region-scoped, so a fixed id only works in one region; this makes any region
+// launchable without a hand-maintained region→AMI map.
+func resolveUbuntuAMI(ctx context.Context, region string) (string, error) {
+	var out []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		o, e := runCLI(ctx, "aws", "ssm", "get-parameter",
+			"--region", region,
+			"--name", ubuntuAMISSMParam,
+			"--query", "Parameter.Value",
+			"--output", "text",
+		)
+		if e != nil {
+			return wrapExecError("aws ssm get-parameter", e)
+		}
+		out = o
+		return nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("resolve ubuntu AMI for region %s via SSM: %w", region, err)
+	}
+	ami := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(ami, "ami-") {
+		return "", fmt.Errorf("SSM returned an unexpected AMI value %q for region %s", ami, region)
+	}
+	return ami, nil
+}
 
 func (a *AWSProvider) CheckCLI(ctx context.Context) error {
 	if _, err := exec.LookPath("aws"); err != nil {
@@ -42,37 +80,69 @@ func (a *AWSProvider) CheckCLI(ctx context.Context) error {
 	return nil
 }
 
+// awsConfidentialArgs returns the run-instances flags for a confidential VM (or
+// nil for non-confidential). AWS confidential VMs are AMD SEV-SNP only (no SEV,
+// no TDX), on specific M6a/R6a/C6a types — the catalog must pick a compatible one.
+func awsConfidentialArgs(opts VMOptions) ([]string, error) {
+	if opts.ConfidentialType == "" {
+		return nil, nil
+	}
+	if opts.ConfidentialType != "sev-snp" && opts.ConfidentialType != "any" {
+		return nil, fmt.Errorf("aws supports only sev-snp confidential VMs, not %q", opts.ConfidentialType)
+	}
+	return []string{"--cpu-options", "AmdSevSnp=enabled"}, nil
+}
+
 func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
 	region := opts.Region
 	if region == "" {
 		region = a.defaultRegion
 	}
+	// Validate tags before any CLI call (incl. the AMI lookup) so a crafted
+	// value is rejected pre-exec. AWS joins tag KV pairs with commas inside the
+	// --tag-specifications value, so a comma or `}` in a value would corrupt it.
+	if err := validateLabels(opts.Tags); err != nil {
+		return nil, fmt.Errorf("aws tags: %w", err)
+	}
+	// Reject an unsupported confidential type pre-exec, before the AMI lookup.
+	confArgs, err := awsConfidentialArgs(opts)
+	if err != nil {
+		return nil, err
+	}
+
+	instanceType := awsInstanceType(opts)
 	image := opts.Image
 	if image == "" {
-		image = a.defaultAMI
-	}
-	instanceType := opts.InstanceType
-	if instanceType == "" {
-		instanceType = "t3.micro"
+		if awsIsGPUMachine(instanceType) && awsGPUImage() != "" {
+			// GPU instances need the NVIDIA driver preinstalled; the operator
+			// supplies a driver-baked AMI.
+			image = awsGPUImage()
+		} else {
+			resolved, err := resolveUbuntuAMI(ctx, region)
+			if err != nil {
+				return nil, fmt.Errorf("aws: %w", err)
+			}
+			image = resolved
+		}
 	}
 	if err := validateVMArgs(region, instanceType, image); err != nil {
 		return nil, fmt.Errorf("aws: %w", err)
 	}
-	if opts.AllowSSHFrom != "" {
-		return nil, errFirewallUnsupported("aws")
+
+	// The default VPC security group only permits intra-group traffic, so
+	// dispatcher would never reach the VM over SSH. Create a per-run group that
+	// admits SSH (from AllowSSHFrom, or anywhere — key-only auth, matching GCP's
+	// default posture) and delete it on teardown.
+	sshCIDR := opts.AllowSSHFrom
+	if sshCIDR == "" {
+		sshCIDR = "0.0.0.0/0"
+	}
+	sgID, err := awsCreateSSHSecurityGroup(ctx, region, awsSGName(opts), sshCIDR, opts.Tags)
+	if err != nil {
+		return nil, err
 	}
 
-	// Build tag specifications. AWS uses commas to separate tag KV pairs
-	// inside the --tag-specifications value, so a label value with a comma
-	// or `}` would corrupt the spec. Validation at the boundary catches it.
-	if err := validateLabels(opts.Tags); err != nil {
-		return nil, fmt.Errorf("aws tags: %w", err)
-	}
-	var tagSpecs []string
-	for k, v := range opts.Tags {
-		tagSpecs = append(tagSpecs, fmt.Sprintf("{Key=%s,Value=%s}", k, v))
-	}
-	tagSpec := fmt.Sprintf("ResourceType=instance,Tags=[%s]", strings.Join(tagSpecs, ","))
+	tagSpec := awsTagSpec("instance", opts.Tags)
 
 	args := []string{
 		"ec2", "run-instances",
@@ -80,16 +150,41 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--image-id", image,
 		"--instance-type", instanceType,
 		"--count", "1",
+		"--security-group-ids", sgID,
 		"--tag-specifications", tagSpec,
 		"--output", "json",
 	}
+	// run-instances has no name uniqueness, so a transient error after the
+	// instance is created would make the retry provision a SECOND instance. A
+	// stable per-run client token makes the create idempotent — a retry returns
+	// the already-created instance instead of duplicating it.
+	if token := awsClientToken(opts); token != "" {
+		args = append(args, "--client-token", token)
+	}
 
-	if opts.UserData != "" {
+	args = append(args, confArgs...)
+
+	// A Nitro Enclaves parent needs enclave support enabled at launch; the parent
+	// is a normal instance (no memory encryption) — the measured enclave is the TEE.
+	if opts.EnclaveEnabled {
+		args = append(args, "--enclave-options", "Enabled=true")
+	}
+
+	// AWS has no metadata SSH channel like GCP, so dispatcher's per-run key is
+	// folded into the boot user-data (installed into the login user's
+	// authorized_keys). Without it the instance authorizes no key and SSH fails.
+	userData := opts.UserData
+	if opts.SSHKeyPath != "" && opts.SSHUser != "" {
+		pub, err := os.ReadFile(opts.SSHKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read ssh pubkey: %w", err)
+		}
+		userData = awsUserDataWithSSHKey(userData, opts.SSHUser, string(pub))
+	}
+	if userData != "" {
 		// Pass user-data via `file://` so it never appears in argv (visible
-		// to other users on the host via `ps`). Today user-data is just the
-		// watchdog cloud-init script; if we ever inject creds, this stops
-		// being a "low" issue and prevents leakage upfront.
-		f, err := adapter.WriteSecureTempFile("dispatcher-aws-userdata-*.yaml", []byte(opts.UserData))
+		// to other users on the host via `ps`).
+		f, err := adapter.WriteSecureTempFile("dispatcher-aws-userdata-*.yaml", []byte(userData))
 		if err != nil {
 			return nil, fmt.Errorf("write user-data: %w", err)
 		}
@@ -99,6 +194,8 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	output, err := retryCLIOutput(ctx, "aws", "aws ec2 run-instances", args...)
 	if err != nil {
+		// No instance took ownership of the group; reclaim it now.
+		awsDeleteSecurityGroup(ctx, region, sgID)
 		return nil, err
 	}
 
@@ -120,7 +217,12 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	// Wait for public IP
 	ip, err := a.waitForIP(ctx, instanceID, region)
 	if err != nil {
-		_ = a.DestroyVM(ctx, instanceID)
+		// waitForIP typically fails because ctx was cancelled (timeout/Ctrl-C), so
+		// tearing the instance down on that same ctx would no-op and leak a live,
+		// billing instance. Destroy on a fresh detached context.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = a.DestroyVM(cleanupCtx, instanceID)
 		return nil, err
 	}
 
@@ -131,6 +233,144 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		CreatedAt: time.Now().UTC(),
 		Tags:      opts.Tags,
 	}, nil
+}
+
+// awsUserDataWithSSHKey appends a boot-script snippet that installs pubKey into
+// sshUser's authorized_keys. AWS has no ssh-keys metadata channel like GCP, and
+// this needs no teardown — the key dies with the instance. A base user-data
+// (the watchdog) supplies the shebang; if absent we add one.
+func awsUserDataWithSSHKey(userData, sshUser, pubKey string) string {
+	if userData == "" {
+		userData = "#!/bin/sh\n"
+	}
+	home := "/home/" + sshUser
+	key := adapter.ShellQuote(strings.TrimSpace(pubKey))
+	snippet := fmt.Sprintf(`
+mkdir -p %[1]s/.ssh
+echo %[2]s >> %[1]s/.ssh/authorized_keys
+chown -R %[3]s:%[3]s %[1]s/.ssh
+chmod 700 %[1]s/.ssh
+chmod 600 %[1]s/.ssh/authorized_keys
+`, home, key, sshUser)
+	return userData + snippet
+}
+
+// awsGPUImage is the operator-provided driver-baked AMI for GPU instances.
+// Empty = fall back to stock Ubuntu (no driver).
+func awsGPUImage() string { return os.Getenv("DISPATCHER_AWS_GPU_IMAGE") }
+
+// awsIsGPUMachine reports whether instanceType is an AWS family that carries
+// attached GPUs (g4dn/g4ad/g5/g5g/g6 = various; p3/p4/p5 = training GPUs),
+// which need the NVIDIA driver preinstalled.
+func awsIsGPUMachine(instanceType string) bool {
+	for _, prefix := range []string{"g4dn.", "g4ad.", "g5.", "g5g.", "g6.", "g6e.", "p3.", "p4d.", "p4de.", "p5."} {
+		if strings.HasPrefix(instanceType, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// awsInstanceType resolves the instance type: the explicit choice, else a
+// default. SEV-SNP requires an m6a/c6a/r6a family (t3 can't do it), so a
+// confidential VM with no explicit type gets an SEV-SNP-capable default.
+func awsInstanceType(opts VMOptions) string {
+	if opts.InstanceType != "" {
+		return opts.InstanceType
+	}
+	if opts.ConfidentialType != "" {
+		return "m6a.large"
+	}
+	return "t3.micro"
+}
+
+// awsSGName is the per-run security group name (unique per run id).
+func awsSGName(opts VMOptions) string {
+	id := opts.Tags["dispatcher-run-id"]
+	if id == "" {
+		id = opts.Name
+	}
+	return "dispatcher-" + adapter.SanitizeName(id)
+}
+
+// awsTagSpec builds a --tag-specifications value for a resource type from a tag
+// map. AWS joins the KV pairs with commas inside a single structured argument;
+// tags are validated at the boundary (validateLabels) so no value can break out.
+func awsTagSpec(resourceType string, tags map[string]string) string {
+	var pairs []string
+	for k, v := range tags {
+		pairs = append(pairs, fmt.Sprintf("{Key=%s,Value=%s}", k, v))
+	}
+	return fmt.Sprintf("ResourceType=%s,Tags=[%s]", resourceType, strings.Join(pairs, ","))
+}
+
+// awsClientToken returns a stable idempotency token for run-instances, derived
+// from the per-run tag (the plan id) or the VM name. Stable across a create's
+// retries and unique per run, so AWS dedupes a retried create to one instance.
+// AWS caps client tokens at 64 ASCII chars; the plan id / name are well under.
+func awsClientToken(opts VMOptions) string {
+	if id := opts.Tags["dispatcher-run-id"]; id != "" {
+		return id
+	}
+	return opts.Name
+}
+
+// awsCreateSSHSecurityGroup creates a security group in the region's default VPC
+// admitting inbound SSH from cidr, and returns its group id. The group carries
+// the run's dispatcher tags so gc can recognize and reap a leaked one, and is
+// deleted on teardown (or if run-instances fails).
+func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string, tags map[string]string) (string, error) {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-vpcs", "--region", region,
+		"--filters", "Name=isDefault,Values=true", "--query", "Vpcs[0].VpcId", "--output", "text")
+	if err != nil {
+		return "", fmt.Errorf("aws describe default vpc: %w", err)
+	}
+	vpc := strings.TrimSpace(string(out))
+	if vpc == "" || vpc == "None" {
+		return "", fmt.Errorf("no default VPC in %s to place the SSH security group", region)
+	}
+	createArgs := []string{"ec2", "create-security-group", "--region", region,
+		"--group-name", name, "--description", "dispatcher per-run SSH access",
+		"--vpc-id", vpc, "--query", "GroupId", "--output", "text"}
+	if len(tags) > 0 {
+		createArgs = append(createArgs, "--tag-specifications", awsTagSpec("security-group", tags))
+	}
+	out, err = runCLI(ctx, "aws", createArgs...)
+	if err != nil {
+		return "", fmt.Errorf("aws create security group: %w", err)
+	}
+	sg := strings.TrimSpace(string(out))
+	if _, err := runCLI(ctx, "aws", "ec2", "authorize-security-group-ingress", "--region", region,
+		"--group-id", sg, "--protocol", "tcp", "--port", "22", "--cidr", cidr); err != nil {
+		awsDeleteSecurityGroup(ctx, region, sg)
+		return "", fmt.Errorf("aws authorize ssh ingress: %w", err)
+	}
+	return sg, nil
+}
+
+// awsDeleteSecurityGroup removes a group (best-effort; a group in use can't be
+// deleted until its instance is gone, so callers that just terminated retry).
+func awsDeleteSecurityGroup(ctx context.Context, region, sgID string) {
+	_, _ = runCLI(ctx, "aws", "ec2", "delete-security-group", "--region", region, "--group-id", sgID)
+}
+
+// awsInstanceDispatcherSGs returns the dispatcher-created security group ids
+// attached to an instance (best-effort).
+func awsInstanceDispatcherSGs(ctx context.Context, region, vmID string) []string {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-instances", "--region", region,
+		"--instance-ids", vmID,
+		"--query", "Reservations[].Instances[].SecurityGroups[?starts_with(GroupName, `dispatcher-`)].GroupId",
+		"--output", "text")
+	if err != nil {
+		return nil
+	}
+	var ids []string
+	for _, f := range strings.Fields(string(out)) {
+		if f != "" && f != "None" {
+			ids = append(ids, f)
+		}
+	}
+	return ids
 }
 
 func (a *AWSProvider) waitForIP(ctx context.Context, instanceID, region string) (string, error) {
@@ -168,6 +408,9 @@ func (a *AWSProvider) getVMInRegion(ctx context.Context, vmID, region string) (*
 		"--output", "json",
 	)
 	if err != nil {
+		if isVMNotFound(err, vmID) {
+			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		}
 		return nil, wrapExecError("aws ec2 describe-instances", err)
 	}
 
@@ -203,13 +446,43 @@ func (a *AWSProvider) getVMInRegion(ctx context.Context, vmID, region string) (*
 }
 
 func (a *AWSProvider) DestroyVM(ctx context.Context, vmID string) error {
+	// Capture the per-run security group before terminating; it can only be
+	// deleted once the instance releases it.
+	sgs := awsInstanceDispatcherSGs(ctx, a.defaultRegion, vmID)
 	if _, err := runCLI(ctx, "aws", "ec2", "terminate-instances",
 		"--region", a.defaultRegion,
 		"--instance-ids", vmID,
 	); err != nil {
+		// Already gone — teardown is idempotent (matches OCI + the GetVM contract),
+		// so a retried/racing gc pass doesn't report a spurious cleanup failure.
+		if isVMNotFound(err, vmID) {
+			return nil
+		}
 		return fmt.Errorf("aws ec2 terminate-instances failed: %w", err)
 	}
+	for _, sg := range sgs {
+		a.deleteSGWhenReleased(ctx, sg)
+	}
 	return nil
+}
+
+// deleteSGWhenReleased retries deleting a security group until the terminating
+// instance releases it (DependencyViolation clears once terminated). Bounded so
+// teardown can't hang. GPU/confidential instances can take several minutes to
+// terminate, so the window is generous; a leftover SG is non-billing and gets
+// reaped by gc as a fallback.
+func (a *AWSProvider) deleteSGWhenReleased(ctx context.Context, sgID string) {
+	for i := 0; i < 42; i++ { // ~7 min at 10s cadence
+		if _, err := runCLI(ctx, "aws", "ec2", "delete-security-group",
+			"--region", a.defaultRegion, "--group-id", sgID); err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(10 * time.Second):
+		}
+	}
 }
 
 func (a *AWSProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {

@@ -118,26 +118,6 @@ func TestLifecycleForWorkload(t *testing.T) {
 	assert.Equal(t, LifecycleEphemeral, LifecycleForWorkload(types.WorkloadKindContainer))
 }
 
-func TestTransition_DetachedStates(t *testing.T) {
-	r := NewRun(testPlan())
-	require.NoError(t, r.Transition(types.RunStatePlanning))
-	require.NoError(t, r.Transition(types.RunStateValidated))
-	require.NoError(t, r.Transition(types.RunStatePreparing))
-	require.NoError(t, r.Transition(types.RunStateRunning))
-
-	// Running → Detached
-	require.NoError(t, r.Transition(types.RunStateDetached))
-	assert.Equal(t, types.RunStateDetached, r.GetState())
-
-	// Detached → Reconnecting
-	require.NoError(t, r.Transition(types.RunStateReconnecting))
-	assert.Equal(t, types.RunStateReconnecting, r.GetState())
-
-	// Reconnecting → Running
-	require.NoError(t, r.Transition(types.RunStateRunning))
-	assert.Equal(t, types.RunStateRunning, r.GetState())
-}
-
 func TestTransition_StoppingState(t *testing.T) {
 	r := NewRun(testPlan())
 	require.NoError(t, r.Transition(types.RunStatePlanning))
@@ -150,19 +130,6 @@ func TestTransition_StoppingState(t *testing.T) {
 	assert.Equal(t, types.RunStateStopping, r.GetState())
 
 	// Stopping → CleaningUp → Completed
-	require.NoError(t, r.Transition(types.RunStateCleaningUp))
-	require.NoError(t, r.Transition(types.RunStateCompleted))
-}
-
-func TestTransition_DetachedToCleanup(t *testing.T) {
-	r := NewRun(testPlan())
-	require.NoError(t, r.Transition(types.RunStatePlanning))
-	require.NoError(t, r.Transition(types.RunStateValidated))
-	require.NoError(t, r.Transition(types.RunStatePreparing))
-	require.NoError(t, r.Transition(types.RunStateRunning))
-	require.NoError(t, r.Transition(types.RunStateDetached))
-
-	// GC can clean up detached runs directly
 	require.NoError(t, r.Transition(types.RunStateCleaningUp))
 	require.NoError(t, r.Transition(types.RunStateCompleted))
 }

@@ -190,7 +190,12 @@ func (a *K8sAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails
 	if !ok {
 		return adapter.FailureDetails{Message: "no k8s state"}
 	}
-	cmd := exec.Command("kubectl", "get", "pod", state.PodName,
+	// Bounded timeout: FailureDetails runs before teardown, so an unreachable /
+	// black-holed API server (TCP up, no HTTP response) must not hang the executor
+	// indefinitely and strand the Job — fall through to "unavailable" instead.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "kubectl", "get", "pod", state.PodName,
 		"-n", state.Namespace,
 		"-o", "jsonpath={.status.containerStatuses[0].state.terminated}")
 	out, err := cmd.Output()
@@ -253,6 +258,7 @@ func (a *K8sAdapter) ListResources(ctx context.Context) ([]adapter.ResourceInfo,
 		resources = append(resources, adapter.ResourceInfo{
 			ResourceID: vm.ID,
 			Provider:   "kubernetes",
+			Kind:       adapter.ResourceInstance, // a dispatcher-owned Job
 			CreatedAt:  vm.CreatedAt,
 			RunID:      vm.Tags["dispatcher-run-id"],
 			Tags:       vm.Tags,
@@ -261,8 +267,11 @@ func (a *K8sAdapter) ListResources(ctx context.Context) ([]adapter.ResourceInfo,
 	return resources, nil
 }
 
-func (a *K8sAdapter) DestroyResource(ctx context.Context, resourceID string) error {
-	return a.provider.DestroyVM(ctx, resourceID)
+func (a *K8sAdapter) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
+	return a.provider.DestroyVM(ctx, res.ResourceID)
 }
 
 // helpers

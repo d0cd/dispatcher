@@ -32,8 +32,22 @@ func TestEvaluate_UnknownCostRequiresApproval(t *testing.T) {
 	est := types.CostEstimate{Confidence: types.ConfidenceUnknown}
 
 	reqs := Evaluate(w, target, est)
-	names := approvalNames(reqs)
-	assert.Contains(t, names, "unknown-cost")
+	assert.Contains(t, approvalNames(reqs), "unconfirmed-cost")
+}
+
+// A low-confidence CLOUD cost (offline rate-card fallback) is unconfirmed and must
+// require approval so it can't silently pass a --max-cost cap; local low-confidence
+// costs are cheap and exempt.
+func TestEvaluate_LowConfidenceCloudCostRequiresApproval(t *testing.T) {
+	w := types.WorkloadSpec{DetectedKind: types.WorkloadKindScript}
+	cloud := types.TargetConfig{Kind: types.TargetKindCloudVM}
+	local := types.TargetConfig{Kind: types.TargetKindDocker}
+	low := types.CostEstimate{Confidence: types.ConfidenceLow, Value: 1.0}
+
+	assert.Contains(t, approvalNames(Evaluate(w, cloud, low)), "unconfirmed-cost",
+		"a low-confidence cloud cost must require approval")
+	assert.NotContains(t, approvalNames(Evaluate(w, local, low)), "unconfirmed-cost",
+		"a low-confidence local cost is cheap and exempt")
 }
 
 func TestEvaluate_GPURequiresApproval(t *testing.T) {

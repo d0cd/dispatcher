@@ -170,3 +170,15 @@ func writeFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644))
 }
+
+// A malformed dispatcher.yaml (typo'd field) must fail InspectCodebase rather
+// than being silently ignored — otherwise the whole config (cost cap,
+// confidential requirement) is dropped and the run proceeds uncontrolled.
+func TestInspectCodebase_MalformedConfigErrors(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.py"), []byte("print(1)"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "dispatcher.yaml"), []byte("maxCst: 5\n"), 0o644))
+
+	_, err := InspectCodebase(dir)
+	require.Error(t, err, "a malformed dispatcher.yaml must abort inspection, not be silently dropped")
+}

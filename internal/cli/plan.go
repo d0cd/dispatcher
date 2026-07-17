@@ -37,11 +37,14 @@ func init() {
 	planCmd.Flags().StringVar(&planFlags.target, "target", "", "evaluate a specific target")
 	planCmd.Flags().StringVar(&planFlags.optimize, "optimize", "cost", "optimize for: cost, speed")
 	planCmd.Flags().Float64Var(&planFlags.maxCost, "max-cost", 0, "maximum estimated cost in USD")
-	planCmd.Flags().StringVar(&planFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, h100:1)")
+	planCmd.Flags().StringVar(&planFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, a100:1)")
 	planCmd.Flags().BoolVar(&planFlags.ai, "ai", false, "use AI planner (requires LLM backend)")
 }
 
 func runPlan(cmd *cobra.Command, args []string) error {
+	if planFlags.maxCost < 0 {
+		return fmt.Errorf("--max-cost must be >= 0 (0 means no cap); got %v", planFlags.maxCost)
+	}
 	raw := "."
 	if len(args) > 0 {
 		raw = args[0]
@@ -145,6 +148,10 @@ func runAIPlan(path string, constraints types.PlanConstraints) error {
 		if err != nil {
 			return fmt.Errorf("plan failed: %w", err)
 		}
+	}
+
+	if jsonOutput() {
+		return emitJSON(result)
 	}
 
 	// Print result

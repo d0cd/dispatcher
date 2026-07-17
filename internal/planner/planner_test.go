@@ -86,6 +86,42 @@ func TestToolRegistry_EvaluateAllTargets(t *testing.T) {
 	assert.NotNil(t, localEval.Cost)
 }
 
+func TestToolRegistry_EvaluateAllTargets_FlakyHistory(t *testing.T) {
+	tools, dir := setupTestEnv(t)
+
+	inspect := tools.Execute(ToolCall{
+		Name:  "inspect_workload",
+		Input: mustJSON(map[string]string{"path": dir}),
+	}, nil)
+	spec := inspect.Result.(types.WorkloadSpec)
+
+	// Seed a mixed pass/fail history for this workload on local-process.
+	require.NoError(t, tools.history.Record(cost.RunHistory{WorkloadName: spec.Name, TargetID: "local-process", Success: true}))
+	require.NoError(t, tools.history.Record(cost.RunHistory{WorkloadName: spec.Name, TargetID: "local-process", Success: false}))
+
+	result := tools.Execute(ToolCall{
+		Name:  "evaluate_all_targets",
+		Input: json.RawMessage("{}"),
+	}, &spec)
+	evals := result.Result.([]TargetEvaluation)
+
+	var local *TargetEvaluation
+	for i := range evals {
+		if evals[i].TargetID == "local-process" {
+			local = &evals[i]
+			break
+		}
+	}
+	require.NotNil(t, local)
+	var flaky bool
+	for _, r := range local.Risks {
+		if r.Category == "flaky-history" {
+			flaky = true
+		}
+	}
+	assert.True(t, flaky, "mixed pass/fail history must surface a flaky-history risk")
+}
+
 func TestToolRegistry_EvaluateAllTargets_NilSpec(t *testing.T) {
 	tools, _ := setupTestEnv(t)
 
@@ -366,4 +402,17 @@ func TestPlanner_ProseBackendKeepsExplanationOnly(t *testing.T) {
 	assert.Contains(t, result.Explanation, "local-process")
 	assert.Nil(t, result.Recommendation)
 	assert.Empty(t, result.Alternatives)
+}
+
+// A pinned --target must be honored by the deterministic fallback, not silently
+// replaced by the cheapest feasible target (matching plan.Build's pin behavior).
+func TestDeterministicPlan_HonorsTargetName(t *testing.T) {
+	tools, dir := setupTestEnv(t)
+	planner := NewPlanner(nil, tools)
+
+	result, err := planner.DeterministicPlan(context.Background(), dir,
+		types.PlanConstraints{OptimizeFor: types.OptimizeCost, TargetName: "hetzner-vm"})
+	require.NoError(t, err)
+	require.NotNil(t, result.Recommendation)
+	assert.Equal(t, "hetzner-vm", result.Recommendation.Target, "the pinned --target must be recommended, not the cheapest")
 }

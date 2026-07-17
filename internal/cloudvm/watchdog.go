@@ -26,13 +26,32 @@ const watchdogDeadlinePath = "/var/lib/dispatcher/watchdog-deadline"
 // for multi-user.target) rather than a bare backgrounded subshell, so it is
 // re-launched after a reboot and re-reads the persisted deadline — shutting
 // down immediately if the deadline already passed.
-func WatchdogCloudInit(initialTTL time.Duration) string {
+//
+// AZURE CAVEAT: the self-destruct is a guest-side `shutdown -h now`, which on
+// Hetzner/AWS/GCP stops compute billing. On Azure a guest halt leaves the VM
+// "Stopped (allocated)" — still fully compute-billing; only a control-plane
+// `az vm deallocate` stops charges, which a credential-less guest cannot call.
+// So on Azure this caps the OS but NOT compute cost; the deallocating backstop
+// is `dispatcher gc` (which reaps stopped-but-allocated Azure VMs). Making the
+// Azure watchdog auto-deallocate (managed identity + IMDS token → REST) is
+// tracked in ROADMAP.
+func WatchdogCloudInit(initialTTL time.Duration, loginUser string) string {
 	ttlSeconds := int(initialTTL.Seconds())
+	// cloud-init runs as root, so the deadline file it writes is root-owned.
+	// Renewal (ExtendWatchdogViaSSH) connects as the login user, which is
+	// non-root on most clouds (ubuntu/dispatcher/ec2-user); hand the file to
+	// that user so its `echo > deadline` can write. When the login user is
+	// already root the chown is a no-op and is omitted.
+	chownDeadline := ""
+	if loginUser != "" && loginUser != "root" {
+		chownDeadline = fmt.Sprintf("chown %s %s", loginUser, watchdogDeadlinePath)
+	}
 	return fmt.Sprintf(`#!/bin/sh
 # Dispatcher watchdog: self-destruct if deadline not extended.
 # Deadline is computed at boot so provisioning delays don't pre-expire it.
 mkdir -p /var/log/dispatcher /var/lib/dispatcher
 echo $(($(date +%%s) + %d)) > %s
+%s
 
 cat > /usr/local/bin/dispatcher-watchdog.sh <<'WATCHDOG_EOF'
 #!/bin/sh
@@ -64,7 +83,7 @@ UNIT_EOF
 
 systemctl daemon-reload
 systemctl enable --now dispatcher-watchdog.service
-`, ttlSeconds, watchdogDeadlinePath, watchdogDeadlinePath)
+`, ttlSeconds, watchdogDeadlinePath, chownDeadline, watchdogDeadlinePath)
 }
 
 // ExtendWatchdogViaSSH updates the deadline file on the remote VM.
@@ -96,7 +115,13 @@ func sshCmdArgs(state *CloudVMState, remoteCmd string) []string {
 		args = append(args, "-o", "UserKnownHostsFile=/dev/null")
 	}
 	args = append(args, "-o", "ConnectTimeout=10")
+	args = append(args, "-o", "ServerAliveInterval=15")
+	args = append(args, "-o", "ServerAliveCountMax=6")
 	if state.SSHKeyPath != "" {
+		// -i adds an identity but does not stop ssh-agent identities from being
+		// offered first. A busy agent can hit sshd's MaxAuthTries before the
+		// per-run key, yielding "Too many authentication failures".
+		args = append(args, "-o", "IdentitiesOnly=yes")
 		args = append(args, "-i", state.SSHKeyPath)
 	}
 	port := state.SSHPort

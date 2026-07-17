@@ -317,3 +317,15 @@ func TestCLI_GC_DryRun(t *testing.T) {
 	_, _, err := executeCommand("gc", "--dry-run")
 	require.NoError(t, err)
 }
+
+// --allow-ssh-from must be accepted for every target whose provider implements a
+// per-run SSH firewall (Hetzner and AWS), and rejected for the rest — so an AWS
+// user isn't wrongly told a working feature is unsupported.
+func TestPerRunFirewallSupported(t *testing.T) {
+	for _, target := range []string{"hetzner-vm", "aws-vm"} {
+		assert.True(t, perRunFirewallSupported(target), "%s implements a per-run SSH firewall", target)
+	}
+	for _, target := range []string{"gcp-vm", "azure-vm", "local-docker", "kubernetes"} {
+		assert.False(t, perRunFirewallSupported(target), "%s has no per-run SSH firewall", target)
+	}
+}

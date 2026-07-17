@@ -38,6 +38,11 @@ func TestEstimateCostWithHistory_PreservesGPUInstanceType(t *testing.T) {
 
 	assert.Equal(t, "g4dn.xlarge", est.InstanceType,
 		"the resolved GPU instance must survive the history/scaling path")
+	// One historical run is below the ≥3-sample bar for a confidence bump, so the
+	// GPU/rate-card ConfidenceLow that EstimateCost assigned must be preserved —
+	// not silently inflated to Medium by the scaling path.
+	assert.Equal(t, types.ConfidenceLow, est.Confidence,
+		"a single historical run must not inflate a GPU estimate's confidence")
 }
 
 type stubFetcher struct {
@@ -48,6 +53,43 @@ type stubFetcher struct {
 func (s *stubFetcher) Provider() cloudvm.ProviderID { return s.provider }
 func (s *stubFetcher) Fetch(context.Context) ([]cloudvm.InstanceType, error) {
 	return s.instances, nil
+}
+
+// A confidential run is provisioned on a CVM SKU the provider forces (Azure
+// Standard_DC2ads_v5, AWS m6a.large) regardless of the requested size. Pricing
+// it against the cheapest general-purpose instance (Standard_B2s / t3.micro)
+// understates the bill several-fold and lets an over-budget confidential run
+// slip past the hard budget gate. It must price the CVM SKU actually launched.
+func TestEstimateFromCatalog_ConfidentialPricesCVMSKU(t *testing.T) {
+	catalog := cloudvm.NewCatalog()
+	conf := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{
+			Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp"},
+		},
+	}
+	azure := types.TargetConfig{Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: "azure"}}}
+	aws := types.TargetConfig{Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: "aws"}}}
+	gcp := types.TargetConfig{Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: "gcp"}}}
+
+	azEst, ok := estimateFromCatalog(conf, azure, catalog)
+	require.True(t, ok, "azure confidential must resolve a catalog SKU")
+	assert.Equal(t, "Standard_DC2ads_v5", azEst.InstanceType)
+
+	awsEst, ok := estimateFromCatalog(conf, aws, catalog)
+	require.True(t, ok, "aws confidential must resolve a catalog SKU")
+	assert.Equal(t, "m6a.large", awsEst.InstanceType)
+
+	gcpEst, ok := estimateFromCatalog(conf, gcp, catalog)
+	require.True(t, ok, "gcp confidential must resolve a catalog SKU")
+	assert.Equal(t, "n2d-standard-2", gcpEst.InstanceType)
+
+	// A plain (non-confidential) run must NOT be priced on a confidential SKU.
+	plain := types.WorkloadSpec{DetectedKind: types.WorkloadKindScript}
+	plainEst, ok := estimateFromCatalog(plain, aws, catalog)
+	require.True(t, ok)
+	assert.NotEqual(t, "m6a.large", plainEst.InstanceType,
+		"a plain run must keep pricing the cheapest general-purpose SKU")
 }
 
 func TestEstimateCost_LocalDocker(t *testing.T) {
@@ -224,6 +266,18 @@ func TestRequirementsFromSpec_NoModelLeavesGPUModelEmpty(t *testing.T) {
 	assert.Empty(t, req.GPUModel)
 }
 
+func TestRequirementsFromSpec_PreservesArchitecture(t *testing.T) {
+	spec := types.WorkloadSpec{Requirements: types.ResourceRequirements{
+		CPU: "16", Memory: "30G", Arch: "x86_64",
+	}}
+
+	req := requirementsFromSpec(spec)
+
+	assert.Equal(t, 16, req.MinVCPUs)
+	assert.Equal(t, 30.0, req.MinMemoryGB)
+	assert.Equal(t, "x86_64", req.Arch)
+}
+
 // TestEstimateCost_LiveCatalog_FallsBackWhenEmpty verifies that a catalog
 // with no matching instances falls back to the static rate card rather than
 // returning ConfidenceUnknown.
@@ -314,6 +368,23 @@ func TestEstimateCost_GPUResolutionMatrix(t *testing.T) {
 			assert.Equal(t, tc.wantInstance, est.InstanceType)
 		})
 	}
+}
+
+func TestEstimateCost_OfflineCloudResolvesRequirementMatchingInstance(t *testing.T) {
+	spec := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{CPU: "16", Memory: "30G", Arch: "x86_64"},
+	}
+	target := types.TargetConfig{
+		Kind:         types.TargetKindCloudVM,
+		Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: "hetzner"}},
+	}
+
+	est := EstimateCost(spec, target, nil)
+
+	assert.Equal(t, "cpx62", est.InstanceType,
+		"offline pricing must still pin a compatible VM instead of using the provider's ARM default")
+	assert.Equal(t, types.ConfidenceLow, est.Confidence)
 }
 
 // Hetzner Cloud has no GPU SKU (the gx11 catalog row was removed), so the rate

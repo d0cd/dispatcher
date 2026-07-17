@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -29,18 +31,21 @@ var ErrAtelierCancelled = errors.New("aitelier run cancelled")
 // tool loop against a local MCP server (started here) that wraps the planner's
 // ToolRegistry.
 type AtelierBackend struct {
-	baseURL  string
-	agent    string // backend name (claude, codex, ...) — first segment of `model`
-	model    string // optional inner LLM (e.g. "claude-sonnet-4-5") — second segment
-	apiKey   string // optional Bearer token for hosted mode
-	registry *ToolRegistry
-	client   *http.Client
+	baseURL   string
+	agent     string // backend name (claude, codex, ...) — first segment of `model`
+	model     string // optional inner LLM (e.g. "claude-sonnet-4-5") — second segment
+	apiKey    string // optional Bearer token for hosted mode
+	registry  *ToolRegistry
+	client    *http.Client
+	configErr error
 
 	// responseSchema is the JSON schema sent to aitelier as response_format.
 	// Defaults to the plan schema; callers can override via SetResponseSchema
 	// before invoking Diagnose/Audit so the inner agent isn't told to produce
-	// PlanResult-shaped JSON for a non-plan flow.
+	// PlanResult-shaped JSON for a non-plan flow. Guarded by schemaMu because a
+	// shared backend (the agentic/MCP server) can have concurrent Chat readers.
 	responseSchema *responseFormat
+	schemaMu       sync.Mutex
 }
 
 type AtelierConfig struct {
@@ -70,16 +75,63 @@ func NewAtelierBackend(cfg AtelierConfig) *AtelierBackend {
 	if cfg.APIKey == "" {
 		cfg.APIKey = os.Getenv("AITELIER_API_KEY")
 	}
+	baseURL, configErr := validateAtelierBaseURL(cfg.BaseURL)
 
 	return &AtelierBackend{
-		baseURL:        cfg.BaseURL,
+		baseURL:        baseURL,
 		agent:          cfg.Agent,
 		model:          cfg.Model,
 		apiKey:         cfg.APIKey,
 		registry:       cfg.ToolRegistry,
 		client:         &http.Client{Timeout: 5 * time.Minute},
+		configErr:      configErr,
 		responseSchema: planResultResponseFormat(),
 	}
+}
+
+// validateAtelierBaseURL prevents an API key and private workload metadata from
+// being sent over cleartext networks. HTTP is permitted only for a loopback
+// daemon; remote deployments must use HTTPS. Embedded credentials, queries, and
+// fragments are rejected so URL construction remains unambiguous.
+func validateAtelierBaseURL(raw string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw, fmt.Errorf("invalid AITELIER_URL %q", raw)
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return raw, fmt.Errorf("AITELIER_URL must not contain credentials, query parameters, or a fragment")
+	}
+	host := u.Hostname()
+	isLoopback := strings.EqualFold(host, "localhost")
+	if ip := net.ParseIP(host); ip != nil {
+		isLoopback = ip.IsLoopback()
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopback) {
+		return raw, fmt.Errorf("AITELIER_URL must use HTTPS unless it points to loopback")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return raw, fmt.Errorf("AITELIER_URL has unsupported scheme %q", u.Scheme)
+	}
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func (a *AtelierBackend) authorize(req *http.Request) {
+	if a.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+a.apiKey)
+	}
+}
+
+const maxAtelierResponseBytes = 16 << 20
+
+func readAtelierResponse(r io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, maxAtelierResponseBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxAtelierResponseBytes {
+		return nil, fmt.Errorf("response exceeds %d bytes", maxAtelierResponseBytes)
+	}
+	return raw, nil
 }
 
 // SetResponseSchema overrides the response_format sent to aitelier on the
@@ -87,7 +139,16 @@ func NewAtelierBackend(cfg AtelierConfig) *AtelierBackend {
 // so the inner agent isn't told to produce a PlanResult-shaped object when
 // it's actually doing a different job.
 func (a *AtelierBackend) SetResponseSchema(s *responseFormat) {
+	a.schemaMu.Lock()
 	a.responseSchema = s
+	a.schemaMu.Unlock()
+}
+
+// currentSchema reads the response schema under the lock.
+func (a *AtelierBackend) currentSchema() *responseFormat {
+	a.schemaMu.Lock()
+	defer a.schemaMu.Unlock()
+	return a.responseSchema
 }
 
 // ResponseSchemaPlan exposes the plan schema so callers (Diagnose/Audit) can
@@ -212,6 +273,9 @@ type runEvent struct {
 // agent loop happens inside aitelier; the planner sees a single turn that
 // returns the final structured plan with no follow-up tool calls.
 func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []Tool) (*Message, error) {
+	if a.configErr != nil {
+		return nil, a.configErr
+	}
 	if a.registry == nil {
 		return nil, fmt.Errorf("AtelierBackend requires a ToolRegistry — agent loop needs an MCP server")
 	}
@@ -228,7 +292,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 	req := chatCompletionRequest{
 		Model:          a.modelString(),
 		Messages:       toChatMessages(messages),
-		ResponseFormat: a.responseSchema,
+		ResponseFormat: a.currentSchema(),
 		Aitelier: &aitelierOpts{
 			MCPServers: []mcpServerSpec{
 				{Name: mcpServerName, Transport: "http", URL: mcp.URL()},
@@ -259,9 +323,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 		}
 		httpReq.Header.Set("Content-Type", "application/json")
 		httpReq.Header.Set("X-Correlation-Id", correlationID)
-		if a.apiKey != "" {
-			httpReq.Header.Set("Authorization", "Bearer "+a.apiKey)
-		}
+		a.authorize(httpReq)
 
 		httpResp, err := a.client.Do(httpReq)
 		if err != nil {
@@ -270,7 +332,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 		}
 		defer httpResp.Body.Close()
 
-		raw, err := io.ReadAll(httpResp.Body)
+		raw, err := readAtelierResponse(httpResp.Body)
 		if err != nil {
 			resCh <- result{err: fmt.Errorf("read chat response: %w", err)}
 			return
@@ -292,6 +354,7 @@ func (a *AtelierBackend) Chat(ctx context.Context, messages []Message, tools []T
 
 		var r chatCompletionResponse
 		if err := json.Unmarshal(raw, &r); err != nil {
+			resCh <- result{err: fmt.Errorf("decode chat response: %w", err)}
 			return
 		}
 		resCh <- result{resp: &r}
@@ -343,16 +406,14 @@ func (a *AtelierBackend) fetchToolNames(runID string) []string {
 	if err != nil {
 		return nil
 	}
-	if a.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.apiKey)
-	}
+	a.authorize(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return nil
 	}
 	defer resp.Body.Close()
 	var events []runEvent
-	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAtelierResponseBytes)).Decode(&events); err != nil {
 		return nil
 	}
 	var names []string
@@ -369,13 +430,14 @@ func (a *AtelierBackend) fetchToolNames(runID string) []string {
 
 // CheckAvailable hits /v1/discovery and confirms the sandbox agent is reachable.
 func (a *AtelierBackend) CheckAvailable(ctx context.Context) error {
+	if a.configErr != nil {
+		return a.configErr
+	}
 	req, err := http.NewRequestWithContext(ctx, "GET", a.baseURL+"/v1/discovery", nil)
 	if err != nil {
 		return err
 	}
-	if a.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.apiKey)
-	}
+	a.authorize(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("aitelier not reachable at %s: %w", a.baseURL, err)
@@ -388,7 +450,7 @@ func (a *AtelierBackend) CheckAvailable(ctx context.Context) error {
 		return fmt.Errorf("aitelier /v1/discovery returned %d", resp.StatusCode)
 	}
 	var d discoveryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAtelierResponseBytes)).Decode(&d); err != nil {
 		return fmt.Errorf("decode /v1/discovery: %w", err)
 	}
 	if !d.Dependencies.SandboxAgent.Reachable {
@@ -402,6 +464,7 @@ func (a *AtelierBackend) checkHealthFallback(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	a.authorize(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("aitelier not reachable at %s: %w", a.baseURL, err)
@@ -419,16 +482,14 @@ func (a *AtelierBackend) listActiveRuns(ctx context.Context) map[string]bool {
 	if err != nil {
 		return out
 	}
-	if a.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+a.apiKey)
-	}
+	a.authorize(req)
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return out
 	}
 	defer resp.Body.Close()
 	var ar activeRunsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&ar); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAtelierResponseBytes)).Decode(&ar); err != nil {
 		return out
 	}
 	for _, id := range ar.Active {
@@ -437,35 +498,40 @@ func (a *AtelierBackend) listActiveRuns(ctx context.Context) map[string]bool {
 	return out
 }
 
+// cancelNewRuns best-effort cancels the aitelier run this call started, identified
+// as the single run that appeared since the pre-call snapshot. If several runs
+// appeared, a concurrent flow shares this backend and the id-diff can't attribute
+// runs to callers — cancelling would risk killing an unrelated in-flight run, so we
+// skip and let the server reap our abandoned run rather than cross-cancel. (A
+// precise fix needs the run id echoed at request time, not just in the response.)
 func (a *AtelierBackend) cancelNewRuns(before map[string]bool) {
 	bg, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	after := a.listActiveRuns(bg)
-	var wg sync.WaitGroup
-	for id := range after {
-		if before[id] {
-			continue
+	var fresh []string
+	for id := range a.listActiveRuns(bg) {
+		if !before[id] {
+			fresh = append(fresh, id)
 		}
-		wg.Add(1)
-		go func(runID string) {
-			defer wg.Done()
-			req, err := http.NewRequestWithContext(bg, "POST", a.baseURL+"/v1/runs/"+runID+"/cancel", nil)
-			if err != nil {
-				return
-			}
-			if a.apiKey != "" {
-				req.Header.Set("Authorization", "Bearer "+a.apiKey)
-			}
-			resp, err := a.client.Do(req)
-			if err != nil {
-				return
-			}
-			resp.Body.Close()
-			dlog.L().Info("aitelier.cancel", "run_id", runID)
-		}(id)
 	}
-	wg.Wait()
+	if len(fresh) != 1 {
+		if len(fresh) > 1 {
+			dlog.L().Warn("aitelier.cancel.ambiguous", "new_runs", len(fresh),
+				"note", "not cancelling — cannot attribute concurrent runs to this call")
+		}
+		return
+	}
+	req, err := http.NewRequestWithContext(bg, "POST", a.baseURL+"/v1/runs/"+fresh[0]+"/cancel", nil)
+	if err != nil {
+		return
+	}
+	a.authorize(req)
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+	dlog.L().Info("aitelier.cancel", "run_id", fresh[0])
 }
 
 // toChatMessages converts the planner's Message list into OpenAI chat messages.

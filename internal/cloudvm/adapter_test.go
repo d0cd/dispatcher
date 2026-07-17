@@ -3,6 +3,8 @@ package cloudvm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os/exec"
 	"testing"
 	"time"
 
@@ -171,6 +173,27 @@ func TestCloudVMAdapter_Cleanup(t *testing.T) {
 	assert.Equal(t, 0, mock.VMCount())
 }
 
+// When DestroyVM fails, Cleanup must report failure (Success=false + the
+// provider error) rather than swallowing it — that signal is what tells the
+// operator a billable VM may be orphaned.
+func TestCloudVMAdapter_Cleanup_DestroyFailureSurfaces(t *testing.T) {
+	mock := NewMockProvider(ProviderHetzner)
+	mock.DestroyErr = fmt.Errorf("provider quota exhausted")
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})
+
+	handle := &adapter.RunHandle{
+		ID:       "vm-1",
+		TargetID: "hetzner-vm",
+		State:    &CloudVMState{Provider: ProviderHetzner, VMID: "vm-1"},
+	}
+
+	result, err := a.Cleanup(context.Background(), handle)
+	require.NoError(t, err, "Cleanup reports the failure via the result, not a returned error")
+	require.NotNil(t, result)
+	assert.False(t, result.Success, "a failed DestroyVM must mark the cleanup unsuccessful")
+	assert.Contains(t, result.Errors, "provider quota exhausted")
+}
+
 func TestCloudVMAdapter_Cleanup_Idempotent(t *testing.T) {
 	mock := NewMockProvider(ProviderHetzner)
 	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})
@@ -202,6 +225,56 @@ func TestCloudVMAdapter_ListResources(t *testing.T) {
 	assert.Equal(t, "run_1", resources[0].RunID)
 }
 
+func TestCloudVMAdapter_DestroyResource_RefusesUnowned(t *testing.T) {
+	mock := NewMockProvider(ProviderHetzner)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})
+	ctx := context.Background()
+
+	// A resource that dispatcher did NOT create (no dispatcher=true tag) — e.g.
+	// another project's VM surfaced by a listing. Destroying it would be
+	// irreversible loss of something we don't own.
+	vm, _ := mock.CreateVM(ctx, VMOptions{
+		Name: "someone-elses-vm",
+		Tags: map[string]string{"owner": "other-team"},
+	})
+
+	err := a.DestroyResource(ctx, adapter.ResourceInfo{
+		ResourceID: vm.ID,
+		Provider:   string(ProviderHetzner),
+		Kind:       adapter.ResourceInstance,
+		Tags:       vm.Tags,
+	})
+
+	require.Error(t, err, "must refuse to destroy a resource dispatcher doesn't own")
+	assert.Contains(t, err.Error(), "not dispatcher-owned")
+	if _, ok := mock.vms[vm.ID]; !ok {
+		t.Fatal("DestroyVM was called on an unowned resource; the ownership guard failed")
+	}
+}
+
+func TestCloudVMAdapter_DestroyResource_DestroysOwned(t *testing.T) {
+	mock := NewMockProvider(ProviderHetzner)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})
+	ctx := context.Background()
+
+	vm, _ := mock.CreateVM(ctx, VMOptions{
+		Name: "dispatcher-vm",
+		Tags: map[string]string{"dispatcher": "true", "dispatcher-run-id": "run_1"},
+	})
+
+	err := a.DestroyResource(ctx, adapter.ResourceInfo{
+		ResourceID: vm.ID,
+		Provider:   string(ProviderHetzner),
+		Kind:       adapter.ResourceInstance,
+		Tags:       vm.Tags,
+	})
+
+	require.NoError(t, err)
+	if _, ok := mock.vms[vm.ID]; ok {
+		t.Fatal("a dispatcher-owned instance should have been destroyed")
+	}
+}
+
 func TestCloudVMState_Serialization(t *testing.T) {
 	state := &CloudVMState{
 		Provider:     ProviderAWS,
@@ -230,7 +303,7 @@ func TestCloudVMState_Serialization(t *testing.T) {
 }
 
 func TestWatchdogCloudInit(t *testing.T) {
-	script := WatchdogCloudInit(30 * time.Minute)
+	script := WatchdogCloudInit(30*time.Minute, "ubuntu")
 	assert.Contains(t, script, "watchdog-deadline")
 	assert.Contains(t, script, "shutdown -h now")
 	assert.Contains(t, script, "sleep 60")
@@ -245,6 +318,19 @@ func TestWatchdogCloudInit(t *testing.T) {
 	// shell.
 	assert.Contains(t, script, "systemctl enable")
 	assert.Contains(t, script, "Restart=always")
+
+	// cloud-init writes the deadline as root; renewal SSHes in as the login
+	// user (non-root on AWS/GCP/Azure/OCI), so the file must be handed to that
+	// user or `echo > deadline` fails with permission denied and the
+	// self-destruct never renews.
+	assert.Contains(t, script, "chown ubuntu "+watchdogDeadlinePath)
+}
+
+func TestWatchdogCloudInit_RootLoginNeedsNoChown(t *testing.T) {
+	// Where the login user is root (Hetzner/Firecracker) the file is already
+	// root-owned, so no chown is emitted.
+	script := WatchdogCloudInit(30*time.Minute, "root")
+	assert.NotContains(t, script, "chown root")
 }
 
 func TestProviderBaseRates(t *testing.T) {
@@ -253,4 +339,42 @@ func TestProviderBaseRates(t *testing.T) {
 	assert.Greater(t, providerBaseRate(ProviderAzure), 0.0)
 	assert.Greater(t, providerBaseRate(ProviderHetzner), 0.0)
 	assert.Less(t, providerBaseRate(ProviderHetzner), providerBaseRate(ProviderAWS))
+}
+
+// rsync exits 23 (partial transfer) when a declared but optional output wasn't
+// produced by the workload — that must be classified so Artifacts can skip it
+// instead of reporting a spurious error.
+func TestRsyncExitCode(t *testing.T) {
+	assert.Equal(t, 23, rsyncExitCode(execCommandExit(t, 23)), "rsync partial-transfer code must be recognized")
+	assert.Equal(t, 1, rsyncExitCode(execCommandExit(t, 1)), "a real failure keeps its own exit code")
+	assert.Equal(t, -1, rsyncExitCode(exec.Command("dispatcher-no-such-binary-xyz").Run()),
+		"a non-exit error (binary missing) is not an exit code")
+}
+
+func execCommandExit(t *testing.T, code int) error {
+	t.Helper()
+	err := exec.Command("sh", "-c", fmt.Sprintf("exit %d", code)).Run()
+	require.Error(t, err)
+	return err
+}
+
+// The workload runs at lower CPU priority so it can't starve the on-VM control
+// plane (sshd, watchdog renewal, log streaming) under saturation.
+func TestNiceCommand_WrapsWorkload(t *testing.T) {
+	assert.Equal(t, "nice -n 10 python main.py", niceCommand("python main.py"))
+}
+
+// parseOOMEvidence confirms an OOM only from real kernel/cgroup evidence — a
+// kernel OOM-killer line or a non-zero cgroup oom_kill counter — and preserves
+// uncertainty (not OOM) when the evidence is absent.
+func TestParseOOMEvidence(t *testing.T) {
+	killLine := "[12345.6] Out of memory: Killed process 4242 (python) total-vm:16000000kB"
+	ev := parseOOMEvidence(killLine)
+	assert.True(t, ev.oomKilled, "a kernel OOM-killer line confirms OOM")
+	assert.Contains(t, ev.summary, "Killed process")
+
+	assert.True(t, parseOOMEvidence("oom_kill 3\n").oomKilled, "a non-zero cgroup oom_kill counter confirms OOM")
+	assert.False(t, parseOOMEvidence("oom_kill 0\n").oomKilled, "oom_kill 0 is not an OOM")
+	assert.False(t, parseOOMEvidence("").oomKilled, "no evidence → not OOM (preserve uncertainty)")
+	assert.False(t, parseOOMEvidence("some unrelated kernel line").oomKilled)
 }

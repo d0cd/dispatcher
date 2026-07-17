@@ -33,16 +33,26 @@ func scanSourceFiles(root string, extensions []string) []string {
 		if len(files) >= maxScanFiles {
 			return filepath.SkipAll
 		}
+		rel, _ := filepath.Rel(root, path)
+		relSlash := filepath.ToSlash(rel)
 		if info.IsDir() {
 			name := info.Name()
-			if shouldSkipDir(name) || ignored[name] {
+			// Match .dispatchignore both by bare directory name and by the
+			// root-relative path, so a multi-segment entry like "src/vendor"
+			// (which never equals a base name) still skips.
+			if shouldSkipDir(name) || ignored[name] || ignored[relSlash] {
 				return filepath.SkipDir
 			}
 			// Enforce depth limit
-			rel, _ := filepath.Rel(root, path)
 			if rel != "." && strings.Count(rel, string(os.PathSeparator)) >= maxScanDepth {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Skip symlinks (Walk reports them via Lstat, so info.IsDir is false): a
+		// repo could symlink a source-extension name at a host file and pull its
+		// contents into the inspection set.
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		ext := filepath.Ext(info.Name())
@@ -109,65 +119,4 @@ func loadIgnoreFile(root string) ([]string, map[string]bool) {
 		dirMap[normalized] = true
 	}
 	return patterns, dirMap
-}
-
-// SubWorkload represents a detected workload within a monorepo.
-type SubWorkload struct {
-	Path    string
-	Name    string
-	Runtime string
-	Kind    string
-}
-
-// DetectSubWorkloads looks for multiple workloads in subdirectories.
-// Returns nil if the directory appears to be a single project.
-func DetectSubWorkloads(root string) []SubWorkload {
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		return nil
-	}
-
-	var subs []SubWorkload
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if shouldSkipDir(name) {
-			continue
-		}
-
-		subPath := filepath.Join(root, name)
-		if hasProjectMarker(subPath) {
-			rt := DetectRuntime(subPath)
-			if rt != "unknown" {
-				subs = append(subs, SubWorkload{
-					Path:    subPath,
-					Name:    name,
-					Runtime: string(rt),
-				})
-			}
-		}
-	}
-
-	// Only return sub-workloads if we found multiple independent projects
-	if len(subs) >= 2 {
-		return subs
-	}
-	return nil
-}
-
-// hasProjectMarker checks if a directory looks like an independent project.
-func hasProjectMarker(path string) bool {
-	markers := []string{
-		"package.json", "go.mod", "Cargo.toml", "requirements.txt",
-		"pyproject.toml", "setup.py", "Gemfile", "pom.xml",
-		"build.gradle", "Dockerfile", "Makefile",
-	}
-	for _, m := range markers {
-		if fileExists(filepath.Join(path, m)) {
-			return true
-		}
-	}
-	return false
 }

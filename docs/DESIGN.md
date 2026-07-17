@@ -26,7 +26,7 @@ The reconciler audits what happened.
 
 ## What's Built
 
-### CLI Commands (20 top-level + 5 `targets` subcommands)
+### CLI Commands (22 top-level + 5 `targets` + 5 `confidential` subcommands)
 
 ```bash
 dispatcher init [path]              # Scaffold dispatcher.yaml from workload inspection
@@ -39,6 +39,7 @@ dispatcher status <run-id>          # Show run status (reconnects to live VMs)
 dispatcher logs <run-id>            # Stream logs (reconnects to live VMs)
 dispatcher cost <run-id>            # Show cost tracking
 dispatcher diagnose <run-id>        # Explain why a run failed / stalled / overran
+dispatcher trace <run-id>           # Emit a Chrome/Perfetto phase-timeline trace
 dispatcher explain <plan-id>        # Detailed plan explanation
 dispatcher list                     # List all runs with status/cost/duration
 dispatcher history                  # Historical run statistics per target
@@ -53,9 +54,11 @@ dispatcher renew <run-id>           # Extend a running cloud run's self-destruct
 dispatcher gc [--dry-run]           # Find and destroy orphaned cloud resources
 dispatcher recover                  # Inventory cloud VMs whose local record is missing
 dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to-date
+dispatcher confidential pins        # Show/pin/capture/build/check measured-image pins
+                                    #   (subcommands: pins, pin, capture, build, check)
 ```
 
-### Execution Targets (9 with adapters)
+### Execution Targets (10 with adapters)
 
 | Target | Kind | Adapter | Status |
 |--------|------|---------|--------|
@@ -63,30 +66,36 @@ dispatcher bill                     # Per-cloud dispatcher-tagged spend month-to
 | local-docker | docker | DockerAdapter | Working (needs Docker) |
 | ssh | ssh | SSHAdapter | Working (needs SSH host) |
 | lima-vm | cloud-vm | CloudVMAdapter + LimaProvider | Working (needs limactl) |
+| firecracker-vm | local-vm | CloudVMAdapter + FirecrackerProvider | Working (needs a KVM host; live-validated) |
 | kubernetes | kubernetes | K8sAdapter | Working (needs kubectl) |
-| hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Built (needs hcloud CLI) |
-| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Built (needs aws CLI) |
-| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Built (needs gcloud CLI) |
-| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Built (needs az CLI) |
+| hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated: provisioning + gc reap/safety (needs hcloud CLI) |
+| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = AWS Nitro Enclaves (`confidential.profile: nitro`, measured enclave image → PCR0), attested over aTLS and hardware-validated. |
+| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = Confidential Space (measured agent image digest, Google JWS), attested over aTLS and hardware-validated. |
+| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Live-validated: provisioning + gc reap/teardown-cascade, and a ConfidentialVM (SEV-SNP, vTPM, secure boot) create+reap. Confidential = measured direct SNP+vTPM path (`confidential.profile: azure-snp`, agent in PCR11), attested over aTLS and hardware-validated. |
 
 ### Key Features
 
 - **Workload inspection**: Recursive scanning for runtime, entrypoints, ports, GPU, secrets, data deps, monorepo detection
 - **dispatcher.yaml**: Declarative config that overrides auto-detection (name, command, GPU, service port, budget, timeout, target)
 - **Cost estimation**: Per-target rate cards, historical run data, instance catalog with ~50 cloud VM types
-- **Risk analysis**: 10 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging)
-- **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [terraform-interop.md](terraform-interop.md).
+- **Risk analysis**: 11 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging, confidential-disk-residual)
+- **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [USAGE.md](USAGE.md#bring-your-own-hosts).
 - **Policy gates**: Per-run Unix-socket approval gate. In-process approver (terminal / `--yes`) races an external `dispatcher approve <id>`; filesystem perms (0700 dir, 0600 socket) are the auth boundary.
-- **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer
-- **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits
-- **Garbage collection**: `dispatcher gc` finds orphaned VMs across all cloud providers
+- **GPU workloads**: detection → feasibility → catalog/pricing → provisioning. GCP/AWS provision GPU instances from an operator driver-baked image (`DISPATCHER_{GCP,AWS}_GPU_IMAGE`); validated end-to-end (nvidia-smi in-VM on L4/T4). k8s uses `nvidia.com/gpu` limits.
+- **Confidential computing**: typed `confidential:` requirement → TEE-capable machine selection + provisioning (GCP SEV-SNP/AMD Milan, AWS Nitro Enclaves, Azure ConfidentialVM) → per-cloud attestation verifiers (SEV-SNP with pinned AMD ARK roots, Nitro COSE with the pinned AWS root, Confidential Space JWS) delivered over an attested TLS session. All three measured backends hardware-validated. See [confidential-computing.md](confidential-computing.md).
+- **Sharding / fan-out**: `shard:`/`aggregate:` config fans a workload across N shards (fixed `count` or a `discover` command), each a full dispatcher run; bounded-parallel engine with fail/retry/continue; artifact aggregation. See [low-latency-execution.md](low-latency-execution.md).
+- **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer.
+- **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits.
+- **Garbage collection & cost audit**: `dispatcher gc` is a three-tier ownership sweep (orphan → reaped / standing → kept / external → listed) with a hard `dispatcher=true` reap boundary. Each provider enumerates its idle-billable resources (instances, disks, images, snapshots, IPs, per-run SGs/firewalls) with an estimated `$/mo`; `--warn-over` flags ongoing cost. `dispatcher bill [--all] [--by-service] [--reconcile]` reports authoritative per-cloud spend. See ROADMAP.
 - **AI planner**: Tool-use architecture with 5 tools (inspect_workload, evaluate_all_targets, find_cheapest_instances, get_run_history, inspect_run). Aitelier backend (Claude). Deterministic fallback when no LLM configured.
 
 ## Project Structure
 
 ```
 cmd/
-  dispatcher/         # CLI entry point
+  dispatcher/            # CLI entry point
+  dispatcher-attest*/    # in-TEE measured attestation agents (generic CS + azuresnp/nitro)
+  dispatcher-nitro-proxy/ # parent-side vsock<->TCP proxy for Nitro enclaves
 internal/
   cli/                # Cobra command definitions
   workload/           # Workload inspection, config loading, recursive scanning
@@ -95,15 +104,18 @@ internal/
   cost/               # Cost estimation (JSONL append-only history)
   policy/             # Policy engine and approval requirements
   risk/               # Risk analysis
-  run/                # Run state machine, executor, persistence, reconnection, cost tracking
+  run/                # Run state machine, executor, persistence, reconnection, cost tracking, trace
   approval/           # Per-run Unix-socket approval gate (audit Record embedded in run state)
   adapter/            # TargetAdapter interface, shared utilities, local/docker/ssh adapters
-  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima), watchdog, catalog
+  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima/Firecracker), watchdog, catalog, gc, bill, confidential adapters
+  attest/             # Attestation verifiers (SEV-SNP/Nitro/CS-JWS) + per-cloud aTLS validators, pinned AMD/AWS roots, in-TEE agent + attested-TLS transport
+  confidential/       # Measured-image pin registry (input-hash drift guard)
+  shard/              # Shard planning (count/discover), bounded-parallel fan-out engine
   planner/            # AI planner, tool registry, aitelier backend, MCP server
   state/              # State-dir resolution + 0700 enforcement
   dlog/               # Structured JSON log file
   types/              # Shared Go types and constants
-docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, terraform-interop (host import)
+docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, confidential-* design/plan docs
 ```
 
 ## Security

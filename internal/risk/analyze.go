@@ -90,5 +90,16 @@ func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate)
 		})
 	}
 
+	// Confidential disk-at-rest residual (N1 in docs/confidential-computing.md):
+	// a confidential VM hardware-encrypts memory, but the OS disk is not
+	// host-opaque on these providers (cloud-KMS / VMGuestStateOnly), so durable
+	// secrets written to disk remain readable by the cloud. Keep secrets in memory.
+	if w.Requirements.Confidential.Required {
+		risks = append(risks, types.Risk{
+			Category:    "confidential-disk-residual",
+			Description: "confidential VM encrypts memory, but the OS disk is not yet host-opaque (confidential OS-disk encryption is not wired) — keep durable secrets in memory (see docs/confidential-computing.md, N1)",
+		})
+	}
+
 	return risks
 }

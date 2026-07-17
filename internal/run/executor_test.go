@@ -3,8 +3,10 @@ package run
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -31,18 +33,25 @@ func TestSaveRunLogsFailure(t *testing.T) {
 
 // mockAdapter is a configurable adapter for executor testing.
 type mockAdapter struct {
-	id             string
-	validateErr    error
-	validateResult types.ValidationResult
-	prepareErr     error
-	executeErr     error
-	statusResult   types.RunState
-	statusErr      error
-	cleanupResult  *adapter.CleanupResult
-	cleanupErr     error
-	cleanupCalls   int
-	executePanic   bool
-	executed       bool // set true on Execute; used to assert non-invocation
+	id                 string
+	validateErr        error
+	validateResult     types.ValidationResult
+	prepareErr         error
+	executeErr         error
+	statusResult       types.RunState
+	statusErr          error
+	statusErrsThenOK   int              // return a transient error for the first N Status calls, then statusResult
+	statusSequence     []types.RunState // when set, Status returns successive elements (clamped to last)
+	statusCalls        int
+	terminateCalls     int
+	cleanupResult      *adapter.CleanupResult
+	cleanupErr         error
+	cleanupCalls       int
+	executePanic       bool
+	executed           bool  // set true on Execute; used to assert non-invocation
+	artifactErr        error // when set, Artifacts always fails with it
+	artifactErrsThenOK int   // fail the first N Artifacts calls, then succeed
+	artifactCalls      int
 }
 
 func newMockAdapter() *mockAdapter {
@@ -75,6 +84,17 @@ func (m *mockAdapter) Execute(_ context.Context, _ *types.Plan) (*adapter.RunHan
 	return &adapter.RunHandle{ID: "mock-handle", TargetID: m.id, State: "opaque"}, nil
 }
 func (m *mockAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.RunState, error) {
+	m.statusCalls++
+	if m.statusErrsThenOK > 0 && m.statusCalls <= m.statusErrsThenOK {
+		return types.RunStateExecutionFailed, fmt.Errorf("transient status error #%d", m.statusCalls)
+	}
+	if len(m.statusSequence) > 0 {
+		idx := m.statusCalls - 1
+		if idx >= len(m.statusSequence) {
+			idx = len(m.statusSequence) - 1
+		}
+		return m.statusSequence[idx], m.statusErr
+	}
 	return m.statusResult, m.statusErr
 }
 func (m *mockAdapter) Logs(_ context.Context, _ *adapter.RunHandle, w io.Writer) error {
@@ -82,12 +102,41 @@ func (m *mockAdapter) Logs(_ context.Context, _ *adapter.RunHandle, w io.Writer)
 	return nil
 }
 func (m *mockAdapter) Artifacts(_ context.Context, _ *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
-	return nil, nil
+	m.artifactCalls++
+	if m.artifactErrsThenOK > 0 && m.artifactCalls <= m.artifactErrsThenOK {
+		return nil, fmt.Errorf("transient artifact transport error #%d", m.artifactCalls)
+	}
+	if m.artifactErr != nil {
+		return nil, m.artifactErr
+	}
+	return []adapter.ArtifactRef{{Name: "collected"}}, nil
 }
-func (m *mockAdapter) Terminate(_ context.Context, _ *adapter.RunHandle) error { return nil }
+func (m *mockAdapter) Terminate(_ context.Context, _ *adapter.RunHandle) error {
+	m.terminateCalls++
+	return nil
+}
 func (m *mockAdapter) Cleanup(_ context.Context, _ *adapter.RunHandle) (*adapter.CleanupResult, error) {
 	m.cleanupCalls++
 	return m.cleanupResult, m.cleanupErr
+}
+
+type durableEphemeralMock struct {
+	*mockAdapter
+	watchdogCalls atomic.Int32
+}
+
+func (m *durableEphemeralMock) Reconnect(_ context.Context, handleID string, _ json.RawMessage) (*adapter.RunHandle, error) {
+	return &adapter.RunHandle{ID: handleID, TargetID: m.id, State: "opaque"}, nil
+}
+func (m *durableEphemeralMock) ExtendWatchdog(_ context.Context, _ *adapter.RunHandle, ttl time.Duration) (time.Time, error) {
+	m.watchdogCalls.Add(1)
+	return time.Now().Add(ttl), nil
+}
+func (m *durableEphemeralMock) ListResources(_ context.Context) ([]adapter.ResourceInfo, error) {
+	return nil, nil
+}
+func (m *durableEphemeralMock) DestroyResource(_ context.Context, _ adapter.ResourceInfo) error {
+	return nil
 }
 
 func executorTestPlan() *types.Plan {
@@ -109,6 +158,81 @@ func executorTestPlan() *types.Plan {
 			EstimatedCost: types.CostEstimate{Value: 0, Currency: "USD", Confidence: types.ConfidenceHigh},
 		},
 	}
+}
+
+// persistObserverAdapter records, at Execute time, whether a non-terminal run
+// record for this plan was already on disk — i.e. whether a concurrent gc's
+// active-run protection (keyed off PlanID, built from persisted records) would
+// have covered the VM Execute is about to provision.
+type persistObserverAdapter struct {
+	*mockAdapter
+	recordPersistedAtExecute bool
+}
+
+func (m *persistObserverAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
+	ids, _ := ListRecords()
+	for _, id := range ids {
+		if rec, err := LoadRecord(id); err == nil && rec.PlanID == p.Metadata.ID && !rec.State.IsTerminal() {
+			m.recordPersistedAtExecute = true
+		}
+	}
+	return m.mockAdapter.Execute(ctx, p)
+}
+
+// A concurrent `dispatcher gc` builds its active-run set from persisted records
+// and keys protection off PlanID. If the run record is not persisted until AFTER
+// adapter.Execute returns (which for a cloud/confidential run is the entire
+// provision + sealed run), gc sees no record for the live VM's plan id,
+// misclassifies the dispatcher-owned VM as an orphan, and destroys it mid-run.
+// A non-terminal record must therefore be on disk before Execute is called.
+func TestExecutor_PersistsRunRecordBeforeProvisioning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := &persistObserverAdapter{mockAdapter: newMockAdapter()}
+	ex := NewExecutor(m)
+	r := NewRun(executorTestPlan())
+	require.NoError(t, ex.Execute(context.Background(), r, io.Discard))
+	assert.True(t, m.recordPersistedAtExecute,
+		"a non-terminal run record must be persisted before adapter.Execute so a concurrent gc won't reap the live VM")
+}
+
+// A transient artifact-transport blip must not lose a finished job's outputs:
+// collection is retried with bounded backoff, so an early failure that later
+// succeeds still delivers the artifacts and the run completes normally.
+func TestExecutor_ArtifactCollection_RetriesTransient(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prev := SetArtifactRetryInterval(time.Millisecond)
+	defer func() { SetArtifactRetryInterval(prev) }()
+
+	mock := newMockAdapter()
+	mock.artifactErrsThenOK = 2 // first two collections fail, the third succeeds
+	ex := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	require.NoError(t, ex.Execute(context.Background(), r, io.Discard))
+	assert.Equal(t, types.RunStateCompleted, r.GetState())
+	require.Len(t, r.Artifacts, 1, "the retried collection must still deliver the outputs")
+	assert.Equal(t, 3, mock.artifactCalls, "collection retried until it succeeded")
+	assert.Greater(t, mock.cleanupCalls, 0, "a fully-collected run tears down normally")
+}
+
+// When output retrieval fails after retries, dispatcher must NOT destroy the VM
+// (that would lose a finished job's outputs). The run ends in ArtifactFailed with
+// the VM preserved (not torn down), and it is NOT relabeled a workload failure.
+func TestExecutor_ArtifactCollection_PreservesVMOnPersistentFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prev := SetArtifactRetryInterval(time.Millisecond)
+	defer func() { SetArtifactRetryInterval(prev) }()
+
+	mock := newMockAdapter()
+	mock.artifactErr = fmt.Errorf("scp connection reset")
+	ex := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := ex.Execute(context.Background(), r, io.Discard)
+	require.Error(t, err, "a failed output retrieval must surface, not be swallowed")
+	assert.Equal(t, types.RunStateArtifactFailed, r.GetState(), "artifact retrieval failed — not a workload failure")
+	assert.NotEqual(t, types.RunStateExecutionFailed, r.GetState())
+	assert.Equal(t, 0, mock.cleanupCalls, "the VM must be preserved (not destroyed) so outputs can still be recovered")
 }
 
 func TestExecutor_HappyPath(t *testing.T) {
@@ -170,12 +294,33 @@ func TestExecutor_ExecuteFailure(t *testing.T) {
 
 	err := exec.Execute(context.Background(), r, io.Discard)
 	assert.Error(t, err)
-	assert.Equal(t, types.RunStateExecutionFailed, r.GetState())
+	assert.Equal(t, types.RunStateProvisioningFailed, r.GetState(), "an adapter.Execute failure is a provisioning failure")
+}
+
+// A single transient Status error while polling must NOT tear down a healthy
+// run — the executor tolerates a bounded number of consecutive transient errors.
+func TestExecutor_ToleratesTransientStatusErrors(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	mock := newMockAdapter()
+	mock.statusErrsThenOK = 3 // three transient blips, then the workload is done
+	mock.statusResult = types.RunStateCompleted
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.NoError(t, err, "transient status errors must be tolerated, not terminal")
+	assert.Equal(t, types.RunStateCompleted, r.GetState())
 }
 
 func TestExecutor_StatusFailure_CleanupStillRuns(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
 
 	mock := newMockAdapter()
 	mock.statusErr = fmt.Errorf("status check failed")
@@ -227,12 +372,108 @@ func TestExecutor_PanicRecovery(t *testing.T) {
 	exec := NewExecutor(mock)
 	r := NewRun(executorTestPlan())
 
-	// Should NOT panic — executor recovers
+	// Should NOT panic — executor recovers — but must surface the crash as an
+	// error so the caller (and process exit code) doesn't mistake it for success.
+	var err error
 	assert.NotPanics(t, func() {
-		_ = exec.Execute(context.Background(), r, io.Discard)
+		err = exec.Execute(context.Background(), r, io.Discard)
 	})
+	require.Error(t, err, "a recovered panic must be returned as an error, not nil")
+	assert.Contains(t, err.Error(), "panic")
 	assert.Equal(t, types.RunStateExecutionFailed, r.GetState())
 	assert.Contains(t, r.Error, "panic")
+}
+
+// TestExecutor_PollsUntilTerminal covers the durable-adapter contract: a
+// poll-based Status (cloud VM / k8s) returns Running until the workload
+// finishes. The executor must keep polling instead of tearing the run down on
+// the first Running reading.
+func TestExecutor_PollsUntilTerminal(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	mock := newMockAdapter()
+	mock.statusSequence = []types.RunState{
+		types.RunStateRunning,
+		types.RunStateRunning,
+		types.RunStateCompleted,
+	}
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateCompleted, r.GetState())
+	assert.GreaterOrEqual(t, mock.statusCalls, 3, "executor must poll Status until terminal, not tear down on first Running")
+}
+
+func TestExecutor_EphemeralDurableRunRenewsWatchdogWhileRunning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	base := newMockAdapter()
+	base.statusSequence = make([]types.RunState, 31)
+	for i := range base.statusSequence[:30] {
+		base.statusSequence[i] = types.RunStateRunning
+	}
+	base.statusSequence[30] = types.RunStateCompleted
+	mock := &durableEphemeralMock{mockAdapter: base}
+
+	p := executorTestPlan()
+	p.Constraints.WatchdogTTL = 9 * time.Millisecond
+	r := NewRun(p)
+	require.NoError(t, NewExecutor(mock).Execute(context.Background(), r, io.Discard))
+
+	assert.GreaterOrEqual(t, mock.watchdogCalls.Load(), int32(2),
+		"an attached durable ephemeral run must renew beyond its initial watchdog deadline")
+}
+
+// TestExecutor_PollRespectsContextCancel: a workload that never terminates must
+// stop polling when the context is canceled, and cleanup must still run.
+func TestExecutor_PollRespectsContextCancel(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	mock := newMockAdapter()
+	mock.statusResult = types.RunStateRunning // never terminal
+	exec := NewExecutor(mock)
+	r := NewRun(executorTestPlan())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		cancel()
+	}()
+
+	err := exec.Execute(ctx, r, io.Discard)
+	assert.Error(t, err)
+	assert.True(t, mock.cleanupCalls > 0, "cleanup must run when polling is canceled")
+}
+
+// TestExecutor_PollRespectsMaxDuration: a workload that never terminates must be
+// terminated and reported failed once MaxDuration elapses.
+func TestExecutor_PollRespectsMaxDuration(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	restore := SetStatusPollInterval(time.Millisecond)
+	defer SetStatusPollInterval(restore)
+
+	mock := newMockAdapter()
+	mock.statusResult = types.RunStateRunning // never terminal
+	exec := NewExecutor(mock)
+	p := executorTestPlan()
+	p.Constraints.MaxDuration = 15 * time.Millisecond
+	r := NewRun(p)
+
+	err := exec.Execute(context.Background(), r, io.Discard)
+	assert.Error(t, err)
+	assert.True(t, mock.terminateCalls > 0, "workload must be terminated when MaxDuration elapses")
+	assert.True(t, mock.cleanupCalls > 0, "cleanup must run after MaxDuration timeout")
 }
 
 func TestExecutor_ApprovalDenied(t *testing.T) {

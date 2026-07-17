@@ -1,6 +1,8 @@
 package run
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/d0cd/dispatcher/internal/approval"
@@ -20,6 +22,12 @@ func TestRunSaveAndLoad(t *testing.T) {
 	path, err := r.Save()
 	require.NoError(t, err)
 	assert.FileExists(t, path)
+
+	// Run records carry HandleState (SSH key paths) and the approval audit trail,
+	// so the persisted file must be owner-only 0600.
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "run records must be 0600")
 
 	loaded, err := LoadRecord(r.ID)
 	require.NoError(t, err)
@@ -106,4 +114,43 @@ func TestRunSaveWithError(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, types.RunStateExecutionFailed, loaded.State)
 	assert.NotEmpty(t, loaded.Error)
+}
+
+// RecoverPlanID must extract the plan id even from a truncated/corrupt record so
+// gc can protect a live run whose record file is damaged.
+func TestLoadRecordByPlanID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p := &types.Plan{Metadata: types.PlanMetadata{ID: "plan_abc"}, Recommendation: &types.Recommendation{Target: "aws-vm"}}
+	r := NewRun(p)
+	_, err := r.Save()
+	require.NoError(t, err)
+
+	// A VM's dispatcher-run-id tag carries the plan id; resolving by it must find
+	// the record even though its filename is the (distinct) run id.
+	require.NotEqual(t, r.ID, r.PlanID)
+	got, err := LoadRecordByPlanID("plan_abc")
+	require.NoError(t, err)
+	assert.Equal(t, r.ID, got.ID)
+
+	_, err = LoadRecordByPlanID("plan_missing")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestRecoverPlanID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p := &types.Plan{Metadata: types.PlanMetadata{ID: "plan_live"}, Recommendation: &types.Recommendation{Target: "aws-vm"}}
+	r := NewRun(p)
+	_, err := r.Save()
+	require.NoError(t, err)
+
+	assert.Equal(t, "plan_live", RecoverPlanID(r.ID), "recovers from a valid record")
+
+	// Truncate the record mid-JSON (crash / schema drift) — plan id still recovers.
+	dir, _ := StoreDir()
+	path := filepath.Join(dir, r.ID+".json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"id":"`+r.ID+`","planId":"plan_live","state":"run`), 0o600))
+	_, loadErr := LoadRecord(r.ID)
+	require.Error(t, loadErr, "the truncated record must be unparseable")
+	assert.Equal(t, "plan_live", RecoverPlanID(r.ID), "recovers from a truncated record")
 }

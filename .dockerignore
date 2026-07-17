@@ -1,0 +1,13 @@
+.git
+.github
+.claude
+experiments
+runs
+tmp
+docs
+*.md
+dispatcher
+*.test
+.dispatcher
+.env
+.env.*

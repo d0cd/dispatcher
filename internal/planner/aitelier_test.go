@@ -28,6 +28,9 @@ type stubAitelier struct {
 	response map[string]any
 	// status overrides the default 200 status code on /v1/chat/completions.
 	status int
+	// rawChatBody, when non-empty, is written verbatim as the chat response body
+	// (bypassing JSON encoding) so tests can serve a malformed 2xx payload.
+	rawChatBody string
 
 	healthOK      bool
 	discoveryBody map[string]any
@@ -106,6 +109,10 @@ func newStubAitelier(t *testing.T) *stubAitelier {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(stub.status)
+		if stub.rawChatBody != "" {
+			_, _ = w.Write([]byte(stub.rawChatBody))
+			return
+		}
 		_ = json.NewEncoder(w).Encode(stub.response)
 	})
 	mux.HandleFunc("/v1/runs/active", func(w http.ResponseWriter, r *http.Request) {
@@ -150,6 +157,24 @@ func TestAtelierBackend_CheckAvailable_DownReturnsError(t *testing.T) {
 	b := NewAtelierBackend(AtelierConfig{BaseURL: stub.server.URL})
 	err := b.CheckAvailable(context.Background())
 	require.Error(t, err)
+}
+
+func TestAtelierBackend_RejectsRemoteCleartextURL(t *testing.T) {
+	b := NewAtelierBackend(AtelierConfig{
+		BaseURL: "http://aitelier.example.test:7777",
+		APIKey:  "must-not-be-sent",
+	})
+	err := b.CheckAvailable(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTPS")
+}
+
+func TestAtelierBackend_AllowsLoopbackHTTPAndRemoteHTTPS(t *testing.T) {
+	for _, raw := range []string{"http://127.0.0.1:7777", "http://localhost:7777", "https://aitelier.example.test"} {
+		got, err := validateAtelierBaseURL(raw)
+		require.NoError(t, err, raw)
+		assert.Equal(t, raw, got)
+	}
 }
 
 func TestAtelierBackend_Chat_SendsChatCompletionWithAitelierBlock(t *testing.T) {
@@ -209,6 +234,30 @@ func TestAtelierBackend_Chat_SendsChatCompletionWithAitelierBlock(t *testing.T) 
 	for _, key := range []string{"explanation", "recommendation", "alternatives", "rejected", "risks", "approvals", "suggestions", "toolsUsed"} {
 		_, present := props[key]
 		assert.True(t, present, "schema missing %q", key)
+	}
+}
+
+// A 2xx response whose body fails to decode must surface as an error, not hang
+// the caller. runAIPlan passes a non-cancellable context, so a worker that
+// returns without sending on resCh would block Chat forever.
+func TestAtelierBackend_Chat_UndecodableBodyReturnsError(t *testing.T) {
+	stub := newStubAitelier(t)
+	stub.rawChatBody = "this is not json"
+	tools, _ := setupTestEnv(t)
+	b := NewAtelierBackend(AtelierConfig{BaseURL: stub.server.URL, ToolRegistry: tools})
+
+	done := make(chan struct{})
+	var err error
+	go func() {
+		_, err = b.Chat(context.Background(), []Message{{Role: "user", Content: "x"}}, tools.Definitions())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		require.Error(t, err, "an undecodable 2xx body must return an error")
+	case <-time.After(3 * time.Second):
+		t.Fatal("Chat hung on an undecodable response body instead of returning an error")
 	}
 }
 

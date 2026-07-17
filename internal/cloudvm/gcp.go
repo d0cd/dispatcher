@@ -28,6 +28,13 @@ func NewGCPProvider(project, zone string) *GCPProvider {
 
 func (g *GCPProvider) Name() ProviderID { return ProviderGCP }
 
+// SetRegion re-points the default zone (GCP uses the region field as a zone).
+func (g *GCPProvider) SetRegion(region string) {
+	if region != "" {
+		g.zone = region
+	}
+}
+
 func (g *GCPProvider) CheckCLI(ctx context.Context) error {
 	if _, err := exec.LookPath("gcloud"); err != nil {
 		return fmt.Errorf("gcloud CLI not found: %w", err)
@@ -40,6 +47,12 @@ func (g *GCPProvider) CheckCLI(ctx context.Context) error {
 }
 
 func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
+	// Confidential Space is a distinct provisioning mode: the workload is a
+	// measured container launched via tee-image-reference, not an SSH VM.
+	if opts.ConfidentialSpaceImage != "" {
+		return g.createConfidentialSpaceVM(ctx, opts)
+	}
+
 	zone := opts.Region
 	if zone == "" {
 		zone = g.zone
@@ -47,10 +60,27 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	instanceType := opts.InstanceType
 	if instanceType == "" {
 		instanceType = "e2-medium"
+		if opts.ConfidentialType != "" {
+			// e2 rejects --confidential-compute-type/--min-cpu-platform. n2d
+			// covers SEV/SEV-SNP; TDX needs an Intel c3.
+			instanceType = "n2d-standard-2"
+			if gcpConfidentialComputeType(opts.ConfidentialType) == "TDX" {
+				instanceType = "c3-standard-4"
+			}
+		}
 	}
 	image := opts.Image
+	customImage := false
 	if image == "" {
-		image = "ubuntu-2404-lts"
+		// Ubuntu 24.04 publishes arch-suffixed families; the bare
+		// "ubuntu-2404-lts" is not a resolvable family in ubuntu-os-cloud.
+		image = "ubuntu-2404-lts-amd64"
+		if gcpIsGPUMachine(instanceType) && gcpGPUImage() != "" {
+			// GPU VMs need the NVIDIA driver preinstalled; the operator supplies
+			// a driver-baked image (in the current project).
+			image = gcpGPUImage()
+			customImage = true
+		}
 	}
 	if err := validateVMArgs(zone, instanceType, image); err != nil {
 		return nil, fmt.Errorf("gcp: %w", err)
@@ -60,25 +90,55 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"compute", "instances", "create", opts.Name,
 		"--zone", zone,
 		"--machine-type", instanceType,
-		"--image-family", image,
-		"--image-project", "ubuntu-os-cloud",
 		"--format", "json",
 		"--quiet",
+	}
+	if customImage {
+		args = append(args, "--image", image) // resolves in the current project
+	} else {
+		args = append(args, "--image-family", image, "--image-project", "ubuntu-os-cloud")
+	}
+
+	args = append(args, gcpConfidentialArgs(opts)...)
+
+	// GPU VMs can't live-migrate, so GCP requires TERMINATE on host maintenance
+	// or rejects the create. Confidential already sets it (above); apply it here
+	// for GPU machine families when it hasn't been set.
+	if opts.ConfidentialType == "" && gcpIsGPUMachine(instanceType) {
+		args = append(args, "--maintenance-policy=TERMINATE")
 	}
 
 	if g.project != "" {
 		args = append(args, "--project", g.project)
 	}
+	// --metadata k=<blob> would let any byte in a value (newline, =, --) corrupt
+	// or inject gcloud args. --metadata-from-file keeps blobs entirely off argv
+	// and out of process listings. Multiple entries are comma-joined into one
+	// flag (a repeated --metadata-from-file would otherwise clobber the prior).
+	var metadataFiles []string
 	if opts.UserData != "" {
-		// --metadata startup-script=<blob> would let any byte in UserData
-		// (newline, =, --) corrupt or inject gcloud args. --metadata-from-file
-		// keeps the blob entirely off argv and out of process listings.
 		path, err := adapter.WriteSecureTempFile("dispatcher-gcp-userdata-*.sh", []byte(opts.UserData))
 		if err != nil {
 			return nil, fmt.Errorf("write user-data: %w", err)
 		}
 		defer os.Remove(path)
-		args = append(args, "--metadata-from-file", "startup-script="+path)
+		metadataFiles = append(metadataFiles, "startup-script="+path)
+	}
+	if opts.SSHKeyPath != "" && opts.SSHUser != "" {
+		pub, err := os.ReadFile(opts.SSHKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("read ssh pubkey: %w", err)
+		}
+		keysPath, err := adapter.WriteSecureTempFile("dispatcher-gcp-sshkeys-*.txt",
+			[]byte(gcpSSHKeysValue(opts.SSHUser, string(pub))))
+		if err != nil {
+			return nil, fmt.Errorf("write ssh-keys metadata: %w", err)
+		}
+		defer os.Remove(keysPath)
+		metadataFiles = append(metadataFiles, "ssh-keys="+keysPath)
+	}
+	if len(metadataFiles) > 0 {
+		args = append(args, "--metadata-from-file", strings.Join(metadataFiles, ","))
 	}
 
 	// GCP labels: validated at the boundary so a key/value with a comma or
@@ -105,6 +165,11 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	output, err := retryCLIOutput(ctx, "gcloud", "gcloud compute instances create", args...)
 	if err != nil {
+		// A transient error after the instance was created would otherwise leak a
+		// billing VM; adopt it if the retry-then-"already exists" left one behind.
+		if vm := adoptCreatedVM(ctx, g, opts.Tags["dispatcher-run-id"]); vm != nil {
+			return vm, nil
+		}
 		return nil, err
 	}
 
@@ -156,7 +221,12 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 	if g.project != "" {
 		args = append(args, "--project", g.project)
 	}
-	out, err := runCLI(ctx, "gcloud", args...)
+	var out []byte
+	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+		var runErr error
+		out, runErr = runCLI(ctx, "gcloud", args...)
+		return runErr
+	})
 	if err != nil {
 		return g.zone
 	}
@@ -174,6 +244,66 @@ func (g *GCPProvider) resolveZone(ctx context.Context, vmID string) string {
 	return zone
 }
 
+// gcpGPUImage is the operator-provided driver-baked image for GPU VMs (in the
+// current project). Empty = fall back to stock Ubuntu (no driver).
+func gcpGPUImage() string { return os.Getenv("DISPATCHER_GCP_GPU_IMAGE") }
+
+// gcpIsGPUMachine reports whether instanceType is a GCP machine family that
+// carries attached GPUs (a2/a3 = A100/H100, g2 = L4), which mandates a
+// TERMINATE maintenance policy.
+func gcpIsGPUMachine(instanceType string) bool {
+	for _, prefix := range []string{"a2-", "a3-", "g2-"} {
+		if strings.HasPrefix(instanceType, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// gcpSSHKeysValue formats a public key for GCP's ssh-keys metadata, which binds
+// the key to a login user as "<user>:<pubkey>". The guest agent then creates the
+// user (if needed) and installs the key. The trailing newline from a .pub file
+// is stripped so the metadata value is a single clean line.
+func gcpSSHKeysValue(user, pubKey string) string {
+	return user + ":" + strings.TrimSpace(pubKey)
+}
+
+// gcpConfidentialArgs returns the GCP create flags for a confidential VM (or
+// nil for a non-confidential one). Confidential VMs can't live-migrate, so
+// maintenance must TERMINATE. The catalog picks a compatible machine type
+// (n2d for SEV/SEV-SNP, c3 for TDX); if it doesn't, gcloud errors honestly.
+func gcpConfidentialArgs(opts VMOptions) []string {
+	if opts.ConfidentialType == "" {
+		return nil
+	}
+	ccType := gcpConfidentialComputeType(opts.ConfidentialType)
+	args := []string{
+		"--confidential-compute-type=" + ccType,
+		"--maintenance-policy=TERMINATE",
+	}
+	if ccType == "SEV_SNP" {
+		// SEV-SNP needs AMD Milan or newer. Without pinning the CPU platform an
+		// N2D instance can schedule onto AMD Rome, which supports only SEV — the
+		// VM would boot but never produce an SNP attestation report.
+		args = append(args, "--min-cpu-platform", "AMD Milan")
+	}
+	return args
+}
+
+// gcpConfidentialComputeType maps a dispatcher TEE type to GCP's
+// --confidential-compute-type value. "any" and "sev-snp" both pick SEV_SNP
+// (AMD's strongest); SEV and TDX map through.
+func gcpConfidentialComputeType(t string) string {
+	switch t {
+	case "sev":
+		return "SEV"
+	case "tdx":
+		return "TDX"
+	default: // "sev-snp", "any"
+		return "SEV_SNP"
+	}
+}
+
 func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 	args := []string{
 		"compute", "instances", "describe", vmID,
@@ -186,7 +316,10 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 
 	output, err := runCLI(ctx, "gcloud", args...)
 	if err != nil {
-		return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		if isVMNotFound(err, vmID) {
+			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		}
+		return nil, wrapExecError("gcloud compute instances describe", err)
 	}
 
 	var inst struct {
@@ -215,6 +348,11 @@ func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
 		args = append(args, "--project", g.project)
 	}
 	if _, err := runCLI(ctx, "gcloud", args...); err != nil {
+		// Already gone — teardown is idempotent (matches OCI + the GetVM contract),
+		// so a retried/racing gc pass doesn't report a spurious cleanup failure.
+		if isVMNotFound(err, vmID) {
+			return nil
+		}
 		return fmt.Errorf("gcloud compute instances delete failed: %w", err)
 	}
 	return nil

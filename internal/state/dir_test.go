@@ -89,3 +89,30 @@ func resolved(t *testing.T, p string) string {
 	require.NoError(t, err)
 	return out
 }
+
+// ensureSecureDir must tighten a pre-existing world-accessible state dir to 0700,
+// so a dir left loose by an earlier umask/version can't leak run state (SSH keys,
+// approval records) to other local users.
+func TestEnsureSecureDir_TightensLoosePerms(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	require.NoError(t, os.MkdirAll(dir, 0o755)) // group/world-readable
+	require.NoError(t, ensureSecureDir(dir))
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(), "a pre-existing loose state dir is tightened to 0700")
+}
+
+func TestEnsureSecureDir_RejectsNonDir(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "afile")
+	require.NoError(t, os.WriteFile(f, []byte("x"), 0o600))
+	require.Error(t, ensureSecureDir(f), "a non-directory path must fail closed")
+}
+
+// validateHomeOverride is the DISPATCHER_HOME guard: it must reject a relative
+// path and any traversal segment, so the override can't be aimed outside an
+// intended tree.
+func TestValidateHomeOverride(t *testing.T) {
+	require.Error(t, validateHomeOverride("relative/path"), "must be absolute")
+	require.Error(t, validateHomeOverride("/abs/../escape"), "must reject a .. segment")
+	require.NoError(t, validateHomeOverride("/abs/clean/path"))
+}

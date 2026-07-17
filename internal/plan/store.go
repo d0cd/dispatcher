@@ -93,23 +93,3 @@ func Load(id string) (*types.Plan, error) {
 
 	return &p, nil
 }
-
-func ListSaved() ([]string, error) {
-	dir, err := StoreDir()
-	if err != nil {
-		return nil, err
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	var ids []string
-	for _, e := range entries {
-		if filepath.Ext(e.Name()) == ".json" {
-			ids = append(ids, e.Name()[:len(e.Name())-5])
-		}
-	}
-	return ids, nil
-}

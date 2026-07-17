@@ -68,6 +68,27 @@ func TestHetznerFetcher_ParseWithLocationFilter(t *testing.T) {
 	assert.InDelta(t, 0.007, instances[0].PricePerHour, 1e-6, "location filter should pin to fsn1")
 }
 
+func TestHetznerFetcher_LocationFilterExcludesUnavailableTypes(t *testing.T) {
+	raw := []byte(`[
+		{
+			"name": "cx53", "cores": 16, "memory": 32.0, "architecture": "x86", "deprecated": false,
+			"prices": [{"location": "hel1", "price_hourly": {"gross": "0.0561000000"}}],
+			"locations": [{"name": "hel1", "available": false, "recommended": false}]
+		},
+		{
+			"name": "cpx62", "cores": 16, "memory": 32.0, "architecture": "x86", "deprecated": false,
+			"prices": [{"location": "hel1", "price_hourly": {"gross": "0.2452000000"}}],
+			"locations": [{"name": "hel1", "available": true, "recommended": true}]
+		}
+	]`)
+
+	instances, err := parseHetznerServerTypes(raw, "hel1")
+	require.NoError(t, err)
+	require.Len(t, instances, 1)
+	assert.Equal(t, "cpx62", instances[0].Name,
+		"a price row is not proof that a retired type can still be provisioned")
+}
+
 func TestHetznerFetcher_ParseEmpty(t *testing.T) {
 	instances, err := parseHetznerServerTypes([]byte(`[]`), "")
 	require.NoError(t, err)
@@ -664,6 +685,36 @@ func TestNewLiveCatalog_SkipsMissingCreds(t *testing.T) {
 	assert.Equal(t, ProviderAWS, skipped[0].Provider)
 	assert.Contains(t, skipped[0].Reason, "credentials")
 	assert.False(t, providerSet(cat.instances)[ProviderAWS], "skipped providers contribute no instances")
+}
+
+func TestNewLiveCatalog_EmptyFetchIsSkippedNotGPUSeeded(t *testing.T) {
+	// A fetch that returns zero instances (e.g. the AWS bulk price list is too
+	// large to parse within the timeout) must be treated as a skip. Otherwise
+	// seedStaticGPU back-fills only the provider's static GPU instances, leaving
+	// a GPU-only catalog that mis-recommends a GPU box for a plain workload.
+	cat, skipped, err := NewLiveCatalog(context.Background(),
+		&fakeFetcher{provider: ProviderAWS}, // 0 instances, no error
+	)
+	require.NoError(t, err)
+	require.Len(t, skipped, 1)
+	assert.Equal(t, ProviderAWS, skipped[0].Provider)
+	assert.Empty(t, cat.FindCheapestForProvider(ProviderAWS, InstanceRequirements{GPUCount: 1}),
+		"an empty fetch must not be back-filled with static GPU instances")
+}
+
+// A live feed returns only general-purpose rows (no feed sets Confidential), so
+// the static confidential SKU must be back-filled — otherwise a confidential run
+// finds no catalog match and falls back to the coarse rate card.
+func TestNewLiveCatalog_SeedsConfidentialSKUs(t *testing.T) {
+	cat, _, err := NewLiveCatalog(context.Background(),
+		&fakeFetcher{provider: ProviderAzure, instances: []InstanceType{
+			{Name: "Standard_D2s_v3", Provider: ProviderAzure, VCPUs: 2, MemoryGB: 8, PricePerHour: 0.096, Arch: "x86_64"},
+		}},
+	)
+	require.NoError(t, err)
+	conf := cat.FindCheapestForProvider(ProviderAzure, InstanceRequirements{Confidential: true})
+	require.NotEmpty(t, conf, "the confidential SKU must be back-filled for a fetched provider")
+	assert.True(t, conf[0].Confidential, "the seeded SKU is the confidential one")
 }
 
 func TestNewLiveCatalog_SkipsOnTransientError(t *testing.T) {

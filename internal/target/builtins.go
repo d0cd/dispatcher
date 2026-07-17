@@ -1,6 +1,8 @@
 package target
 
-import "github.com/d0cd/dispatcher/internal/types"
+import (
+	"github.com/d0cd/dispatcher/internal/types"
+)
 
 // BuiltinTargets returns the built-in target definitions.
 func BuiltinTargets() []types.TargetConfig {
@@ -85,6 +87,42 @@ func BuiltinTargets() []types.TargetConfig {
 					types.WorkloadKindJob,
 					types.WorkloadKindContainer,
 					types.WorkloadKindService,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU:    types.GPUCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   false,
+					PrivateVPCAccess: false,
+					StaticEgressIP:   false,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: false,
+					RateCard:      "local",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
+		{
+			// Local Firecracker microVMs: a KVM-backed local backend for fast,
+			// isolated short jobs. Requires a Linux host with /dev/kvm.
+			ID:      "firecracker-vm",
+			Kind:    types.TargetKindLocalVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
 				},
 				Resources: types.ResourceCapability{
 					CPU:    true,
@@ -206,6 +244,10 @@ func BuiltinTargets() []types.TargetConfig {
 						Supported: true,
 						Models:    []string{"t4", "a10g", "a100"},
 					},
+					Confidential: types.ConfidentialCapability{
+						Supported: true,
+						Types:     []string{"sev-snp"},
+					},
 				},
 				Networking: types.NetworkingCapability{
 					PublicEndpoint:   true,
@@ -245,6 +287,14 @@ func BuiltinTargets() []types.TargetConfig {
 					GPU: types.GPUCapability{
 						Supported: true,
 						Models:    []string{"l4", "a100", "h100"},
+					},
+					Confidential: types.ConfidentialCapability{
+						Supported: true,
+						// dispatcher's GCP confidential path is Confidential Space, which
+						// provisions plain SEV — so a sev-snp/tdx request is rejected at
+						// plan time rather than silently downgraded (use azure-snp / aws
+						// for SEV-SNP). See internal/attest/confidential_space.go.
+						Types: []string{"sev"},
 					},
 				},
 				Networking: types.NetworkingCapability{
@@ -286,6 +336,10 @@ func BuiltinTargets() []types.TargetConfig {
 						Supported: true,
 						Models:    []string{"t4", "a100"},
 					},
+					Confidential: types.ConfidentialCapability{
+						Supported: true,
+						Types:     []string{"sev-snp", "tdx"},
+					},
 				},
 				Networking: types.NetworkingCapability{
 					PublicEndpoint:   true,
@@ -322,10 +376,11 @@ func BuiltinTargets() []types.TargetConfig {
 				Resources: types.ResourceCapability{
 					CPU:    true,
 					Memory: true,
-					GPU: types.GPUCapability{
-						Supported: true,
-						Models:    []string{"a100"},
-					},
+					// Hetzner Cloud has no GPU server type (see the cloudvm catalog and
+					// rate card, which carry no Hetzner GPU SKU). Advertising one would
+					// let the planner price a GPU workload CPU-only and recommend a
+					// target that run then refuses to provision.
+					GPU: types.GPUCapability{Supported: false},
 				},
 				Networking: types.NetworkingCapability{
 					PublicEndpoint:   true,
@@ -336,6 +391,47 @@ func BuiltinTargets() []types.TargetConfig {
 					CostEstimate:  true,
 					ActualBilling: true,
 					RateCard:      "hetzner",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
+		{
+			ID:      "oci-vm",
+			Kind:    types.TargetKindCloudVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					GPU:    types.GPUCapability{Supported: false},
+					// OCI is a plain provisioning target: it does not support
+					// dispatcher's confidential model (its SEV-SNP reports do not
+					// verify against AMD KDS, and it has no vTPM/measured path — see
+					// docs/SECURITY.md), so advertise no confidential capability.
+					Confidential: types.ConfidentialCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint:   true,
+					PrivateVPCAccess: true,
+					StaticEgressIP:   true,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: true,
+					RateCard:      "oci",
 				},
 				Isolation: types.IsolationCapability{
 					Levels: []string{"vm"},

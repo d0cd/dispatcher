@@ -22,9 +22,13 @@ func ContractTest(t *testing.T, a TargetAdapter) {
 			DetectedKind: types.WorkloadKindScript,
 			Runtime:      types.RuntimePython,
 		}
-		_, err := a.Validate(ctx, w)
-		// May fail if docker/ssh not available, that's OK for contract test structure
-		_ = err
+		result, err := a.Validate(ctx, w)
+		// The tool may be unavailable in CI, so a Validate error is acceptable — but
+		// the contract is that a successful Validate returns a result (never
+		// (zero, nil)) the caller can inspect.
+		if err == nil {
+			assert.NotEmpty(t, string(result.Schema), "a successful Validate must have run the schema check")
+		}
 	})
 
 	t.Run("EstimateCost", func(t *testing.T) {
@@ -45,9 +49,11 @@ func ContractTest(t *testing.T, a TargetAdapter) {
 	t.Run("Cleanup on nil handle succeeds", func(t *testing.T) {
 		h := &RunHandle{ID: "nonexistent", TargetID: a.ID()}
 		result, err := a.Cleanup(ctx, h)
-		// Should not panic; error or success both acceptable
-		_ = err
-		_ = result
+		// The contract: Cleanup surfaces its outcome via (result, err), never
+		// (nil, nil) — a nil result with no error would leave the caller unable to
+		// tell whether teardown happened.
+		assert.NoError(t, err, "Cleanup of a nonexistent handle must not error")
+		assert.NotNil(t, result, "Cleanup must return a non-nil result")
 	})
 }
 

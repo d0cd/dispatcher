@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -193,9 +194,11 @@ func TestCheckSSH_UnreachableHostFails(t *testing.T) {
 // ---- S3: gc confirmation ----
 
 type fakeGCAdapter struct {
-	id        string
-	resources []adapter.ResourceInfo
-	destroyed []string
+	id         string
+	resources  []adapter.ResourceInfo
+	destroyed  []string
+	destroyErr map[string]error // per-resource-id destroy failure
+	listErr    error            // ListResources failure
 }
 
 func (f *fakeGCAdapter) ID() string { return f.id }
@@ -227,10 +230,13 @@ func (f *fakeGCAdapter) ExtendWatchdog(context.Context, *adapter.RunHandle, time
 	return time.Time{}, nil
 }
 func (f *fakeGCAdapter) ListResources(context.Context) ([]adapter.ResourceInfo, error) {
-	return f.resources, nil
+	return f.resources, f.listErr
 }
-func (f *fakeGCAdapter) DestroyResource(_ context.Context, id string) error {
-	f.destroyed = append(f.destroyed, id)
+func (f *fakeGCAdapter) DestroyResource(_ context.Context, res adapter.ResourceInfo) error {
+	if err := f.destroyErr[res.ResourceID]; err != nil {
+		return err // a failed destroy must NOT be recorded as destroyed
+	}
+	f.destroyed = append(f.destroyed, res.ResourceID)
 	return nil
 }
 
@@ -263,7 +269,7 @@ func orphanFixture() *fakeGCAdapter {
 	return &fakeGCAdapter{
 		id: "hetzner-vm",
 		resources: []adapter.ResourceInfo{
-			{ResourceID: "srv-123", Provider: "hetzner", RunID: "run_gone"},
+			{ResourceID: "srv-123", Provider: "hetzner", RunID: "run_gone", Tags: map[string]string{"dispatcher": "true"}},
 		},
 	}
 }
@@ -276,7 +282,7 @@ func TestGC_NoConfirmDoesNotDestroy(t *testing.T) {
 	withGCAdapter(t, f)
 	withStdin(t, "n\n")
 
-	_, _, err := executeCommand("gc")
+	_, _, err := executeCommand("gc", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Empty(t, f.destroyed, "declining the prompt must not destroy anything")
 }
@@ -289,7 +295,7 @@ func TestGC_EmptyInputDoesNotDestroy(t *testing.T) {
 	withGCAdapter(t, f)
 	withStdin(t, "\n")
 
-	_, _, err := executeCommand("gc")
+	_, _, err := executeCommand("gc", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Empty(t, f.destroyed)
 }
@@ -302,7 +308,7 @@ func TestGC_YesConfirmDestroys(t *testing.T) {
 	withGCAdapter(t, f)
 	withStdin(t, "y\n")
 
-	_, _, err := executeCommand("gc")
+	_, _, err := executeCommand("gc", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"srv-123"}, f.destroyed)
 }
@@ -314,7 +320,7 @@ func TestGC_YesFlagDestroysWithoutPrompt(t *testing.T) {
 	f := orphanFixture()
 	withGCAdapter(t, f)
 
-	_, _, err := executeCommand("gc", "--yes")
+	_, _, err := executeCommand("gc", "--yes", "--allow-empty-store")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"srv-123"}, f.destroyed)
 }
@@ -333,7 +339,7 @@ func TestGC_ReclaimsPerRunSSHKey(t *testing.T) {
 	f := orphanFixture()
 	withGCAdapter(t, f)
 
-	_, _, err = executeCommand("gc", "--yes")
+	_, _, err = executeCommand("gc", "--yes", "--allow-empty-store")
 	require.NoError(t, err)
 	require.Equal(t, []string{"srv-123"}, f.destroyed)
 
@@ -368,13 +374,225 @@ func TestGC_DoesNotDestroyVMBehindCorruptRecord(t *testing.T) {
 
 	f := &fakeGCAdapter{
 		id:        "hetzner-vm",
-		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_corrupt"}},
+		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_corrupt", Tags: map[string]string{"dispatcher": "true"}}},
 	}
 	withGCAdapter(t, f)
 
 	_, _, err = executeCommand("gc", "--yes")
 	require.NoError(t, err)
 	assert.Empty(t, f.destroyed, "must not destroy a VM whose run record is unreadable")
+}
+
+// If gc cannot even enumerate the run records, it must abort — treating an empty
+// listing as "no active runs" would misclassify every live VM as an orphan and
+// destroy the whole fleet on a single transient FS error.
+func TestGC_AbortsWhenRunRecordsCannotBeEnumerated(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	gcFlags.dryRun = false
+	gcFlags.force = false
+
+	// Plant a regular file where the runs directory must be, so ListRecords fails.
+	stateDir := filepath.Join(home, ".dispatcher")
+	require.NoError(t, os.MkdirAll(stateDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "runs"), []byte("x"), 0o600))
+
+	f := &fakeGCAdapter{
+		id:        "hetzner-vm",
+		resources: []adapter.ResourceInfo{{ResourceID: "srv-live", Provider: "hetzner", RunID: "run_live", Tags: map[string]string{"dispatcher": "true"}}},
+	}
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--yes")
+	require.Error(t, err, "gc must refuse to run when run records can't be enumerated")
+	assert.Empty(t, f.destroyed, "nothing destroyed when active runs are unknowable")
+}
+
+// A dispatcher-owned resource with NO run-id is standing infra (e.g. a
+// driver-baked GPU image) — it must be reported, never reaped.
+func TestGC_StandingInfraNeverReaped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	f := &fakeGCAdapter{
+		id: "gcp-vm",
+		resources: []adapter.ResourceInfo{{
+			ResourceID: "dispatcher-gpu-l4", Provider: "gcp",
+			Kind: adapter.ResourceImage, // no RunID → standing infra
+			Tags: map[string]string{"dispatcher": "true"},
+		}},
+	}
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--yes")
+	require.NoError(t, err)
+	assert.Empty(t, f.destroyed, "standing infra (no run-id) must never be reaped")
+}
+
+// If the run store is empty (0 records) but adapters report dispatcher-owned
+// resources that reference run IDs, the state dir is almost certainly
+// misconfigured (mispointed $DISPATCHER_HOME, wrong user, fresh checkout) — and
+// reaping would destroy the entire live fleet. gc must refuse loudly.
+func TestGC_RefusesReapWhenStoreEmptyButOrphansPresent(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // fresh, empty run store (0 records)
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	gcFlags.allowEmptyStore = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false; gcFlags.allowEmptyStore = false })
+
+	f := orphanFixture() // dispatcher-owned resource referencing run_gone
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--yes")
+	require.Error(t, err, "empty run store + owned orphans must refuse to reap")
+	assert.Contains(t, err.Error(), "state dir")
+	assert.Empty(t, f.destroyed, "nothing destroyed when the store is suspiciously empty")
+}
+
+// The --allow-empty-store override lets a user reap a genuine orphan whose run
+// record was legitimately cleaned.
+func TestGC_AllowEmptyStoreOverrideReaps(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	gcFlags.allowEmptyStore = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false; gcFlags.allowEmptyStore = false })
+
+	f := orphanFixture()
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--yes", "--allow-empty-store")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"srv-123"}, f.destroyed, "override permits reaping a genuine orphan from an empty store")
+}
+
+// A destroy that fails must be reported as an error, not silently counted as
+// destroyed — the JSON report must show Found=2, Destroyed=1, and the error.
+func TestGC_JSON_PartialFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	owned := map[string]string{"dispatcher": "true"}
+	f := &fakeGCAdapter{
+		id: "gcp-vm",
+		resources: []adapter.ResourceInfo{
+			{ResourceID: "ok-1", Provider: "gcp", RunID: "run_a", Tags: owned},
+			{ResourceID: "fail-1", Provider: "gcp", RunID: "run_b", Tags: owned},
+		},
+		destroyErr: map[string]error{"fail-1": assert.AnError},
+	}
+	withGCAdapter(t, f)
+
+	stdout := captureStdout(t, func() {
+		_, _, err := executeCommand("--output", "json", "gc", "--yes", "--allow-empty-store")
+		require.NoError(t, err)
+	})
+
+	var r gcReport
+	require.NoError(t, json.Unmarshal([]byte(stdout), &r))
+	assert.Equal(t, 2, r.Found)
+	assert.Equal(t, 1, r.Destroyed, "a failed destroy must not be counted")
+	assert.Equal(t, []string{"ok-1"}, f.destroyed)
+	var errored int
+	for _, o := range r.Orphans {
+		if o.Error != "" {
+			errored++
+		}
+	}
+	assert.Equal(t, 1, errored, "the failed orphan must carry its error")
+}
+
+// A failed destroy must NOT reclaim the run's per-run SSH key material — the VM
+// may still be live.
+func TestGC_FailedDestroyDoesNotReclaimKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	keyDir, err := statedir.Subdir("keys")
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(keyDir, 0o700))
+	keyPath := keyDir + "/dispatcher-run_gone" // orphanFixture's RunID
+	require.NoError(t, os.WriteFile(keyPath, []byte("k"), 0o600))
+
+	f := orphanFixture()
+	f.destroyErr = map[string]error{"srv-123": assert.AnError}
+	withGCAdapter(t, f)
+
+	_, _, err = executeCommand("gc", "--yes", "--allow-empty-store")
+	require.NoError(t, err)
+	assert.Empty(t, f.destroyed, "the failing destroy is not recorded")
+
+	_, statErr := os.Stat(keyPath)
+	assert.NoError(t, statErr, "SSH key must survive when the destroy failed (VM may be live)")
+}
+
+// A provider whose ListResources fails is warned about and skipped, not treated
+// as zero resources and not aborting the whole GC.
+func TestGC_ListResourcesFailureWarnsAndContinues(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = true
+	t.Cleanup(func() { gcFlags.dryRun = false })
+
+	f := &fakeGCAdapter{id: "gcp-vm", listErr: assert.AnError}
+	withGCAdapter(t, f)
+
+	_, _, err := executeCommand("gc", "--dry-run")
+	require.NoError(t, err, "a listing failure must not abort gc")
+	assert.Empty(t, f.destroyed)
+}
+
+// A resource dispatcher does not own (no dispatcher=true tag) must be listed
+// for cost visibility but never counted as an orphan and never reaped — even
+// though it, like standing infra, carries no run-id.
+func TestGC_ExternalResourceListedNeverReaped(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	gcFlags.dryRun = false
+	gcFlags.force = false
+	t.Cleanup(func() { gcFlags.dryRun = false; gcFlags.force = false })
+
+	f := &fakeGCAdapter{
+		id: "gcp-vm",
+		resources: []adapter.ResourceInfo{{
+			ResourceID: "team-nfs-snapshot", Provider: "gcp",
+			Kind: adapter.ResourceSnapshot, MonthlyUSD: 4.10,
+			Tags: map[string]string{"owner": "other-team"}, // NOT dispatcher-owned
+		}},
+	}
+	withGCAdapter(t, f)
+
+	stdout := captureStdout(t, func() {
+		_, _, err := executeCommand("gc", "--json", "--dry-run")
+		require.NoError(t, err)
+	})
+
+	assert.Empty(t, f.destroyed, "external resource must never be reaped")
+	var report gcReport
+	require.NoError(t, json.Unmarshal([]byte(stdout), &report))
+	assert.Equal(t, 0, report.Found, "external resource is not an orphan")
+	assert.Empty(t, report.Standing, "external resource is not dispatcher standing infra")
+	require.Len(t, report.External, 1)
+	assert.Equal(t, "team-nfs-snapshot", report.External[0].ResourceID)
+}
+
+// A running instance is never free, so an unknown (uncatalogued, e.g. an exotic
+// GPU size) instance cost must render as "cost unknown", not silently $0 —
+// otherwise the costliest thing to leak looks free. Free-ish resources (a tiny
+// disk) with no cost render nothing.
+func TestResourceCostLabel(t *testing.T) {
+	assert.Equal(t, " ~$24.80/mo",
+		resourceCostLabel(adapter.ResourceInfo{Kind: adapter.ResourceInstance, MonthlyUSD: 24.8}))
+	assert.Equal(t, " (cost unknown)",
+		resourceCostLabel(adapter.ResourceInfo{Kind: adapter.ResourceInstance, MonthlyUSD: 0}))
+	assert.Equal(t, " ~$0.40/mo",
+		resourceCostLabel(adapter.ResourceInfo{Kind: adapter.ResourceDisk, MonthlyUSD: 0.4}))
+	assert.Equal(t, "",
+		resourceCostLabel(adapter.ResourceInfo{Kind: adapter.ResourceFirewall, MonthlyUSD: 0}))
 }
 
 // ---- P2: --json output ----
@@ -434,13 +652,31 @@ func TestJSONOutput_Plan(t *testing.T) {
 	assert.NotEmpty(t, p.Metadata.ID)
 }
 
+// plan --ai --json must emit machine-readable JSON, not colored human text —
+// aitelier is unavailable in tests so this exercises the deterministic fallback
+// through the AI code path.
+func TestJSONOutput_PlanAI(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(dir+"/main.py", []byte(`print("hi")`), 0o644))
+
+	stdout := captureStdout(t, func() {
+		_, _, err := executeCommand("plan", dir, "--ai", "--json")
+		require.NoError(t, err)
+	})
+
+	assert.NotContains(t, stdout, "\x1b[", "JSON output must not contain ANSI color codes")
+	require.True(t, json.Valid([]byte(stdout)), "plan --ai --json must emit valid JSON, got: %q", stdout)
+}
+
 // TestJSONUnsupportedCommandErrors covers the no-silent-failure rule: --json on
 // a command that doesn't emit JSON must error rather than print prose.
 func TestJSONUnsupportedCommandErrors(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	defer func() { rootFlags.output = "text"; rootFlags.json = false }()
 
-	_, _, err := executeCommand("history", "--json")
+	// `logs` streams output and will never emit JSON — a good "unsupported" case.
+	_, _, err := executeCommand("logs", "run_whatever", "--json")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not supported")
 }

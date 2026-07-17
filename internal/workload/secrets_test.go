@@ -8,6 +8,31 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDetectSecrets_EnvLocalIsScanned(t *testing.T) {
+	// .env.local is loaded and exported to the remote, so a secret there must be
+	// surfaced just like one in .env.
+	dir := t.TempDir()
+	writeFile(t, dir, ".env.local", "API_KEY=sk-localonly\n")
+	kinds := secretKinds(DetectSecrets(dir))
+	assert.Contains(t, kinds, "api-key")
+}
+
+func TestDetectSecrets_HighEntropyValueWithoutKeyword(t *testing.T) {
+	// A credential whose variable name carries no tell-tale keyword is still
+	// caught by the entropy fallback; an ordinary low-entropy value is not.
+	dir := t.TempDir()
+	writeFile(t, dir, ".env", "FOO=Xk7Qp2Lm9Zt4Rw8Bn3Vc6Yj1\nMODE=production\nVERSION=1.2.3\n")
+	kinds := secretKinds(DetectSecrets(dir))
+	assert.Contains(t, kinds, "high-entropy-value")
+	// A base64-ish token is flagged; short/low-entropy values are not.
+	for _, r := range DetectSecrets(dir) {
+		if r.Kind == "high-entropy-value" {
+			assert.NotEqual(t, "MODE", r.Name)
+			assert.NotEqual(t, "VERSION", r.Name)
+		}
+	}
+}
+
 func TestDetectSecrets_EnvFile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, ".env", `

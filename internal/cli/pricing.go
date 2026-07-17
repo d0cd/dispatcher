@@ -23,6 +23,13 @@ import (
 // Set DISPATCHER_DISABLE_LIVE_PRICING=1 to bypass the live fetch entirely.
 // Used by tests so the suite isn't gated on real outbound network calls.
 func loadLiveCatalog(stderr io.Writer) *cloudvm.Catalog {
+	return loadLiveCatalogScoped(stderr, "", "")
+}
+
+// loadLiveCatalogScoped pins a provider fetch to the region that the run will
+// actually use. A globally cheap SKU may be unavailable there; pricing it and
+// then provisioning in another region is both incorrect and unlaunchable.
+func loadLiveCatalogScoped(stderr io.Writer, targetID, region string) *cloudvm.Catalog {
 	if os.Getenv("DISPATCHER_DISABLE_LIVE_PRICING") != "" {
 		return nil
 	}
@@ -30,8 +37,9 @@ func loadLiveCatalog(stderr io.Writer) *cloudvm.Catalog {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	hetzner := scopedHetznerFetcher(targetID, region)
 	fetchers := []cloudvm.Fetcher{
-		cloudvm.NewHetznerFetcher(),
+		hetzner,
 		cloudvm.NewAzureFetcher(""),
 		cloudvm.NewAWSFetcher(""),
 		cloudvm.NewGCPFetcher(""),
@@ -44,13 +52,17 @@ func loadLiveCatalog(stderr io.Writer) *cloudvm.Catalog {
 		dim.Fprintln(stderr, "Falling back to built-in estimates (confidence: low).")
 		return nil
 	}
-	if ctx.Err() != nil {
+	if ctx.Err() != nil && usableLiveCatalog(cat, true) == nil {
 		// All fetchers were skipped via timeout. NewLiveCatalog returned an
 		// empty catalog rather than an error, but we shouldn't pretend the
 		// estimates are live.
 		dim := color.New(color.Faint)
 		dim.Fprintln(stderr, "Live pricing fetch timed out. Falling back to built-in estimates (confidence: low).")
 		return nil
+	}
+	if ctx.Err() != nil {
+		dim := color.New(color.Faint)
+		dim.Fprintln(stderr, "Some live pricing fetches timed out; using the providers that completed.")
 	}
 
 	if len(skipped) > 0 {
@@ -60,6 +72,24 @@ func loadLiveCatalog(stderr io.Writer) *cloudvm.Catalog {
 		}
 	}
 
+	return cat
+}
+
+func scopedHetznerFetcher(targetID, region string) *cloudvm.HetznerFetcher {
+	fetcher := cloudvm.NewHetznerFetcher()
+	if targetID == "hetzner-vm" {
+		fetcher.Location = region
+	}
+	return fetcher
+}
+
+func usableLiveCatalog(cat *cloudvm.Catalog, timedOut bool) *cloudvm.Catalog {
+	if !timedOut {
+		return cat
+	}
+	if cat == nil || len(cat.Providers()) == 0 {
+		return nil
+	}
 	return cat
 }
 

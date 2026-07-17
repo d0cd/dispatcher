@@ -56,6 +56,34 @@ func TestClassifyFailure(t *testing.T) {
 	}
 }
 
+// Adapters that only capture `$?` (the cloud SSH runner) can't set a Signal
+// string, so a signal kill surfaces as an encoded exit code: the shell's
+// 128+signal (137=SIGKILL, 143=SIGTERM) or a runtime's unsigned wrap of a
+// negative return code (256-signal: 247=SIGKILL, 241=SIGTERM). A KILL/TERM there
+// is environmental (OOM/preemption) → transient; a crash signal or an ordinary
+// non-zero exit stays permanent.
+func TestClassifyFailure_SignalExitCodes(t *testing.T) {
+	cases := []struct {
+		name string
+		code int
+		want FailureKind
+	}{
+		{"137 = 128+SIGKILL (probable OOM)", 137, FailureTransient},
+		{"143 = 128+SIGTERM (platform kill)", 143, FailureTransient},
+		{"247 = unsigned wrap of -SIGKILL (Python)", 247, FailureTransient},
+		{"241 = unsigned wrap of -SIGTERM", 241, FailureTransient},
+		{"139 = 128+SIGSEGV is a crash, permanent", 139, FailurePermanent},
+		{"245 = unsigned wrap of -SIGSEGV, permanent", 245, FailurePermanent},
+		{"130 = 128+SIGINT (user interrupt), permanent", 130, FailurePermanent},
+		{"ordinary exit 1 stays permanent", 1, FailurePermanent},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, ClassifyFailure(FailureDetails{ExitCode: c.code, Message: "exited"}))
+		})
+	}
+}
+
 // TestClassifyFailure_RetryDecisionTable encodes the actual decision the
 // executor makes — "should I retry this?" — so a future change to the
 // classifier rules surfaces here.

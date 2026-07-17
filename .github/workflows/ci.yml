@@ -1,18 +1,25 @@
 name: CI
 
+# Repository setting still required: make the `test` job a required branch-
+# protection check on main. Workflow dependencies are immutable SHAs below.
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version: '1.23'
+          go-version: '1.25.12'
           cache: true
 
       - name: gofmt
@@ -26,10 +33,144 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      # staticcheck: enforced and blocking, default check set (includes U1000
+      # unused-code — dead code is a bug).
+      - name: staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+
       - name: go build
         run: go build ./...
+
+      # Cross-compile smoke test: the tool builds on Windows (a platform we don't
+      # run tests on). This guards against reintroducing an unguarded Unix-only
+      # syscall (umask, process groups, Stat_t) that would break the Windows
+      # build. It validates compilation only, not runtime behavior.
+      - name: windows cross-compile
+        run: GOOS=windows GOARCH=amd64 go build ./...
 
       - name: go test
         env:
           DISPATCHER_DISABLE_LIVE_PRICING: "1"
-        run: go test -race -timeout 5m ./...
+        run: go test -race -timeout 5m -coverprofile=coverage.out ./...
+
+      - name: coverage report
+        run: go tool cover -func=coverage.out | tail -1
+
+      # Coverage floor on the cost/security-critical packages: guards against a
+      # regression in the code paths where a bug is expensive (billing, teardown,
+      # attestation, the run state machine). Floors are set a few points below
+      # current so noise doesn't flake, but a real drop fails the build. Raise them
+      # as coverage improves.
+      - name: coverage floor (critical packages)
+        env:
+          DISPATCHER_DISABLE_LIVE_PRICING: "1"
+        run: |
+          declare -A floor=( [cloudvm]=50 [adapter]=60 [run]=85 [target]=82 [cost]=70 [attest]=63 )
+          fail=0
+          for pkg in "${!floor[@]}"; do
+            cov=$(go test -cover ./internal/$pkg/ 2>&1 | grep -oE 'coverage: [0-9.]+%' | grep -oE '[0-9.]+' | head -1)
+            min=${floor[$pkg]}
+            if [ -z "$cov" ]; then echo "WARN: no coverage reported for internal/$pkg"; continue; fi
+            if awk -v c="$cov" -v m="$min" 'BEGIN{exit !(c+0 < m+0)}'; then
+              echo "FAIL: internal/$pkg coverage ${cov}% < floor ${min}%"; fail=1
+            else
+              echo "ok: internal/$pkg ${cov}% (floor ${min}%)"
+            fi
+          done
+          exit $fail
+
+      - name: build & smoke the binary
+        run: |
+          go build -o dispatcher ./cmd/dispatcher
+          ./dispatcher --version
+          ./dispatcher --help >/dev/null
+
+      # Confidential-image durability guard. Measurements are content-addressed, so
+      # a change to the attestation agent, its build config, or deps invalidates a
+      # pinned image's measurement. When pins are committed to deploy/confidential-pins.yaml
+      # (produced by `confidential capture --pin --pins …`), this fails if any drifted
+      # from the tree — the signal to rebuild, re-capture, and re-pin. It does not
+      # build images (that needs the per-cloud hosts). The guard is inactive, and says
+      # so, until the registry is committed.
+      - name: confidential pin drift guard
+        run: |
+          if [ -f deploy/confidential-pins.yaml ]; then
+            ./dispatcher confidential check --pins deploy/confidential-pins.yaml --repo-root .
+          else
+            echo "drift guard inactive: no committed pins at deploy/confidential-pins.yaml"
+            echo "activate with: dispatcher confidential capture --pin --pins deploy/confidential-pins.yaml …"
+          fi
+
+      # Dependency/stdlib CVE scan. Pinned and blocking: reachable findings are
+      # release blockers, not informational annotations.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+          govulncheck ./...
+
+  # Windows lane: proves the tool builds and the binary actually runs on Windows
+  # (exercising the windows-tagged procgroup/umask/flock paths at link+exec time,
+  # which the Linux cross-compile can't). The full unit suite runs informationally
+  # (continue-on-error): much of it asserts Unix-only behavior — file-permission
+  # bits, os.Symlink, shelling out to printf/sh — so it is not yet green on
+  # Windows. The build and binary-smoke steps ARE enforced.
+  test-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: '1.25.12'
+          cache: true
+
+      - name: go build
+        run: go build ./...
+
+      - name: smoke the binary
+        run: |
+          go build -o dispatcher.exe ./cmd/dispatcher
+          ./dispatcher.exe --version
+          ./dispatcher.exe --help | Out-Null
+
+      - name: go test (informational until the suite is Windows-aware)
+        continue-on-error: true
+        env:
+          DISPATCHER_DISABLE_LIVE_PRICING: "1"
+        run: go test -timeout 10m ./...
+
+  # End-to-end lanes exercise the real k8s / terraform / ssh execution paths —
+  # the parts unit tests can't reach. Each test skips if its prerequisite is
+  # absent. Runs on main-push and on-demand (not every PR) until proven stable.
+  e2e:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: '1.25.12'
+          cache: true
+
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: dispatcher-e2e
+      - name: k8s e2e (k8se2e)
+        run: go test -tags k8se2e -timeout 8m ./internal/cloudvm/
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_wrapper: false
+      - name: terraform e2e (tfe2e)
+        run: go test -tags tfe2e ./internal/target/
+
+      - name: set up passwordless localhost ssh
+        run: |
+          sudo systemctl start ssh || sudo service ssh start || true
+          ssh-keygen -t ed25519 -N '' -f ~/.ssh/id_ed25519
+          cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys
+          chmod 600 ~/.ssh/authorized_keys ~/.ssh/id_ed25519
+          ssh-keyscan -H localhost >> ~/.ssh/known_hosts 2>/dev/null || true
+      - name: ssh e2e (sshe2e)
+        run: go test -tags sshe2e ./internal/adapter/

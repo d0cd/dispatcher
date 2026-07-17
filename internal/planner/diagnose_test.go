@@ -50,6 +50,7 @@ func writeRunFixture(t *testing.T, runID, state, errMsg string, logBody string) 
 }
 
 func TestToolRegistry_InspectRun_Basic(t *testing.T) {
+	t.Setenv("DISPATCHER_AI_INCLUDE_LOGS", "1")
 	tools, _ := setupTestEnv(t)
 
 	writeRunFixture(t, "run_diag1", "execution-failed",
@@ -58,7 +59,7 @@ func TestToolRegistry_InspectRun_Basic(t *testing.T) {
 
 	result := tools.Execute(ToolCall{
 		Name:  "inspect_run",
-		Input: mustJSON(map[string]any{"run_id": "run_diag1"}),
+		Input: mustJSON(map[string]any{"run_id": "run_diag1", "include_logs": true}),
 	}, nil)
 
 	require.Empty(t, result.Error)
@@ -73,6 +74,7 @@ func TestToolRegistry_InspectRun_Basic(t *testing.T) {
 }
 
 func TestToolRegistry_InspectRun_LogTruncation(t *testing.T) {
+	t.Setenv("DISPATCHER_AI_INCLUDE_LOGS", "1")
 	tools, _ := setupTestEnv(t)
 
 	var body string
@@ -83,13 +85,60 @@ func TestToolRegistry_InspectRun_LogTruncation(t *testing.T) {
 
 	result := tools.Execute(ToolCall{
 		Name:  "inspect_run",
-		Input: mustJSON(map[string]any{"run_id": "run_diag2", "log_lines": 10}),
+		Input: mustJSON(map[string]any{"run_id": "run_diag2", "log_lines": 10, "include_logs": true}),
 	}, nil)
 
 	require.Empty(t, result.Error)
 	insp := result.Result.(RunInspection)
 	assert.Len(t, insp.LogTail, 10)
 	assert.True(t, insp.LogTruncated)
+}
+
+func TestToolRegistry_InspectRun_LogsPrivateByDefaultAndRedactedOnOptIn(t *testing.T) {
+	tools, _ := setupTestEnv(t)
+	writeRunFixture(t, "run_private", "execution-failed",
+		"failed for /Users/alice/private/project with api_key=topsecret",
+		"email alice@example.com token=supersecret\n")
+
+	result := tools.Execute(ToolCall{
+		Name:  "inspect_run",
+		Input: mustJSON(map[string]any{"run_id": "run_private", "include_logs": true}),
+	}, nil)
+	require.Empty(t, result.Error)
+	insp := result.Result.(RunInspection)
+	assert.Empty(t, insp.LogTail, "logs require an explicit operator opt-in")
+	assert.NotContains(t, insp.Error, "alice")
+	assert.NotContains(t, insp.Error, "topsecret")
+	assert.Empty(t, insp.Owner)
+	assert.Empty(t, insp.LogFile)
+
+	t.Setenv("DISPATCHER_AI_INCLUDE_LOGS", "1")
+	result = tools.Execute(ToolCall{
+		Name:  "inspect_run",
+		Input: mustJSON(map[string]any{"run_id": "run_private", "include_logs": true}),
+	}, nil)
+	insp = result.Result.(RunInspection)
+	require.Len(t, insp.LogTail, 1)
+	assert.NotContains(t, insp.LogTail[0], "alice@example.com")
+	assert.NotContains(t, insp.LogTail[0], "supersecret")
+}
+
+func TestRedactPrivateLines_RedactsPEMAndCredentials(t *testing.T) {
+	lines := redactPrivateLines([]string{
+		"-----BEGIN PRIVATE KEY-----",
+		"c3VwZXJzZWNyZXQ=",
+		"-----END PRIVATE KEY-----",
+		"DATABASE_URL=postgres://alice:password@example.test/private",
+		"token eyJhbGciOiJub25lIn0.eyJzdWIiOiJhbGljZSJ9.signature",
+	})
+	assert.Equal(t, "[redacted private key]", lines[0])
+	assert.Equal(t, "[redacted private key]", lines[1])
+	assert.Equal(t, "[redacted private key]", lines[2])
+	for _, line := range lines {
+		assert.NotContains(t, line, "supersecret")
+		assert.NotContains(t, line, "alice")
+		assert.NotContains(t, line, "eyJ")
+	}
 }
 
 func TestToolRegistry_InspectRun_MissingRun(t *testing.T) {
@@ -162,6 +211,44 @@ func TestDeterministicDiagnose_MissingRun(t *testing.T) {
 	p := NewPlanner(nil, tools)
 	_, err := p.DeterministicDiagnose(context.Background(), "run_nope")
 	assert.Error(t, err)
+}
+
+// writeRunFixtureWithHandleState writes a run record carrying adapter
+// HandleState, used to test attestation surfacing in diagnose.
+func writeRunFixtureWithHandleState(t *testing.T, runID, state, handleState string) {
+	t.Helper()
+	stateRoot := os.Getenv("DISPATCHER_HOME")
+	if stateRoot == "" {
+		stateRoot = filepath.Join(os.Getenv("HOME"), ".dispatcher")
+	}
+	runsDir := filepath.Join(stateRoot, "runs")
+	require.NoError(t, os.MkdirAll(runsDir, 0o700))
+
+	rec := map[string]any{
+		"id":       runID,
+		"planId":   "plan_test",
+		"targetId": "gcp-vm",
+		"state":    state,
+		"cost": map[string]any{
+			"value": 0.0, "currency": "USD", "confidence": "medium",
+		},
+		"handleState": json.RawMessage(handleState),
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(runsDir, runID+".json"), data, 0o600))
+}
+
+func TestDeterministicDiagnose_SurfacesAttestation(t *testing.T) {
+	tools, _ := setupTestEnv(t)
+	writeRunFixtureWithHandleState(t, "run_att", "completed",
+		`{"attestation":{"verified":true,"type":"sev-snp","measurement":"abcd"}}`)
+
+	p := NewPlanner(nil, tools)
+	res, err := p.DeterministicDiagnose(context.Background(), "run_att")
+	require.NoError(t, err)
+	assert.Contains(t, res.Explanation, "attestation")
+	assert.Contains(t, res.Explanation, "sev-snp")
 }
 
 // writeRunFixtureWithFailure writes a serialized run record with full

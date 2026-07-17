@@ -21,8 +21,9 @@ var recoverFlags struct {
 }
 
 var recoverCmd = &cobra.Command{
-	Use:   "recover",
-	Short: "Inventory cloud VMs whose local run record is missing or stale",
+	Use:         "recover",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "Inventory cloud VMs whose local run record is missing or stale",
 	Long: `Lists every dispatcher-tagged VM across configured cloud providers and
 reports what's recoverable. Useful when:
 
@@ -48,78 +49,123 @@ func init() {
 	rootCmd.AddCommand(recoverCmd)
 }
 
+// recoverEntry is one tagged cloud VM and what dispatcher knows about it.
+type recoverEntry struct {
+	ResourceID  string    `json:"resourceId"`
+	Provider    string    `json:"provider"`
+	RunID       string    `json:"runId,omitempty"`
+	CreatedAt   time.Time `json:"createdAt,omitempty"`
+	LocalRecord string    `json:"localRecord,omitempty"` // yes | missing | unreadable
+	SSHKeyPath  string    `json:"sshKeyPath,omitempty"`
+	Attachable  bool      `json:"attachable"`
+}
+
 func runRecover(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
-	bold := color.New(color.Bold)
-	dim := color.New(color.Faint)
-	yellow := color.New(color.FgYellow)
-	green := color.New(color.FgGreen)
+	asJSON := jsonOutput()
 
-	adapters := durableAdapters()
+	adapters := durableAdaptersFn()
 	if len(adapters) == 0 {
+		if asJSON {
+			return emitJSON(struct {
+				Total      int            `json:"total"`
+				Attachable []string       `json:"attachable"`
+				VMs        []recoverEntry `json:"vms"`
+			}{0, []string{}, []recoverEntry{}})
+		}
 		fmt.Fprintln(os.Stderr, "No cloud VM adapters configured (no CLIs installed).")
 		return nil
 	}
 
 	keyDir, _ := statedir.Subdir("keys")
 
-	total := 0
+	var entries []recoverEntry
 	attachable := []string{}
 	for _, a := range adapters {
 		resources, err := a.ListResources(ctx)
 		if err != nil {
-			dim.Fprintf(os.Stderr, "warning: cannot list resources for %s: %v\n", a.ID(), err)
+			if !asJSON {
+				color.New(color.Faint).Fprintf(os.Stderr, "warning: cannot list resources for %s: %v\n", a.ID(), err)
+			}
 			continue
 		}
-
 		for _, res := range resources {
-			total++
-			bold.Fprintf(os.Stderr, "\n%s on %s\n", res.ResourceID, res.Provider)
+			e := recoverEntry{ResourceID: res.ResourceID, Provider: res.Provider, RunID: res.RunID, CreatedAt: res.CreatedAt}
 			if res.RunID != "" {
-				fmt.Fprintf(os.Stderr, "  run id:        %s\n", res.RunID)
-			} else {
-				yellow.Fprintln(os.Stderr, "  run id:        (missing tag — provenance unclear)")
-			}
-			if !res.CreatedAt.IsZero() {
-				age := time.Since(res.CreatedAt).Round(time.Second)
-				fmt.Fprintf(os.Stderr, "  created:       %s (%s ago)\n",
-					res.CreatedAt.Format("2006-01-02 15:04 MST"), age)
-			}
-
-			localRecord := false
-			if res.RunID != "" {
-				if _, err := run.LoadRecord(res.RunID); err == nil {
-					green.Fprintln(os.Stderr, "  local record:  yes (run dispatcher status, logs, diagnose)")
-					localRecord = true
+				// res.RunID is the plan id carried in the VM tag (the adapter is
+				// handed a Plan, not a run), so resolve the record by plan id — the
+				// record's filename is the distinct run id. attachable must carry
+				// that run id so `dispatcher status` can load it.
+				if rec, err := run.LoadRecordByPlanID(res.RunID); err == nil {
+					e.LocalRecord = "yes"
+					e.Attachable = true
+					attachable = append(attachable, rec.ID)
 				} else if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "not found") {
-					yellow.Fprintln(os.Stderr, "  local record:  MISSING — workload metadata lost")
+					e.LocalRecord = "missing"
 				} else {
-					yellow.Fprintf(os.Stderr, "  local record:  unreadable (%v)\n", err)
+					e.LocalRecord = "unreadable"
+				}
+				if keyDir != "" {
+					keyPath := filepath.Join(keyDir, "dispatcher-"+res.RunID)
+					if _, err := os.Stat(keyPath); err == nil {
+						e.SSHKeyPath = keyPath
+					}
 				}
 			}
-
-			if res.RunID != "" && keyDir != "" {
-				keyPath := filepath.Join(keyDir, "dispatcher-"+res.RunID)
-				if _, err := os.Stat(keyPath); err == nil {
-					fmt.Fprintf(os.Stderr, "  ssh key:       %s\n", keyPath)
-					dim.Fprintf(os.Stderr, "                 ssh -i %s -o StrictHostKeyChecking=accept-new <user>@<ip>\n", keyPath)
-				} else {
-					yellow.Fprintln(os.Stderr, "  ssh key:       MISSING — cannot SSH in from this machine")
-				}
-			}
-
-			// Eligible for --attach: must have a local run record AND a
-			// run id. Without the local record, status has nothing to
-			// refresh; without the id, there's no run to look up.
-			if localRecord {
-				attachable = append(attachable, res.RunID)
-			}
+			entries = append(entries, e)
 		}
 	}
 
-	if total == 0 {
+	if asJSON {
+		return emitJSON(struct {
+			Total      int            `json:"total"`
+			Attachable []string       `json:"attachable"`
+			VMs        []recoverEntry `json:"vms"`
+		}{len(entries), attachable, entries})
+	}
+	return renderRecover(entries, attachable, keyDir != "")
+}
+
+// renderRecover prints the human inventory (and, with --attach, refreshes each
+// recoverable run via status).
+func renderRecover(entries []recoverEntry, attachable []string, haveKeyDir bool) error {
+	bold := color.New(color.Bold)
+	dim := color.New(color.Faint)
+	yellow := color.New(color.FgYellow)
+	green := color.New(color.FgGreen)
+
+	if len(entries) == 0 {
 		green.Fprintln(os.Stderr, "No tagged cloud VMs found across configured providers.")
 		return nil
+	}
+
+	for _, e := range entries {
+		bold.Fprintf(os.Stderr, "\n%s on %s\n", e.ResourceID, e.Provider)
+		if e.RunID != "" {
+			fmt.Fprintf(os.Stderr, "  run id:        %s\n", e.RunID)
+		} else {
+			yellow.Fprintln(os.Stderr, "  run id:        (missing tag — provenance unclear)")
+		}
+		if !e.CreatedAt.IsZero() {
+			age := time.Since(e.CreatedAt).Round(time.Second)
+			fmt.Fprintf(os.Stderr, "  created:       %s (%s ago)\n", e.CreatedAt.Format("2006-01-02 15:04 MST"), age)
+		}
+		switch e.LocalRecord {
+		case "yes":
+			green.Fprintln(os.Stderr, "  local record:  yes (run dispatcher status, logs, diagnose)")
+		case "missing":
+			yellow.Fprintln(os.Stderr, "  local record:  MISSING — workload metadata lost")
+		case "unreadable":
+			yellow.Fprintln(os.Stderr, "  local record:  unreadable")
+		}
+		if e.RunID != "" && haveKeyDir {
+			if e.SSHKeyPath != "" {
+				fmt.Fprintf(os.Stderr, "  ssh key:       %s\n", e.SSHKeyPath)
+				dim.Fprintf(os.Stderr, "                 ssh -i %s -o StrictHostKeyChecking=accept-new <user>@<ip>\n", e.SSHKeyPath)
+			} else {
+				yellow.Fprintln(os.Stderr, "  ssh key:       MISSING — cannot SSH in from this machine")
+			}
+		}
 	}
 
 	fmt.Fprintln(os.Stderr)

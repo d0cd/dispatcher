@@ -7,10 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/cost"
 	"github.com/d0cd/dispatcher/internal/policy"
@@ -82,6 +84,18 @@ type ToolRegistry struct {
 	// containment boundary.
 	rootMu       sync.RWMutex
 	workloadRoot string // absolute, resolved, no trailing slash
+}
+
+// targetExists reports whether id names a configured target, so the AI-plan path
+// can flag a recommendation for a target that does not exist (the deterministic
+// plan/run paths never surface such a value; this guards the display path).
+func (tr *ToolRegistry) targetExists(id string) bool {
+	for _, t := range tr.registry.List() {
+		if t.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // NewToolRegistry creates a registry with all planner tools wired up. The
@@ -214,8 +228,9 @@ func (tr *ToolRegistry) Definitions() []Tool {
 			Parameters: &ToolSchema{
 				Type: "object",
 				Properties: map[string]ToolParam{
-					"run_id":    {Type: "string", Description: "Run ID to inspect (e.g. run_abc123)"},
-					"log_lines": {Type: "integer", Description: "Number of trailing log lines to include (default 50, max 500)"},
+					"run_id":       {Type: "string", Description: "Run ID to inspect (e.g. run_abc123)"},
+					"log_lines":    {Type: "integer", Description: "Number of trailing log lines to include (default 50, max 500)"},
+					"include_logs": {Type: "boolean", Description: "Include a redacted log tail only when the operator also set DISPATCHER_AI_INCLUDE_LOGS=1"},
 				},
 				Required: []string{"run_id"},
 			},
@@ -284,6 +299,14 @@ func (tr *ToolRegistry) execEvaluateAll(spec *types.WorkloadSpec) ToolResult {
 			est := cost.EstimateCostWithHistory(*spec, t, tr.history, tr.catalog)
 			eval.Cost = &est
 			eval.Risks = risk.Analyze(*spec, t, est)
+			if tr.history != nil {
+				if s := tr.history.Flakiness(spec.Name, t.ID); s.Flaky {
+					eval.Risks = append(eval.Risks, types.Risk{
+						Category:    "flaky-history",
+						Description: fmt.Sprintf("historically unstable: failed %d of %d recent runs on this target — a pass here isn't a guarantee", s.Failures, s.Runs),
+					})
+				}
+			}
 			eval.Approvals = policy.Evaluate(*spec, t, est)
 		}
 
@@ -358,6 +381,10 @@ type RunInspection struct {
 	OOMKilled    bool   `json:"oomKilled,omitempty"`
 	FailureClass string `json:"failureClass,omitempty"` // permanent | transient | unknown
 	RetryCount   int    `json:"retryCount,omitempty"`
+	// Attestation surfaces a confidential run's TEE verdict (R13) so the
+	// diagnostician sees whether the run was actually proven. Nil for
+	// non-confidential runs.
+	Attestation *attest.AttestationResult `json:"attestation,omitempty"`
 }
 
 const (
@@ -367,8 +394,9 @@ const (
 
 func (tr *ToolRegistry) execInspectRun(input json.RawMessage) ToolResult {
 	var params struct {
-		RunID    string `json:"run_id"`
-		LogLines int    `json:"log_lines"`
+		RunID       string `json:"run_id"`
+		LogLines    int    `json:"log_lines"`
+		IncludeLogs bool   `json:"include_logs"`
 	}
 	if err := json.Unmarshal(input, &params); err != nil {
 		return ToolResult{Name: "inspect_run", Error: err.Error()}
@@ -389,23 +417,34 @@ func (tr *ToolRegistry) execInspectRun(input json.RawMessage) ToolResult {
 	if lines > maxInspectRunLogLines {
 		lines = maxInspectRunLogLines
 	}
-	tail, truncated := readLogTail(rec.LogFile, lines)
+	var tail []string
+	var truncated bool
+	if params.IncludeLogs && os.Getenv("DISPATCHER_AI_INCLUDE_LOGS") == "1" {
+		tail, truncated = readLogTail(rec.LogFile, lines)
+		tail = redactPrivateLines(tail)
+	}
+	attestation := attest.AttestationFromHandleState(rec.HandleState)
+	if attestation != nil {
+		copy := *attestation
+		copy.Nonce = ""
+		copy.Verdict = redactPrivateText(copy.Verdict)
+		attestation = &copy
+	}
 
 	insp := RunInspection{
 		ID:           rec.ID,
 		State:        rec.State,
 		TargetID:     rec.TargetID,
-		Owner:        rec.Owner,
-		Error:        rec.Error,
+		Error:        redactPrivateText(rec.Error),
 		Cost:         rec.Cost,
 		Lifecycle:    string(rec.Lifecycle),
-		LogFile:      rec.LogFile,
 		LogTail:      tail,
 		LogTruncated: truncated,
 		ExitCode:     rec.Failure.ExitCode,
 		Signal:       rec.Failure.Signal,
 		OOMKilled:    rec.Failure.OOMKilled,
 		RetryCount:   rec.RetryCount,
+		Attestation:  attestation,
 	}
 	if rec.State == types.RunStateExecutionFailed {
 		// Only classify when there's actually a failure to classify.
@@ -427,6 +466,45 @@ func (tr *ToolRegistry) execInspectRun(input json.RawMessage) ToolResult {
 	}
 
 	return ToolResult{Name: "inspect_run", Result: insp}
+}
+
+var privateTextPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|auth[_-]?token|token|password|passwd|secret|client[_-]?secret|private[_-]?key|database[_-]?url|connection[_-]?string|authorization)(\s*[:=]\s*|\s+)[^\s,;]+`),
+	regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`),
+	regexp.MustCompile(`(?i)bearer\s+[A-Za-z0-9._~+/=-]+`),
+	regexp.MustCompile(`(?i)\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis)://[^\s]+`),
+	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b`),
+	regexp.MustCompile(`\b(?:sk-|xox[baprs]-|github_pat_|gh[pousr]_)[A-Za-z0-9_-]{10,}\b`),
+	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`),
+	regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`),
+	regexp.MustCompile(`(?:/Users|/home)/[^/\s]+`),
+}
+
+func redactPrivateText(s string) string {
+	for _, pattern := range privateTextPatterns {
+		s = pattern.ReplaceAllString(s, "[redacted]")
+	}
+	return s
+}
+
+func redactPrivateLines(lines []string) []string {
+	out := make([]string, len(lines))
+	inPrivateKey := false
+	for i, line := range lines {
+		upper := strings.ToUpper(line)
+		if strings.Contains(upper, "-----BEGIN") && strings.Contains(upper, "PRIVATE KEY-----") {
+			inPrivateKey = true
+		}
+		if inPrivateKey {
+			out[i] = "[redacted private key]"
+			if strings.Contains(upper, "-----END") && strings.Contains(upper, "PRIVATE KEY-----") {
+				inPrivateKey = false
+			}
+			continue
+		}
+		out[i] = redactPrivateText(line)
+	}
+	return out
 }
 
 // readLogTail returns up to n trailing lines from a log file. truncated is

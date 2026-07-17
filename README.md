@@ -34,7 +34,7 @@ dispatcher stop <id>
 - **Bring your own hosts.** Already provisioned with Terraform/OpenTofu, Pulumi,
   or a script? `dispatcher targets import` registers those hosts as targets and
   runs jobs on them — read-only with respect to your IaC. See
-  [docs/terraform-interop.md](docs/terraform-interop.md).
+  [docs/USAGE.md](docs/USAGE.md#bring-your-own-hosts).
 
 ## Documentation
 
@@ -47,7 +47,7 @@ dispatcher stop <id>
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher
-go test ./...                # ~540 tests across 15 packages
+go test ./...                # ~930 tests across 21 packages
 go vet ./...
 ```
 

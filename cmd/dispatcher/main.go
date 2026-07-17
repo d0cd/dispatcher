@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"syscall"
 
 	"github.com/d0cd/dispatcher/internal/cli"
 )
@@ -15,7 +14,7 @@ func main() {
 	// is common; `umask 0` exists). Every sensitive write in dispatcher
 	// already passes 0600 explicitly, but this is belt-and-braces against
 	// any future caller that forgets.
-	syscall.Umask(0o077)
+	tightenFileMask()
 
 	code, message := cli.ResolveExitError(cli.Execute())
 	if message != "" {

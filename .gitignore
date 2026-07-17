@@ -8,13 +8,15 @@ kubectl
 # Test and build artifacts
 tmp/
 *.test
+coverage.out
 
 # Runtime state (created by `dispatcher run`)
 runs/
 
 # Local env files — may hold real secrets (.env.example is the tracked template)
 .env
-.env.local
+.env.*
+!.env.example
 
 # Local-only editor/agent config
 .claude/settings.local.json
@@ -28,3 +30,10 @@ runs/
 
 # Working notes / feedback drafts
 /feedback.md
+
+# Captured TEE attestation fixtures (per-capture, bulky; not committed)
+/experiments/confidential-attestation/fixtures/*
+!/experiments/confidential-attestation/fixtures/.gitkeep
+
+# Confidential Space agent build artifacts (compiled binary + Dockerfile)
+/experiments/confidential-attestation/agent/

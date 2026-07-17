@@ -30,7 +30,7 @@ Runs that require policy approval (GPU, high cost, public endpoints, secrets on 
 - Single-shot: the first valid decision wins via an atomic CAS; subsequent decisions get `"already decided"`.
 - The in-process approver (terminal prompt, `--yes`) races the socket — whichever produces a decision first wins.
 - Wire-supplied decider names are tagged `external:` on the server side, so the audit record honestly distinguishes locally-verified approvers (`interactive:<user>`, `yes-flag:<user>`) from unauthenticated wire input.
-- The audit `Record` is embedded in the persisted run state via the run package's atomic write-locked persistence — there is no separate signed approval file (the old HMAC-signed JSON had a long list of subtle gaps; see [DESIGN.md](DESIGN.md) for the rewrite rationale).
+- The audit `Record` is embedded in the persisted run state via the run package's atomic write-locked persistence — there is no separate signed approval file. An HMAC-signed JSON file was considered and rejected: same-UID is not a trust boundary (an attacker with the uid also holds the key), so the signature adds ceremony without a real guarantee.
 
 A same-UID attacker can still connect to the socket and forge a decider name. This is acknowledged: same-UID is not a security boundary.
 
@@ -56,6 +56,14 @@ Both directions use `--protect-args` to disable remote-shell re-tokenization of 
 
 The cloud-VM host-key pinning above does not apply to imported targets: they are long-lived operator infra reached with the operator's own key and `known_hosts`, not dispatcher-generated per-run identities.
 
+## Confidential computing
+
+`confidential:` provisions a TEE-backed VM (AMD SEV/SEV-SNP, Intel TDX) so the cloud host/hypervisor can't read the workload's memory — a *data-in-use* protection orthogonal to the operator-boundary hardening above. Boundaries:
+
+- **No silent downgrade.** A confidential job is only feasible on a target/type that supports it; otherwise it's rejected, never run on a normal VM. The provider create flag is emitted from a verified mapping (GCP `--confidential-compute-type`, AWS `--cpu-options AmdSevSnp=enabled`, Azure `--security-type ConfidentialVM`), and unsupported type/provider combos error before launch.
+- **Attestation.** A TEE encrypts memory, but the *proof* is a signed attestation report from code that is itself measured. Secret release is enabled only for the measured backends: **GCP** Confidential Space (agent-image digest + Google JWS), **Azure** `confidential.profile: azure-snp` (agent in a dm-verity root measured into PCR11), and **AWS** `confidential.profile: nitro` (COSE chain + pinned PCR0). The unmeasured standard SEV-SNP / MAA paths were removed — their post-boot SSH-delivered agents are not part of the measured launch chain, so an attested run on aws-vm/azure-vm requires the measured `profile`. `attestation: off` is the explicit escape hatch for encrypted-memory-without-verification; no attestation-based credential release occurs in that mode.
+- **OCI.** A validated plain provisioning target (create → SSH → run → destroy, live-tested). Confidential execution is **not offered**: OCI's SEV-SNP attestation reports do not verify against the AMD KDS VCEK for their own chip+TCB (reproduced on real E5/Genoa hardware with snpguest, go-sev-guest, and manual verification), and OCI cannot combine a vTPM/measured boot with SEV-SNP, so there is no measured-agent path either. `oci-vm` therefore declares no confidential capability and any confidential job is rejected at plan time.
+
 ## Cloud CLI argument discipline
 
 Cloud CLIs (gcloud, az, aws, hcloud) each have their own tokenization rules for `--tag`, `--label`, `--metadata`, `--custom-data`. Dispatcher follows two rules:
@@ -69,16 +77,24 @@ Tempfiles holding sensitive content use `WriteSecureTempFile` (O_CREATE|O_EXCL|O
 
 ## Network exposure
 
-Dispatcher-provisioned cloud VMs are created with the **provider's default network posture**: dispatcher does not attach a per-run firewall or security group. In practice that means SSH (port 22) and any port the workload itself binds are reachable from wherever the provider's defaults allow — typically the public internet (Hetzner and AWS attach no firewall unless one is configured on the account/VPC; GCP assigns an external IP; Azure auto-creates an NSG that commonly allows SSH from any source).
+Dispatcher-provisioned cloud VMs default to an **SSH-open posture**, which varies by provider:
+
+- **AWS** — dispatcher creates a **per-run security group** on every VM (deleted on teardown) admitting inbound SSH from `0.0.0.0/0` by default. The default VPC group only permits intra-group traffic, so this group is what makes the VM reachable at all.
+- **GCP** — the instance lands on the project's default network, whose built-in `default-allow-ssh` rule permits tcp:22 from `0.0.0.0/0`; dispatcher adds no per-run rule.
+- **Azure** — `az vm create` auto-creates an NSG that commonly allows SSH from any source; dispatcher adds no per-run rule of its own.
+- **Hetzner** — no firewall unless `--allow-ssh-from` is set (below).
+
+So SSH (port 22) and any port the workload itself binds are reachable from the public internet by default on every provider.
 
 SSH access is gated by a **per-run ed25519 key with no password** and host-key pinning (see above), so the open SSH port is not brute-forceable. The residual exposure is defense-in-depth: SSH-daemon attack surface for the VM's lifetime, and **any workload-bound port (dev server, debugger, datastore) is world-reachable with no network-layer restriction**.
 
-**Per-run firewall (opt-in).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to attach a least-privilege firewall that permits inbound SSH only from that range:
+**Per-run SSH allowlist (`--allow-ssh-from`).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to restrict inbound SSH to that range:
 
-- **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule and attaches it at create time; deleted on teardown.
-- **AWS / Azure / GCP** — not yet implemented; a non-empty `--allow-ssh-from` is **rejected** (no silent fallback). GCP in particular is rejected rather than approximated: instances land on the default network whose built-in `default-allow-ssh` rule permits tcp:22 from `0.0.0.0/0`, and an additive ALLOW rule cannot subtract that access — a per-run ALLOW rule would imply a restriction it does not enforce. Restrict SSH at the account/VPC level (security group / NSG / dedicated VPC) on those providers.
+- **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule from the CIDR, attached at create time; deleted on teardown.
+- **AWS** — sets the per-run security group's SSH ingress to the CIDR (replacing the `0.0.0.0/0` default); `run` accepts `--allow-ssh-from` for `aws-vm`, so this is reachable end-to-end.
+- **GCP / Azure / others** — **rejected** (no silent fallback). GCP's built-in `default-allow-ssh` permits tcp:22 from `0.0.0.0/0` and an additive ALLOW rule cannot subtract that access, so a per-run rule would imply a restriction it does not enforce; restrict SSH at the network/NSG level instead.
 
-The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. `run` rejects `--allow-ssh-from` up front when the recommended target is not `hetzner-vm`. *Note: the Hetzner firewall create/attach/delete lifecycle is covered by argv-level unit tests but has not been smoke-tested against live cloud APIs.* When `--allow-ssh-from` is unset, no firewall is attached and provider defaults apply — operators remain responsible for account- or VPC-level firewalls, and for any non-SSH workload-bound ports.
+The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. Operators remain responsible for restricting any non-SSH workload-bound ports.
 
 ## LLM trust boundary
 
@@ -96,6 +112,8 @@ Cloud VMs created by dispatcher run a watchdog that polls a deadline file. If di
 The watchdog is installed by cloud-init as a `systemd` service (`Restart=always`, enabled for `multi-user.target`) with its deadline persisted under `/var/lib/dispatcher` (on-disk, not tmpfs). This means the backstop survives a VM reboot — after a reboot systemd re-launches it and it re-reads the persisted deadline, shutting down immediately if the deadline already passed.
 
 Default TTL is 30 minutes; tune via `watchdogTtl` in `dispatcher.yaml` or `--watchdog-ttl`.
+
+**Azure caveat:** the self-destruct is a guest-side `shutdown`, which stops compute billing on Hetzner/AWS/GCP. On Azure a guest halt leaves the VM *Stopped (allocated)* — still fully compute-billing; only a control-plane `az vm deallocate` (which the credential-less guest cannot call) stops charges. So on Azure the watchdog caps the OS but not compute cost; the deallocating backstop is `dispatcher gc`, which reaps stopped-but-allocated Azure VMs (manual/scheduled, not automatic). Auto-deallocation on Azure (managed identity + IMDS) is tracked in the roadmap.
 
 ## History and run state
 

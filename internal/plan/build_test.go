@@ -37,6 +37,22 @@ func TestBuild_PythonScript(t *testing.T) {
 	assert.True(t, p.Validation.IsValid())
 }
 
+func TestBuild_MergesRegionFromConfig(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "main.py", `print("hi")`)
+	writeFile(t, dir, "dispatcher.yaml", "name: app\nregion: eu-west-1\n")
+
+	// No --region flag → the config value fills the constraint.
+	p, err := Build(dir, types.PlanConstraints{OptimizeFor: types.OptimizeCost}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "eu-west-1", p.Constraints.Region)
+
+	// A flag-provided region wins over config.
+	p2, err := Build(dir, types.PlanConstraints{OptimizeFor: types.OptimizeCost, Region: "us-east-2"}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "us-east-2", p2.Constraints.Region)
+}
+
 func TestBuild_DockerizedService(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "Dockerfile", "FROM python:3.11\nEXPOSE 8080\nCMD [\"python\", \"app.py\"]")

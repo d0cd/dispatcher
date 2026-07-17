@@ -47,7 +47,38 @@ type GPURequirement struct {
 type ResourceRequirements struct {
 	CPU    string         `yaml:"cpu,omitempty" json:"cpu,omitempty"`
 	Memory string         `yaml:"memory,omitempty" json:"memory,omitempty"`
+	Arch   string         `yaml:"arch,omitempty" json:"arch,omitempty"`
 	GPU    GPURequirement `yaml:"gpu" json:"gpu"`
+	// Confidential, when Required, demands a TEE-backed VM (hardware-encrypted
+	// memory: AMD SEV/SEV-SNP, Intel TDX). Only confidential-capable
+	// targets/instances offering the requested Type are feasible.
+	Confidential ConfidentialRequirement `yaml:"confidential,omitempty" json:"confidential,omitempty"`
+	// Sandbox, when true, requires an isolated target (container- or VM-level
+	// isolation, not a bare host process). It filters targets by their isolation
+	// capability rather than replacing the detected workload kind.
+	Sandbox bool `yaml:"sandbox,omitempty" json:"sandbox,omitempty"`
+}
+
+// ConfidentialRequirement describes a workload's confidential-computing demand.
+type ConfidentialRequirement struct {
+	Required bool `yaml:"required" json:"required"`
+	// Type is the TEE technology: "sev" | "sev-snp" | "tdx" | "" (any).
+	Type string `yaml:"type,omitempty" json:"type,omitempty"`
+	// Profile selects a measured-boot attestation backend, orthogonal to Type:
+	// "azure-snp" (direct SNP+vTPM, agent measured into PCR11) or "nitro" (AWS
+	// Nitro Enclaves). Empty is valid only for GCP Confidential Space (which needs
+	// no profile); attested runs on aws-vm/azure-vm require an explicit profile.
+	Profile string `yaml:"profile,omitempty" json:"profile,omitempty"`
+	// Attestation is "required" (default — the run only proceeds after the TEE
+	// report verifies) or "off" (provision the TEE but skip verification).
+	Attestation string `yaml:"attestation,omitempty" json:"attestation,omitempty"`
+	// Measurements is the EXACT allowlist of acceptable launch measurements (hex)
+	// the verifier enforces (R7). An empty allowlist fails closed under
+	// attestation: required — there is no genuine measurement to trust.
+	Measurements []string `yaml:"measurements,omitempty" json:"measurements,omitempty"`
+	// MinTCB is the minimum acceptable reported TCB/firmware version. Reports
+	// below it are rejected as running known-vulnerable platform firmware.
+	MinTCB uint64 `yaml:"minTCB,omitempty" json:"minTCB,omitempty"`
 }
 
 // PackagePlan describes how to package a workload for execution.
@@ -89,6 +120,13 @@ type WorkloadSpec struct {
 	// remote execution targets before teardown. Populated by dispatcher.yaml
 	// or by auto-detecting a default `outputs/` directory.
 	Outputs []string `yaml:"outputs,omitempty" json:"outputs,omitempty"`
+	// Shard, when Enabled, fans this workload out across many runs. Populated
+	// from the dispatcher.yaml `shard:` / `aggregate:` blocks.
+	Shard ShardSpec `yaml:"shard,omitempty" json:"shard,omitempty"`
+	// Env is extra runtime environment injected into the workload alongside its
+	// .env (Env wins on conflict). Used to hand a shard its SHARD_INDEX/
+	// SHARD_COUNT identity. Runtime-only — it never affects the build.
+	Env map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
 }
 
 // WorkloadSource identifies where the workload came from.

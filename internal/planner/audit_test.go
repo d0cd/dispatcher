@@ -63,7 +63,8 @@ func TestDeterministicAudit_ServiceMissingDockerfile(t *testing.T) {
 	dir := writeAuditFixture(t, map[string]string{
 		"app.py": "from flask import Flask\napp = Flask(__name__)\napp.run(port=8080)",
 		"dispatcher.yaml": `name: my-svc
-ports: [8080]
+service:
+  port: 8080
 `,
 	})
 

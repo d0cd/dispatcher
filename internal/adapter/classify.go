@@ -55,6 +55,11 @@ const (
 //   - SIGKILL (without OOM flag) → transient. Possibly OOM that the adapter
 //     couldn't confirm, possibly preemption, possibly external kill.
 //   - SIGTERM → transient. Almost always the platform terminating us.
+//   - An exit code that ENCODES a KILL/TERM signal → transient. Adapters that
+//     only capture `$?` (the cloud SSH runner) can't set Signal, so a signal
+//     kill arrives as 128+signal (137=SIGKILL) or a runtime's unsigned wrap of
+//     a negative return code (256-signal: 247=Python's -9). A crash signal
+//     (SIGSEGV etc.) is a workload defect and stays permanent.
 //   - Empty FailureDetails (no signal we can read) → unknown.
 //   - Any other non-zero exit code → permanent. Workload-specific failure.
 //
@@ -70,8 +75,31 @@ func ClassifyFailure(d FailureDetails) FailureKind {
 	case "killed", "SIGKILL", "SIGTERM", "terminated":
 		return FailureTransient
 	}
+	if killSignalExit(d.ExitCode) {
+		return FailureTransient
+	}
 	if d.ExitCode == 0 && d.Signal == "" && d.Message == "" {
 		return FailureUnknown
 	}
 	return FailurePermanent
+}
+
+// killSignalExit reports whether a raw process exit code encodes termination by
+// a KILL or TERM signal — probably environmental (OOM/preemption) rather than a
+// workload bug. Two encodings are recognized: the shell's 128+signal convention
+// (137=SIGKILL, 143=SIGTERM) and the unsigned-byte wrap of a negative return code
+// that runtimes like Python emit (256-signal: 247=SIGKILL, 241=SIGTERM). Crash
+// signals (SIGSEGV, SIGABRT, …) are deliberately excluded: a crash is a defect,
+// not something a retry fixes.
+func killSignalExit(code int) bool {
+	var sig int
+	switch {
+	case code > 128 && code < 192: // 128 + signal
+		sig = code - 128
+	case code >= 241 && code <= 255: // 256 - signal (unsigned wrap of -signal)
+		sig = 256 - code
+	default:
+		return false
+	}
+	return sig == 9 || sig == 15 // SIGKILL, SIGTERM
 }

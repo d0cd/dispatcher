@@ -12,13 +12,21 @@ import (
 )
 
 var historyCmd = &cobra.Command{
-	Use:   "history",
-	Short: "Show historical run data and statistics",
-	Long:  "Displays statistics from past runs used to improve cost and duration estimates.",
+	Use:         "history",
+	Annotations: map[string]string{supportsJSON: "true"},
+	Short:       "Show historical run data and statistics",
+	Long:        "Displays statistics from past runs used to improve cost and duration estimates.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		history, err := cost.NewHistoryStore()
 		if err != nil {
 			return fmt.Errorf("cannot load history: %w", err)
+		}
+
+		if jsonOutput() {
+			return emitJSON(struct {
+				Entries int                         `json:"entries"`
+				Targets map[string]cost.TargetStats `json:"targets"`
+			}{history.Len(), history.AllStats()})
 		}
 
 		if history.Len() == 0 {

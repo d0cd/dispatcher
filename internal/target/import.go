@@ -175,7 +175,8 @@ func PlanImport(blob []byte) (*ImportPlan, error) {
 	return plan, nil
 }
 
-// ImportFromJSON plans and commits in one step (non-interactive callers/tests).
+// ImportFromJSON plans and commits an import in one step, for tests and any
+// future non-interactive caller.
 func ImportFromJSON(blob []byte) (*ImportResult, error) {
 	plan, err := PlanImport(blob)
 	if err != nil {

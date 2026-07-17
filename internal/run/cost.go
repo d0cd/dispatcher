@@ -70,8 +70,19 @@ func (r *Run) ComputeLiveCost() types.CostEstimate {
 	}
 }
 
-// FinalizeCost computes the final cost and stores it on the run.
+// FinalizeCost computes the final cost and stores it on the run. When the plan
+// is unavailable (a run reconstructed from a record on stop/force-stop), the
+// live cost can't be recomputed — preserve whatever cost was already accrued
+// rather than overwriting it with a zero estimate.
 func (r *Run) FinalizeCost() {
+	r.mu.RLock()
+	noPlan := r.Plan == nil || r.Plan.Recommendation == nil
+	priorValue := r.Cost.Value
+	r.mu.RUnlock()
+
+	if noPlan && priorValue > 0 {
+		return
+	}
 	est := r.ComputeLiveCost()
 	r.setCost(est)
 }

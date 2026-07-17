@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/plan"
 )
 
@@ -56,6 +57,17 @@ func ReconnectToRun(ctx context.Context, runID string, resolve AdapterResolver) 
 		return nil, nil, fmt.Errorf("cannot resolve adapter for target %q: %w", record.TargetID, err)
 	}
 
+	// Load the plan regardless of durability: FinalizeCost/ComputeLiveCost need it,
+	// and the non-durable path never loaded it — so a stopped run's cost fell back
+	// to ConfidenceUnknown even when the plan was available. Best-effort: a genuine
+	// load failure leaves Plan nil (cost reports ConfidenceUnknown, honestly) rather
+	// than blocking a teardown-only reconnect that needs no plan.
+	if p, err := plan.Load(record.PlanID); err == nil {
+		r.Plan = p
+	} else {
+		dlog.L().Warn("reconnect.plan.load.failed", "run", runID, "plan", record.PlanID, "err", err.Error())
+	}
+
 	// Check if adapter supports reconnection
 	durable, ok := a.(adapter.DurableAdapter)
 	if !ok {
@@ -75,11 +87,6 @@ func ReconnectToRun(ctx context.Context, runID string, resolve AdapterResolver) 
 	}
 	r.Handle = handle
 
-	// Load the plan from plan store
-	if p, err := plan.Load(record.PlanID); err == nil {
-		r.Plan = p
-	}
-
 	return r, a, nil
 }
 
@@ -98,6 +105,8 @@ func RunFromRecord(rec *RunRecord) *Run {
 		Cost:          rec.Cost,
 		Failure:       rec.Failure,
 		RetryCount:    rec.RetryCount,
+		CleanupError:  rec.CleanupError,
+		Timeline:      rec.Timeline,
 		HandleID:      rec.HandleID,
 		HandleState:   json.RawMessage(rec.HandleState),
 		Lifecycle:     rec.Lifecycle,

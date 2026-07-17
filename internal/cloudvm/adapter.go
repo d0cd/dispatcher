@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -43,6 +44,25 @@ func NewCloudVMAdapter(provider Provider, cfg Config) *CloudVMAdapter {
 }
 
 func (a *CloudVMAdapter) ID() string { return a.targetID }
+
+// regionalProvider is optionally implemented by providers whose region/zone can
+// be re-pointed after construction — from a --region flag on create, or from
+// persisted state on reconnect — so create and teardown act on one region.
+type regionalProvider interface {
+	SetRegion(region string)
+}
+
+// applyRegion pins the adapter (and its provider, if regional) to region. A
+// no-op for empty region or single-region providers (Hetzner/Lima).
+func (a *CloudVMAdapter) applyRegion(region string) {
+	if region == "" {
+		return
+	}
+	a.config.Region = region
+	if rp, ok := a.provider.(regionalProvider); ok {
+		rp.SetRegion(region)
+	}
+}
 
 func (a *CloudVMAdapter) Validate(ctx context.Context, w types.WorkloadSpec) (types.ValidationResult, error) {
 	v := types.ValidationResult{
@@ -103,7 +123,7 @@ func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) 
 	if p.Recommendation != nil {
 		instanceType = p.Recommendation.EstimatedCost.InstanceType
 	}
-	return VMOptions{
+	opts := VMOptions{
 		Name:         vmName,
 		Region:       region,
 		InstanceType: instanceType,
@@ -115,6 +135,13 @@ func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) 
 			"dispatcher":        "true",
 		},
 	}
+	if c := p.Workload.Requirements.Confidential; c.Required {
+		opts.ConfidentialType = c.Type
+		if opts.ConfidentialType == "" {
+			opts.ConfidentialType = "any"
+		}
+	}
+	return opts
 }
 
 // validateGPUInstance refuses to provision when a workload requires a GPU but no
@@ -162,11 +189,23 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	if p.Constraints.WatchdogTTL > 0 {
 		ttl = p.Constraints.WatchdogTTL
 	}
-	userData := WatchdogCloudInit(ttl)
+	userData := WatchdogCloudInit(ttl, sshUser)
 	vmName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
 
+	// Pin the region: the plan's choice wins over the adapter default, and the
+	// provider is re-pointed so teardown later hits the same region.
+	region := p.Constraints.Region
+	if region == "" {
+		region = a.config.Region
+	}
+	a.applyRegion(region)
+
 	opts := buildVMOptions(p, a.config.Region, vmName, keyPath+".pub", userData)
+	opts.SSHUser = sshUser // the provider must authorize the key for this login
 	if err := validateGPUInstance(w, opts.InstanceType); err != nil {
+		return nil, err
+	}
+	if err := confidentialAttestationPreflight(w, a.config.ProviderID); err != nil {
 		return nil, err
 	}
 
@@ -254,12 +293,33 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	dlog.L().Info("cloudvm.keypin.ok",
 		"run", p.Metadata.ID, "vm_id", vmInfo.ID, "known_hosts", state.KnownHostsPath)
 
+	// TCP-readiness can precede the boot-time (user-data) key install on AWS,
+	// so confirm the key is actually accepted before rsync — otherwise the
+	// first transfer fails with a publickey error.
+	if err := WaitForSSHAuth(ctx, state, 2*time.Minute); err != nil {
+		return nil, fmt.Errorf("wait for authenticated ssh: %w", err)
+	}
+
 	wrapper, err := writeSSHWrapper(state, p.Metadata.ID)
 	if err != nil {
 		return nil, fmt.Errorf("build ssh wrapper: %w", err)
 	}
 	state.SSHWrapper = wrapper
 	earlyCleanup = append(earlyCleanup, wrapper)
+
+	// Verify TEE attestation before running anything on a confidential VM. A
+	// rejection or error returns here, and the destroyOnErr defer tears the VM
+	// down — we never run a workload on a VM we couldn't prove.
+	if att, err := verifyConfidential(ctx, a.config.ProviderID, vmInfo, effectiveKey, effectiveUser, w.Requirements.Confidential); err != nil {
+		return nil, err
+	} else if att != nil {
+		state.Attestation = att
+		if att.Verified {
+			dlog.L().Info("cloudvm.attested", "run", p.Metadata.ID, "vm_id", vmInfo.ID, "type", att.Type)
+		} else {
+			dlog.L().Warn("cloudvm.attestation_unverified", "run", p.Metadata.ID, "vm_id", vmInfo.ID, "verdict", att.Verdict)
+		}
+	}
 
 	// cloud-init restarts sshd during its "final" phase; wait for it to
 	// avoid mid-flight exit-255 failures. No-op on images without cloud-init.
@@ -270,6 +330,14 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	} else {
 		dlog.L().Info("cloudvm.cloudinit_done", "run", p.Metadata.ID, "vm_id", vmInfo.ID)
 	}
+
+	// Execute does not return a durable handle until source upload and workload
+	// startup finish. The normal executor heartbeat cannot renew the VM watchdog
+	// before then, so a large rsync can outlive the TTL and make a correctly
+	// supervised VM shut itself down mid-transfer. Maintain the lease during
+	// this setup window, then hand renewal back to the executor with the handle.
+	stopSetupWatchdog := maintainSetupWatchdog(ctx, state, ttl)
+	defer stopSetupWatchdog()
 
 	// Rsync source to VM
 	if err := rsyncToVM(ctx, state, w.Source.Path); err != nil {
@@ -298,6 +366,39 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	}, nil
 }
 
+func maintainSetupWatchdog(ctx context.Context, state *CloudVMState, ttl time.Duration) context.CancelFunc {
+	renewCtx, cancel := context.WithCancel(ctx)
+	interval := setupWatchdogInterval(ttl)
+	go func() {
+		// Renew immediately so the setup phase gets a full TTL rather than the
+		// remainder of the boot-time lease.
+		if _, err := ExtendWatchdogViaSSH(renewCtx, state, ttl); err != nil && renewCtx.Err() == nil {
+			dlog.L().Warn("cloudvm.setup_watchdog_renew_failed", "vm_id", state.VMID, "err", err.Error())
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := ExtendWatchdogViaSSH(renewCtx, state, ttl); err != nil && renewCtx.Err() == nil {
+					dlog.L().Warn("cloudvm.setup_watchdog_renew_failed", "vm_id", state.VMID, "err", err.Error())
+				}
+			}
+		}
+	}()
+	return cancel
+}
+
+func setupWatchdogInterval(ttl time.Duration) time.Duration {
+	interval := ttl / 3
+	if interval < time.Second {
+		interval = time.Second
+	}
+	return interval
+}
+
 func (a *CloudVMAdapter) Status(ctx context.Context, h *adapter.RunHandle) (types.RunState, error) {
 	state := h.State.(*CloudVMState)
 
@@ -317,7 +418,12 @@ func (a *CloudVMAdapter) Status(ctx context.Context, h *adapter.RunHandle) (type
 		args := sshCmdArgs(state, checkCmd)
 		output, err := exec.CommandContext(ctx, "ssh", args...).Output()
 		if err != nil {
-			return types.RunStateExecutionFailed, nil
+			// The provider proves that the VM exists, but only SSH can prove that
+			// dispatcher's in-guest supervisor remains observable. Surface loss of
+			// that channel as an indeterminate Status error. The executor tolerates
+			// a bounded number of consecutive errors, preventing both a one-blip
+			// teardown and an unlimited, permanently unobservable billing loop.
+			return types.RunStateRunning, fmt.Errorf("ssh liveness probe failed: %w", err)
 		}
 		if strings.TrimSpace(string(output)) == "done" {
 			// Read the exit-code file the runner script wrote; without it
@@ -354,18 +460,90 @@ func (a *CloudVMAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDet
 	if !ok {
 		return adapter.FailureDetails{Message: "no cloud vm state"}
 	}
+	// Capture kernel/cgroup OOM evidence from the still-alive VM before teardown,
+	// so diagnose can state OOM as a fact rather than a guess.
+	ev := captureFailureEvidence(state)
+
 	if !state.LastExitCodeRead {
-		return adapter.FailureDetails{
+		fd := adapter.FailureDetails{
 			Signal:  "SIGKILL",
 			Message: "workload terminated before exit code was captured (likely OOM or external kill)",
 		}
+		if ev.oomKilled {
+			fd.OOMKilled = true
+			fd.Message = "workload OOM-killed: " + ev.summary
+		}
+		return fd
 	}
 	fd := adapter.FailureDetails{ExitCode: state.LastExitCode}
 	if state.LastExitCode != 0 {
 		fd.Message = fmt.Sprintf("workload exited with code %d on %s VM %s",
 			state.LastExitCode, state.Provider, state.VMID)
 	}
+	// Kernel evidence turns a 137/SIGKILL guess into a confirmed OOM.
+	if ev.oomKilled {
+		fd.OOMKilled = true
+		fd.Message = "workload OOM-killed: " + ev.summary + " (" + fd.Message + ")"
+	}
 	return fd
+}
+
+// failureEvidence is the OOM verdict captureFailureEvidence extracts from a
+// failed VM's kernel log / cgroup before teardown.
+type failureEvidence struct {
+	oomKilled bool
+	summary   string // bounded, human-readable
+}
+
+// maxEvidenceSummary bounds the captured evidence line kept on the run record —
+// kernel lines can be long and workload-private detail shouldn't accumulate.
+const maxEvidenceSummary = 200
+
+// captureFailureEvidence best-effort SSHes the still-alive VM for OOM evidence:
+// the kernel OOM-killer lines and the cgroup oom_kill counter. Empty when the VM
+// is unreachable (already torn down / network gone) — absence is not evidence.
+func captureFailureEvidence(state *CloudVMState) failureEvidence {
+	// dmesg is root-restricted on stock images; try sudo then fall back. The
+	// cgroup memory.events oom_kill counter is world-readable.
+	cmd := "{ sudo -n dmesg 2>/dev/null || dmesg 2>/dev/null; } | grep -iE 'out of memory|oom-kill|killed process' | tail -5; " +
+		"cat /sys/fs/cgroup/memory.events 2>/dev/null | grep -E '^oom_kill '"
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	// Parse whatever stdout we get even on a non-zero exit: the trailing cgroup
+	// grep exits 1 when it finds nothing, which would otherwise discard a dmesg
+	// OOM line already on stdout. A total SSH failure just yields "" (not OOM).
+	out, _ := exec.CommandContext(ctx, "ssh", sshCmdArgs(state, cmd)...).Output()
+	return parseOOMEvidence(string(out))
+}
+
+// parseOOMEvidence classifies captured kernel/cgroup output. OOM is confirmed
+// only by a kernel OOM-killer line or a non-zero cgroup oom_kill counter;
+// otherwise the verdict is "not confirmed" (uncertainty preserved).
+func parseOOMEvidence(raw string) failureEvidence {
+	oom := false
+	summary := ""
+	for _, line := range strings.Split(raw, "\n") {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "out of memory") || strings.Contains(lower, "oom-kill") || strings.Contains(lower, "killed process") {
+			oom = true
+			if summary == "" {
+				summary = strings.TrimSpace(line)
+			}
+		}
+		if f := strings.Fields(line); len(f) == 2 && f[0] == "oom_kill" && f[1] != "0" {
+			oom = true
+		}
+	}
+	if !oom {
+		return failureEvidence{}
+	}
+	if summary == "" {
+		summary = "cgroup oom_kill counter is non-zero"
+	}
+	if len(summary) > maxEvidenceSummary {
+		summary = summary[:maxEvidenceSummary] + "…"
+	}
+	return failureEvidence{oomKilled: true, summary: summary}
 }
 
 // Logs spawns `ssh ... tail -f` in a goroutine and returns immediately so
@@ -436,9 +614,6 @@ func (a *CloudVMAdapter) Artifacts(ctx context.Context, h *adapter.RunHandle) ([
 			continue
 		}
 
-		// `--safe-links` blocks symlinks pointing outside the tree (workload
-		// can't plant /etc/shadow). `--protect-args` blocks remote-shell
-		// re-tokenization of paths.
 		// `--safe-links` blocks rsync from following symlinks that point
 		// outside the transferred tree (defense against a workload planting
 		// a symlink to /etc/shadow in outputs/). `--protect-args` disables
@@ -456,7 +631,12 @@ func (a *CloudVMAdapter) Artifacts(ctx context.Context, h *adapter.RunHandle) ([
 			"-az", "--safe-links", "--protect-args",
 			"-e", eArg, remoteSrc, localDest)
 		if err := cmd.Run(); err != nil {
-			// Exit 23 = partial transfer (workload didn't produce path); skip.
+			// rsync exit 23 = partial transfer: a declared but optional output the
+			// workload didn't produce. That's not a failure — skip it without
+			// recording an error; any other exit code is a real transfer failure.
+			if rsyncExitCode(err) == 23 {
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("rsync %s: %w", out, err)
 			}
@@ -477,6 +657,16 @@ func (a *CloudVMAdapter) Artifacts(ctx context.Context, h *adapter.RunHandle) ([
 	}
 
 	return refs, firstErr
+}
+
+// rsyncExitCode returns the process exit code from a failed rsync exec, or -1 if
+// the error isn't a process exit (e.g. rsync not found, context cancelled).
+func rsyncExitCode(err error) int {
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
 }
 
 func (a *CloudVMAdapter) Terminate(ctx context.Context, h *adapter.RunHandle) error {
@@ -531,6 +721,10 @@ func (a *CloudVMAdapter) Reconnect(_ context.Context, handleID string, raw json.
 		return nil, fmt.Errorf("cannot deserialize handle state: %w", err)
 	}
 
+	// Re-point the freshly-constructed provider at the VM's region so status
+	// checks and teardown after a CLI restart hit where the VM actually lives.
+	a.applyRegion(state.Region)
+
 	return &adapter.RunHandle{
 		ID:       handleID,
 		TargetID: a.targetID,
@@ -543,17 +737,32 @@ func (a *CloudVMAdapter) ExtendWatchdog(ctx context.Context, h *adapter.RunHandl
 	return ExtendWatchdogViaSSH(ctx, state, ttl)
 }
 
+// resourceEnumerator is an optional Provider capability: enumerate ALL
+// dispatcher-tagged billable resources (beyond instances — disks/images/
+// snapshots/addresses/firewalls) and destroy them by kind. Providers implement
+// it incrementally; the adapter falls back to ListVMs/DestroyVM otherwise.
+type resourceEnumerator interface {
+	ListResources(ctx context.Context) ([]adapter.ResourceInfo, error)
+	DestroyResource(ctx context.Context, res adapter.ResourceInfo) error
+}
+
 func (a *CloudVMAdapter) ListResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	if re, ok := a.provider.(resourceEnumerator); ok {
+		return re.ListResources(ctx)
+	}
+	// Fallback: instances only. VMInfo doesn't carry the instance type, so cost
+	// is left to the per-provider enumerator (Phase 2); an orphaned running
+	// instance is reaped regardless.
 	vms, err := a.provider.ListVMs(ctx, map[string]string{"dispatcher": "true"})
 	if err != nil {
 		return nil, err
 	}
-
 	var resources []adapter.ResourceInfo
 	for _, vm := range vms {
 		resources = append(resources, adapter.ResourceInfo{
 			ResourceID: vm.ID,
 			Provider:   string(a.config.ProviderID),
+			Kind:       adapter.ResourceInstance,
 			CreatedAt:  vm.CreatedAt,
 			RunID:      vm.Tags["dispatcher-run-id"],
 			Tags:       vm.Tags,
@@ -562,8 +771,19 @@ func (a *CloudVMAdapter) ListResources(ctx context.Context) ([]adapter.ResourceI
 	return resources, nil
 }
 
-func (a *CloudVMAdapter) DestroyResource(ctx context.Context, resourceID string) error {
-	return a.provider.DestroyVM(ctx, resourceID)
+func (a *CloudVMAdapter) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	// Hard ownership boundary: never modify a resource dispatcher doesn't own.
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
+	if re, ok := a.provider.(resourceEnumerator); ok {
+		return re.DestroyResource(ctx, res)
+	}
+	// Fallback providers only know how to destroy instances.
+	if res.Kind != "" && res.Kind != adapter.ResourceInstance {
+		return fmt.Errorf("provider %s cannot destroy %s resources yet", a.config.ProviderID, res.Kind)
+	}
+	return a.provider.DestroyVM(ctx, res.ResourceID)
 }
 
 // --- helpers ---
@@ -588,6 +808,11 @@ func providerBaseRate(p ProviderID) float64 {
 // to reclaim key material when reaping an orphaned VM, since the normal Cleanup
 // path never ran. Best-effort: missing files are ignored.
 func RemoveRunKeyFiles(runID string) {
+	// runID can come from a cloud VM tag; a separator or traversal in it would
+	// let os.Remove escape the keys dir, so refuse anything path-unsafe.
+	if strings.ContainsAny(runID, "/\\") || strings.Contains(runID, "..") {
+		return
+	}
 	keyDir, err := statedir.Subdir("keys")
 	if err != nil {
 		return
@@ -657,13 +882,45 @@ func rsyncToVM(ctx context.Context, state *CloudVMState, sourcePath string) erro
 	}
 
 	dest := fmt.Sprintf("%s@%s:%s/", state.SSHUser, state.IP, state.RemoteDir)
-	eArg, err := sshWrapperArg(state)
+	rsyncArgs, err := rsyncUploadArgs(state, sourcePath, dest)
 	if err != nil {
 		return err
 	}
-	rsyncArgs := []string{"-az", "--delete", "--progress", "--protect-args", "-e", eArg}
+
+	var lastErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		cmd := exec.CommandContext(ctx, "rsync", rsyncArgs...)
+		cmd.Stdout = os.Stderr
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err == nil {
+			return nil
+		} else {
+			lastErr = err
+			if rsyncExitCode(err) != 255 || attempt == 4 {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "rsync transport interrupted; resuming partial transfer (attempt %d/4)\n", attempt+1)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt) * 5 * time.Second):
+		}
+	}
+	return fmt.Errorf("rsync failed: %w", lastErr)
+}
+
+func rsyncUploadArgs(state *CloudVMState, sourcePath, dest string) ([]string, error) {
+	eArg, err := sshWrapperArg(state)
+	if err != nil {
+		return nil, err
+	}
+	args := []string{
+		"-az", "--delete", "--progress", "--protect-args",
+		"--partial", "--append-verify", "-e", eArg,
+	}
 	for _, ex := range []string{".git", "node_modules", ".venv", "venv", "__pycache__", ".dispatcher"} {
-		rsyncArgs = append(rsyncArgs, "--exclude", ex)
+		args = append(args, "--exclude", ex)
 	}
 	// .dispatchignore patterns starting with `-` would be parsed by rsync
 	// as flags (--include, --delete-after, ...) — option injection.
@@ -673,16 +930,23 @@ func rsyncToVM(ctx context.Context, state *CloudVMState, sourcePath string) erro
 			fmt.Fprintf(os.Stderr, "warning: ignoring .dispatchignore pattern %q (starts with -)\n", p)
 			continue
 		}
-		rsyncArgs = append(rsyncArgs, "--exclude", p)
+		args = append(args, "--exclude", p)
 	}
-	rsyncArgs = append(rsyncArgs, sourcePath+"/", dest)
-	cmd := exec.CommandContext(ctx, "rsync", rsyncArgs...)
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("rsync failed: %w", err)
-	}
-	return nil
+	return append(args, sourcePath+"/", dest), nil
+}
+
+// controlPlaneNiceness lowers the workload's CPU scheduling priority so a
+// CPU-saturating job can't starve dispatcher's on-VM control plane — sshd, the
+// watchdog-renewal SSH, and log streaming — which otherwise surfaces as SSH
+// timeouts mid-run. The workload author does nothing; the nicer priority only
+// yields CPU when the box is contended, so throughput is unaffected when idle.
+const controlPlaneNiceness = 10
+
+// niceCommand wraps a workload command so it runs at lower CPU priority, leaving
+// headroom for the control plane. `nice` is coreutils (present on every image)
+// and propagates the wrapped command's exit code.
+func niceCommand(cmdStr string) string {
+	return fmt.Sprintf("nice -n %d %s", controlPlaneNiceness, cmdStr)
 }
 
 func startWorkloadOnVM(ctx context.Context, state *CloudVMState, w types.WorkloadSpec) error {
@@ -696,7 +960,7 @@ func startWorkloadOnVM(ctx context.Context, state *CloudVMState, w types.Workloa
 		return fmt.Errorf("no command or entrypoint for remote execution")
 	}
 
-	envExports, err := adapter.DotEnvExportScript(w.Source.Path)
+	envExports, err := adapter.DotEnvExportScript(w.Source.Path, w.Env)
 	if err != nil {
 		return err
 	}
@@ -714,7 +978,7 @@ func startWorkloadOnVM(ctx context.Context, state *CloudVMState, w types.Workloa
 			"} > %s 2>&1\n"+
 			"echo $? > %s\n",
 		adapter.ShellQuote(state.RemoteDir),
-		cmdStr,
+		niceCommand(cmdStr),
 		adapter.ShellQuote(logPath),
 		adapter.ShellQuote(exitCodePath),
 	)

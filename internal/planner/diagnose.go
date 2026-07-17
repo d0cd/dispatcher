@@ -22,7 +22,7 @@ The user gives you a run ID. Your job is to figure out what happened — whether
 
 You have these tools:
 
-1. inspect_run — load the run's persisted state, error, cost, and log tail. ALWAYS call this first.
+1. inspect_run — load the run's persisted state, redacted error, and cost. A redacted log tail is available only when the operator explicitly opted in. ALWAYS call this first.
 2. get_run_history — historical statistics for the same target. Use this to decide whether what happened is normal or anomalous (e.g. "this target's runs usually finish in 4m but yours stopped at 30s").
 
 Workflow: inspect_run first. Then, if the result raises questions about historical norms, follow up with get_run_history. Do not attempt to re-inspect the workload directory — that's outside the diagnose tool's scope; ask the user to run 'dispatcher audit <path>' separately if needed.
@@ -39,7 +39,7 @@ can verify against dispatcher's own state: run state, exit code,
 signal, OOMKilled, cost numbers, target ID, retry count.
 
 Be specific:
-- Quote the actual run state, error, and log lines you saw.
+- Quote the actual run state and redacted error. Use log lines only when the tool returned them; never infer omitted logs.
 - Distinguish "the workload crashed" from "the platform tore it down" from "still running".
 - If the run is still running and just slow, say so plainly — don't fabricate a failure.
 - If cost overran the budget, name the dollar amounts.
@@ -127,8 +127,11 @@ func (p *Planner) DeterministicDiagnose(ctx context.Context, runID string) (*Dia
 }
 
 func mergeDiagnoseStructured(res *DiagnoseResult, content string) {
+	// Strip a markdown code fence first (like the audit path): a backend that wraps
+	// its JSON in ```json ... ``` would otherwise fail to parse and leave the raw
+	// fenced blob as the explanation shown to the user.
 	var parsed DiagnoseResult
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(stripMarkdownFence(content)), &parsed); err != nil {
 		return
 	}
 	if parsed.Explanation != "" {
@@ -150,14 +153,23 @@ func mergeDiagnoseStructured(res *DiagnoseResult, content string) {
 }
 
 func deterministicExplanation(i RunInspection) string {
+	var base string
 	switch {
 	case i.Error != "":
-		return fmt.Sprintf("Run %s ended in state %s with error: %s", i.ID, i.State, i.Error)
+		base = fmt.Sprintf("Run %s ended in state %s with error: %s", i.ID, i.State, i.Error)
 	case i.FinishedAt != "":
-		return fmt.Sprintf("Run %s finished in state %s after %.0fs on target %s", i.ID, i.State, i.DurationSec, i.TargetID)
+		base = fmt.Sprintf("Run %s finished in state %s after %.0fs on target %s", i.ID, i.State, i.DurationSec, i.TargetID)
 	default:
-		return fmt.Sprintf("Run %s is currently in state %s on target %s", i.ID, i.State, i.TargetID)
+		base = fmt.Sprintf("Run %s is currently in state %s on target %s", i.ID, i.State, i.TargetID)
 	}
+	if a := i.Attestation; a != nil {
+		if a.Verified {
+			base += fmt.Sprintf(" TEE attestation verified (%s).", a.Type)
+		} else {
+			base += " TEE attestation UNVERIFIED — the confidential run was not cryptographically proven."
+		}
+	}
+	return base
 }
 
 func deterministicLikelyCause(i RunInspection) string {
@@ -205,7 +217,7 @@ func deterministicRecommendation(i RunInspection) string {
 		return "Either raise --max-cost or pick a cheaper target."
 	case "provisioning-failed":
 		return "Verify CLI credentials and quotas for the target's provider, then rerun."
-	case "running", "detached":
+	case "running":
 		return "Run is still active — wait, or use dispatcher status to monitor."
 	case "completed":
 		return "No action needed."
@@ -218,7 +230,7 @@ func severityForState(s interface{}) string {
 	switch str {
 	case "completed":
 		return "info"
-	case "running", "detached", "reconnecting":
+	case "running":
 		return "info"
 	case "budget-exceeded":
 		return "warning"

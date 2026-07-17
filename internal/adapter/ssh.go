@@ -121,7 +121,7 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 	// Build a bash script that exports the workload's .env and execs the
 	// command. Stream it over stdin into `ssh ... bash -s` so the secret
 	// values never appear in local or remote process argv (visible via `ps`).
-	envExports, err := DotEnvExportScript(w.Source.Path)
+	envExports, err := DotEnvExportScript(w.Source.Path, w.Env)
 	if err != nil {
 		return nil, err
 	}
@@ -135,7 +135,7 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 		// We construct two stdin scripts — outer for cd+build, inner for
 		// docker via heredoc — keeping all secret material off any argv.
 		image := ShellQuote("dispatcher-" + tag + ":latest")
-		envFileLines, err := DotEnvFileLines(w.Source.Path)
+		envFileLines, err := DotEnvFileLines(w.Source.Path, w.Env)
 		if err != nil {
 			return nil, err
 		}
@@ -155,19 +155,32 @@ func (s *SSHAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, er
 	if err != nil {
 		return nil, fmt.Errorf("ssh stdin pipe: %w", err)
 	}
+	// Capture the remote workload's stdout+stderr through a pipe so Logs() can
+	// stream it to the run's log. Without this the ssh subprocess inherits no
+	// stdio and its output goes to /dev/null. The parent closes its write end
+	// after Start so the reader sees EOF when the remote command exits.
+	logsR, logsW, err := os.Pipe()
+	if err != nil {
+		return nil, fmt.Errorf("ssh output pipe: %w", err)
+	}
+	cmd.Stdout = logsW
+	cmd.Stderr = logsW
 	go func() {
 		defer stdin.Close()
 		_, _ = io.WriteString(stdin, commandLine)
 	}()
 
 	if err := cmd.Start(); err != nil {
+		logsR.Close()
+		logsW.Close()
 		return nil, fmt.Errorf("SSH execution failed: %w", err)
 	}
+	logsW.Close() // child holds the only remaining write end
 
 	return &RunHandle{
 		ID:       fmt.Sprintf("ssh-%s-%s", SanitizeName(w.Name), p.Metadata.ID),
 		TargetID: "ssh",
-		State:    &sshState{cmd: cmd, outputs: w.Outputs},
+		State:    &sshState{cmd: cmd, outputs: w.Outputs, logs: logsR},
 	}, nil
 }
 
@@ -198,13 +211,19 @@ func (s *SSHAdapter) Status(_ context.Context, h *RunHandle) (types.RunState, er
 	return types.RunStateCompleted, nil
 }
 
-// Logs is a no-op for the SSH adapter. The remote workload's stdout/stderr
-// stream directly through the SSH connection to the local process's stdio;
-// dispatcher doesn't intercept them, so there's nothing extra to surface here.
-// Returning nil (rather than an "unsupported" error) keeps the executor's
-// streaming loop working — it tees the ssh subprocess output elsewhere.
-func (s *SSHAdapter) Logs(_ context.Context, _ *RunHandle, _ io.Writer) error {
-	return nil
+// Logs drains the ssh subprocess's combined stdout/stderr (captured via the
+// pipe wired in Execute) to w. It blocks until the remote command exits and the
+// pipe reaches EOF, mirroring the docker adapter's `docker logs -f` behavior so
+// the executor's streaming loop surfaces remote output. A handle without a live
+// pipe (reconstructed outside Execute) is a no-op.
+func (s *SSHAdapter) Logs(_ context.Context, h *RunHandle, w io.Writer) error {
+	ss, ok := h.State.(*sshState)
+	if !ok || ss.logs == nil {
+		return nil
+	}
+	defer ss.logs.Close()
+	_, err := io.Copy(w, ss.logs)
+	return err
 }
 
 // Artifacts retrieves each workload-declared output path from the remote
@@ -357,6 +376,12 @@ func validateRemoteDir(dir string) error {
 	if strings.Contains(dir, "..") {
 		return fmt.Errorf("RemoteDir contains traversal")
 	}
+	// Cleanup passes RemoteDir into `ssh ... rm -rf -- <dir>`, which the remote
+	// shell re-tokenizes; a metacharacter or whitespace could start a second
+	// command past the `--` guard. Reject anything but ordinary path bytes.
+	if strings.ContainsAny(dir, " \t\r\n;&|$`<>(){}[]*?!#~'\"\\") {
+		return fmt.Errorf("RemoteDir contains shell metacharacters or whitespace")
+	}
 	// Count non-empty path segments. "/" → 0, "/tmp" → 1, "/tmp/x" → 2.
 	parts := strings.Split(strings.Trim(dir, "/"), "/")
 	nonEmpty := 0
@@ -400,4 +425,8 @@ func rsyncSSHCmd(cfg SSHConfig) string {
 type sshState struct {
 	cmd     *exec.Cmd
 	outputs []string
+	// logs is the read end of the pipe the ssh subprocess writes its combined
+	// stdout/stderr to; Logs() drains it to the run's logWriter. nil for handles
+	// reconstructed outside Execute (e.g. Artifacts-only test fixtures).
+	logs *os.File
 }

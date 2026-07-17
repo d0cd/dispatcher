@@ -28,17 +28,18 @@ func TestAdjustSamplerRate(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			ticker := time.NewTicker(base)
-			defer ticker.Stop()
-			// adjustSamplerRate mutates the ticker via Reset. We can't observe
-			// the new period directly from a Ticker, but we can confirm the
-			// function runs without panicking and that the tier selection
-			// matches what we'd compute.
-			adjustSamplerRate(ticker, c.live, c.budget, base)
-			// Sanity: 100ms floor.
-			assert.GreaterOrEqual(t, c.wantUpper, 100*time.Millisecond)
+			// Assert the actual tier the pure rate function selects (a Ticker
+			// doesn't expose its period, so the previous test asserted nothing).
+			assert.Equal(t, c.wantUpper, samplerRateFor(c.live, c.budget, base))
 		})
 	}
+}
+
+// The 100ms floor holds even when a small baseline in the mid tier would compute
+// something lower.
+func TestSamplerRateFor_Floor(t *testing.T) {
+	assert.Equal(t, 100*time.Millisecond, samplerRateFor(0.6, 1.0, 120*time.Millisecond),
+		"base/2 below the floor is clamped to 100ms")
 }
 
 func TestAdjustSamplerRate_ZeroBudgetNoop(t *testing.T) {

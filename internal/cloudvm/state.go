@@ -3,6 +3,8 @@ package cloudvm
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/d0cd/dispatcher/internal/attest"
 )
 
 // CloudVMState is the serializable adapter state for cloud VM runs.
@@ -46,6 +48,9 @@ type CloudVMState struct {
 	// rsynced back before VM destruction. Persisted with state so reconnected
 	// runs (CLI restart, watchdog rescue) still know what to retrieve.
 	Outputs []string `json:"outputs,omitempty"`
+	// Attestation records the TEE attestation verdict for a confidential run
+	// (nil for non-confidential or attestation:off runs).
+	Attestation *attest.AttestationResult `json:"attestation,omitempty"`
 }
 
 // MarshalHandleState implements adapter.SerializableState.

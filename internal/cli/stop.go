@@ -57,8 +57,16 @@ var stopCmd = &cobra.Command{
 			result, err := a.Cleanup(ctx, r.Handle)
 			if err != nil || (result != nil && !result.Success) {
 				r.SetError(types.RunStateCleanupFailed, fmt.Errorf("cleanup failed"))
+				// Finalize and surface the accrued cost even on the failure path —
+				// the operator needs to know what the (possibly still-live) run
+				// cost before reaching for `dispatcher gc`.
+				r.FinalizeCost()
 				r.Save()
-				color.New(color.FgRed).Fprintf(os.Stderr, "Cleanup failed for run %s\n", r.ID)
+				red := color.New(color.FgRed)
+				red.Fprintf(os.Stderr, "Cleanup failed for run %s\n", r.ID)
+				if r.Cost.Value > 0 {
+					fmt.Fprintf(os.Stderr, "Accrued cost: %s %s (reclaim leftover resources with `dispatcher gc`)\n", formatCost(r.Cost.Value), r.Cost.Currency)
+				}
 				return fmt.Errorf("cleanup failed")
 			}
 		}

@@ -63,31 +63,30 @@ func TestScanSourceFiles_DepthLimit(t *testing.T) {
 	assert.GreaterOrEqual(t, len(files), 4)
 }
 
-func TestDetectSubWorkloads_Monorepo(t *testing.T) {
+func TestScanSourceFiles_SkipsSymlinkedFiles(t *testing.T) {
 	dir := t.TempDir()
+	writeFile(t, dir, "real.py", "print('real')")
+	// A symlink with a source extension pointing at a host file must not be
+	// collected for inspection.
+	host := filepath.Join(t.TempDir(), "secret.py")
+	require.NoError(t, os.WriteFile(host, []byte("SECRET=1"), 0o600))
+	require.NoError(t, os.Symlink(host, filepath.Join(dir, "link.py")))
 
-	// Create two independent sub-projects
-	api := filepath.Join(dir, "api")
-	worker := filepath.Join(dir, "worker")
-	require.NoError(t, os.MkdirAll(api, 0o755))
-	require.NoError(t, os.MkdirAll(worker, 0o755))
-
-	writeFile(t, api, "package.json", `{"name": "api"}`)
-	writeFile(t, api, "index.js", "console.log('api')")
-	writeFile(t, worker, "requirements.txt", "celery\n")
-	writeFile(t, worker, "worker.py", "print('worker')")
-
-	subs := DetectSubWorkloads(dir)
-	assert.Len(t, subs, 2)
+	files := scanSourceFiles(dir, []string{".py"})
+	assert.Len(t, files, 1)
+	assert.Contains(t, files[0], "real.py")
 }
 
-func TestDetectSubWorkloads_SingleProject(t *testing.T) {
+func TestScanSourceFiles_MultiSegmentIgnore(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "main.py", "print('hello')")
-	writeFile(t, dir, "requirements.txt", "flask\n")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src", "vendor"), 0o755))
+	writeFile(t, dir, ".dispatchignore", "src/vendor\n")
+	writeFile(t, filepath.Join(dir, "src"), "main.py", "print('keep')")
+	writeFile(t, filepath.Join(dir, "src", "vendor"), "dep.py", "# skip")
 
-	subs := DetectSubWorkloads(dir)
-	assert.Nil(t, subs) // single project, no sub-workloads
+	files := scanSourceFiles(dir, []string{".py"})
+	assert.Len(t, files, 1)
+	assert.Contains(t, files[0], "main.py")
 }
 
 func TestDetectEntrypoints_Procfile(t *testing.T) {

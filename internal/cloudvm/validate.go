@@ -1,6 +1,30 @@
 package cloudvm
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
+
+// ValidateAgentURL guards a confidential-agent endpoint URL (e.g. the MAA URL)
+// before it is embedded in a remote `bash -c '...'` command. It requires an
+// http(s) URL whose characters stay within isSafeArg's charset, so the value
+// can never break out of the shell literal it is interpolated into.
+func ValidateAgentURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid agent URL %q: %w", raw, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("agent URL %q must be http or https", raw)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("agent URL %q has no host", raw)
+	}
+	if !isSafeArg(raw) {
+		return fmt.Errorf("agent URL %q contains characters outside [a-zA-Z0-9_.:/@-]", raw)
+	}
+	return nil
+}
 
 // validateLabelKV requires `[a-zA-Z0-9_.-]` on cloud tag/label keys and
 // values — a strict subset of every provider's documented charset and
@@ -9,6 +33,13 @@ import "fmt"
 func validateLabelKV(k, v string) error {
 	if k == "" {
 		return fmt.Errorf("label key is empty")
+	}
+	// Reject a leading '-' on either side: Azure appends each tag as a bare `k=v`
+	// token after `--tags`, so a key like "--admin-password" would reach `az` as a
+	// real flag rather than a tag (flag injection). isSafeArg rejects it the same
+	// way for argv tokens.
+	if k[0] == '-' || (v != "" && v[0] == '-') {
+		return fmt.Errorf("label %q=%q must not begin with '-' (would be read as a CLI flag)", k, v)
 	}
 	if !isSafeLabel(k) {
 		return fmt.Errorf("label key %q contains characters outside [a-zA-Z0-9_.-]", k)
@@ -62,6 +93,19 @@ func isSafeArg(s string) bool {
 		default:
 			return false
 		}
+	}
+	return true
+}
+
+// destroyArgsSafe guards a resource's cloud-derived id and region before they
+// are interpolated into a delete argv — defense-in-depth so a value can never
+// be reinterpreted as a flag. Region may be empty (global/RG-scoped kinds).
+func destroyArgsSafe(id, region string) bool {
+	if !isSafeArg(id) {
+		return false
+	}
+	if region != "" && !isSafeArg(region) {
+		return false
 	}
 	return true
 }

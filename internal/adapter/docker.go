@@ -66,14 +66,21 @@ func (d *DockerAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	}
 
 	if w.Package.Dockerfile != "" {
-		// Build from existing Dockerfile
-		tag := fmt.Sprintf("dispatcher-%s:latest", SanitizeName(w.Name))
-		cmd := exec.CommandContext(ctx, "docker", "build",
-			"-t", tag,
-			"-f", w.Package.Dockerfile,
-			w.Source.Path,
-		)
-		output, err := cmd.CombinedOutput()
+		// Content-addressed skip: if the existing image was built from the same
+		// Dockerfile+source (recorded in a label), the rebuild is a no-op. A
+		// digest error falls back to an unconditional build rather than failing.
+		digest, err := buildDigest(w.Package.Dockerfile, w.Source.Path)
+		tag := dockerBuildTag(w, digest)
+		if err == nil && dockerImageLabel(ctx, tag, buildContentLabel) == digest {
+			return nil
+		}
+
+		args := []string{"build", "-t", tag}
+		if digest != "" {
+			args = append(args, "--label", buildContentLabel+"="+digest)
+		}
+		args = append(args, "-f", w.Package.Dockerfile, w.Source.Path)
+		output, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("docker build failed: %s: %w", string(output), err)
 		}
@@ -84,54 +91,104 @@ func (d *DockerAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	return nil
 }
 
-func (d *DockerAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, error) {
-	w := p.Workload
-	var args []string
+// dockerRunArgs builds the argv for `docker run` for a prepared workload. It is a
+// pure function (no I/O beyond the caller-supplied envFile path) so the mount,
+// image, and command wiring can be asserted directly in tests.
+func dockerRunArgs(w types.WorkloadSpec, containerName, envFile string) ([]string, error) {
+	args := []string{"run", "--name", containerName, "--rm"}
 
-	containerName := fmt.Sprintf("dispatcher-%s-%s", SanitizeName(w.Name), p.Metadata.ID)
-
-	args = append(args, "run", "--name", containerName, "--rm")
-
-	// Add port mappings
 	for _, port := range w.Ports {
 		args = append(args, "-p", fmt.Sprintf("%d:%d", port, port))
 	}
 
-	// Use --env-file to avoid leaking secret values via `ps`-visible argv.
-	// The temp file lives only until docker has read it; cleanup runs in a
-	// goroutine after the docker CLI has had time to consume it.
-	envFile, envCleanup, err := WriteDotEnvFile(w.Source.Path)
-	if err != nil {
-		return nil, err
-	}
 	if envFile != "" {
 		args = append(args, "--env-file", envFile)
 	}
 
 	if w.Package.Dockerfile != "" {
-		// Use the built image
-		tag := fmt.Sprintf("dispatcher-%s:latest", SanitizeName(w.Name))
-		args = append(args, tag)
-	} else if w.Package.BaseImage != "" {
-		// Two flavors converge here:
-		//   - Language base image (python:3.11-slim, etc.) — we mount the
-		//     workload source so its code is visible to the interpreter.
-		//   - Pre-built image (PackageTypeImage from cfg.Image) — the user
-		//     is running a packaged tool, NOT their own code. Mounting
-		//     source would shadow the image's /app and break it.
-		if w.Package.Type != types.PackageTypeImage {
-			args = append(args, "-v", w.Source.Path+":/app", "-w", "/app")
-		}
-		args = append(args, w.Package.BaseImage)
-		if len(w.Command) > 0 {
-			args = append(args, w.Command...)
-		} else if w.Package.Type != types.PackageTypeImage && len(w.Entrypoints) > 0 {
-			// Pre-built images use the image's own ENTRYPOINT/CMD; don't
-			// override unless the user explicitly set `command:` in yaml.
-			args = append(args, runtimeCommand(w.Runtime, w.Entrypoints[0])...)
-		}
-	} else {
+		digest, _ := buildDigest(w.Package.Dockerfile, w.Source.Path)
+		args = append(args, dockerBuildTag(w, digest))
+		return args, nil
+	}
+	if w.Package.BaseImage == "" {
 		return nil, fmt.Errorf("no image or base image available")
+	}
+
+	// Two flavors converge here:
+	//   - Language base image (python:3.11-slim, etc.) — we mount the
+	//     workload source so its code is visible to the interpreter.
+	//   - Pre-built image (PackageTypeImage from cfg.Image) — the user
+	//     is running a packaged tool, NOT their own code. Mounting
+	//     source would shadow the image's /app and break it.
+	if w.Package.Type != types.PackageTypeImage {
+		// --mount (not -v) so a source path containing ':' isn't split into a
+		// bogus mount spec.
+		args = append(args, "--mount", "type=bind,source="+w.Source.Path+",target=/app", "-w", "/app")
+	}
+	args = append(args, w.Package.BaseImage)
+	if len(w.Command) > 0 {
+		args = append(args, w.Command...)
+	} else if w.Package.Type != types.PackageTypeImage && len(w.Entrypoints) > 0 {
+		// Pre-built images use the image's own ENTRYPOINT/CMD; don't
+		// override unless the user explicitly set `command:` in yaml.
+		args = append(args, runtimeCommand(w.Runtime, w.Entrypoints[0])...)
+	}
+	return args, nil
+}
+
+// dockerBuildTag derives the image tag for a Dockerfile-built workload. The
+// content digest is folded into the tag so two workloads whose names sanitize to
+// the same string don't collide on one `:latest` tag. An empty digest (its
+// computation failed) falls back to `:latest`.
+func dockerBuildTag(w types.WorkloadSpec, digest string) string {
+	base := "dispatcher-" + SanitizeName(w.Name)
+	if digest == "" {
+		return base + ":latest"
+	}
+	return base + ":" + digest
+}
+
+// dockerImageLabel reads a single label off an image via `docker image inspect`,
+// or "" if the image or label is absent. Used to decide whether a rebuild can be
+// skipped without shelling out to a full build.
+func dockerImageLabel(ctx context.Context, tag, label string) string {
+	out, err := exec.CommandContext(ctx, "docker", "image", "inspect",
+		"--format", fmt.Sprintf("{{index .Config.Labels %q}}", label),
+		tag,
+	).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// dockerContainerName derives the --name for a run. It appends the shard index
+// when present so count-mode shards (which share the workload name and plan id)
+// get distinct names on a shared docker daemon instead of colliding on one.
+func dockerContainerName(w types.WorkloadSpec, planID string) string {
+	name := fmt.Sprintf("dispatcher-%s-%s", SanitizeName(w.Name), planID)
+	if idx, ok := w.Env["SHARD_INDEX"]; ok {
+		name += "-s" + SanitizeName(idx)
+	}
+	return name
+}
+
+func (d *DockerAdapter) Execute(ctx context.Context, p *types.Plan) (*RunHandle, error) {
+	w := p.Workload
+	containerName := dockerContainerName(w, p.Metadata.ID)
+
+	// Use --env-file to avoid leaking secret values via `ps`-visible argv.
+	// The temp file's cleanup is owned by the dockerState and runs in Cleanup()
+	// once the container has been created (or immediately if provisioning fails).
+	envFile, envCleanup, err := WriteDotEnvFile(w.Source.Path, w.Env)
+	if err != nil {
+		return nil, err
+	}
+
+	args, err := dockerRunArgs(w, containerName, envFile)
+	if err != nil {
+		envCleanup() // no dockerState will be created to own the env temp file
+		return nil, err
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -193,10 +250,23 @@ func (d *DockerAdapter) FailureDetails(h *RunHandle) FailureDetails {
 		"--format", "{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}",
 		h.ID,
 	).Output()
-	if err != nil {
-		return FailureDetails{Message: "docker inspect unavailable (container may have been removed)"}
+	if err == nil {
+		return parseDockerInspect(string(out))
 	}
-	return parseDockerInspect(string(out))
+	// inspect is gone (`--rm` removed the container, or a daemon hiccup). Fall back
+	// to the foreground `docker run` client's exit code, which Status() already
+	// captured via Wait() and which equals the container's exit code — so an
+	// OOM/SIGKILLed container (137) still gets classified transient and retried,
+	// instead of being lost as an unknown failure.
+	if ds, ok := h.State.(*dockerState); ok && ds.cmd != nil && ds.cmd.ProcessState != nil {
+		code := ds.cmd.ProcessState.ExitCode()
+		fd := FailureDetails{ExitCode: code}
+		if code != 0 {
+			fd.Message = fmt.Sprintf("container exited with code %d (docker inspect unavailable)", code)
+		}
+		return fd
+	}
+	return FailureDetails{Message: "docker inspect unavailable (container may have been removed)"}
 }
 
 // parseDockerInspect turns the `{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}`

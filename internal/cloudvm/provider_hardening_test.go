@@ -2,6 +2,7 @@ package cloudvm
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,31 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// resolveZone must retry a transient list error rather than immediately
+// collapsing to the default zone — otherwise a single throttle makes DestroyVM
+// target the wrong zone and leak the VM.
+func TestResolveZone_RetriesTransient(t *testing.T) {
+	prev := DefaultRetry
+	DefaultRetry = RetryPolicy{MaxAttempts: 3, Initial: time.Millisecond, Max: 2 * time.Millisecond}
+	t.Cleanup(func() { DefaultRetry = prev })
+
+	prevCLI := runCLI
+	var calls int
+	runCLI = func(context.Context, string, ...string) ([]byte, error) {
+		calls++
+		if calls < 2 {
+			return nil, errors.New("503 Service Unavailable")
+		}
+		return []byte("us-west1-b\n"), nil
+	}
+	t.Cleanup(func() { runCLI = prevCLI })
+
+	g := NewGCPProvider("proj", "us-central1-a")
+	zone := g.resolveZone(context.Background(), "vm-1")
+	assert.Equal(t, "us-west1-b", zone, "a transient list error is retried, not collapsed to the default zone")
+	assert.Equal(t, 2, calls)
+}
 
 // TestCreateVMRetriesTransient covers C4: AWS/GCP/Azure CreateVM must route
 // their CLI invocation through Retry, so a transient error (503) is retried
@@ -59,7 +85,7 @@ func TestValidateVMArgs(t *testing.T) {
 	ok := []struct{ region, itype, image string }{
 		{"us-east-1", "t3.micro", "ami-0c7217cdde317cfec"},
 		{"fsn1", "cax11", "ubuntu-24.04"},
-		{"us-central1-a", "e2-medium", "ubuntu-2404-lts"},
+		{"us-central1-a", "e2-medium", "ubuntu-2404-lts-amd64"},
 		{"eastus", "Standard_B2s", "Canonical:ubuntu-24_04-lts:server:latest"},
 		{"us-east-1", "t3.micro", "ghcr.io/org/img@sha256:abc"},
 	}
@@ -132,7 +158,7 @@ func TestFirewallNameFromString(t *testing.T) {
 }
 
 func TestHetznerFirewallArgs(t *testing.T) {
-	assert.Equal(t, []string{"firewall", "create", "--name", "fw1"}, hetznerFirewallCreateArgs("fw1"))
+	assert.Equal(t, []string{"firewall", "create", "--name", "fw1"}, hetznerFirewallCreateArgs("fw1", nil))
 	rule := hetznerFirewallRuleArgs("fw1", "203.0.113.4/32")
 	assert.Contains(t, rule, "--source-ips")
 	assert.Contains(t, rule, "22")
@@ -146,11 +172,12 @@ func TestHetznerFirewallArgs(t *testing.T) {
 // or a no-op rule that implies SSH is locked down. GCP is included because an
 // additive ALLOW rule cannot restrict the default network's default-allow-ssh.
 func TestFirewallUnsupportedProviders(t *testing.T) {
+	// AWS is intentionally absent: it now provisions a per-run security group
+	// for SSH ingress instead of rejecting --allow-ssh-from.
 	cases := []struct {
 		name     string
 		provider Provider
 	}{
-		{"aws", NewAWSProvider("us-east-1")},
 		{"azure", NewAzureProvider("rg", "eastus")},
 		{"gcp", NewGCPProvider("proj", "us-central1-a")},
 		{"lima", NewLimaProvider()},

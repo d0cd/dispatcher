@@ -19,7 +19,10 @@ import (
 	"github.com/d0cd/dispatcher/internal/cost"
 	"github.com/d0cd/dispatcher/internal/plan"
 	"github.com/d0cd/dispatcher/internal/run"
+	"github.com/d0cd/dispatcher/internal/shard"
+	"github.com/d0cd/dispatcher/internal/target"
 	"github.com/d0cd/dispatcher/internal/types"
+	"github.com/d0cd/dispatcher/internal/workload"
 )
 
 var runFlags struct {
@@ -28,6 +31,7 @@ var runFlags struct {
 	maxCost        float64
 	timeout        string
 	gpu            string
+	region         string
 	yes            bool
 	retryTransient bool
 	watchdogTTL    string
@@ -46,7 +50,8 @@ func init() {
 	runCmd.Flags().StringVar(&runFlags.target, "target", "", "run on a specific target")
 	runCmd.Flags().StringVar(&runFlags.optimize, "optimize", "cost", "optimize for: cost, speed")
 	runCmd.Flags().Float64Var(&runFlags.maxCost, "max-cost", 0, "maximum estimated cost in USD")
-	runCmd.Flags().StringVar(&runFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, h100:1)")
+	runCmd.Flags().StringVar(&runFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, a100:1)")
+	runCmd.Flags().StringVar(&runFlags.region, "region", "", "cloud region/zone to provision in and tear down from (e.g. eu-west-1, us-central1-a); overrides dispatcher.yaml region")
 	runCmd.Flags().StringVar(&runFlags.timeout, "timeout", "", "maximum run duration (e.g. 30m, 2h)")
 	runCmd.Flags().BoolVarP(&runFlags.yes, "yes", "y", false, "auto-approve all policy gates")
 	runCmd.Flags().BoolVar(&runFlags.retryTransient, "retry-transient", false,
@@ -54,7 +59,7 @@ func init() {
 	runCmd.Flags().StringVar(&runFlags.watchdogTTL, "watchdog-ttl", "",
 		"cloud VM self-destruct timer if dispatcher dies (e.g. 15m, 2h); default 30m")
 	runCmd.Flags().StringVar(&runFlags.allowSSHFrom, "allow-ssh-from", "",
-		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); Hetzner only")
+		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); hetzner-vm and aws-vm")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -71,7 +76,22 @@ func parseOptimize(s string) (types.OptimizeGoal, error) {
 	}
 }
 
+// perRunFirewallSupported reports whether the target's provider implements the
+// per-run SSH firewall (VMOptions.AllowSSHFrom). Only these targets accept
+// --allow-ssh-from; the rest reject it rather than silently ignore it.
+func perRunFirewallSupported(target string) bool {
+	switch target {
+	case "hetzner-vm", "aws-vm":
+		return true
+	default:
+		return false
+	}
+}
+
 func runRun(cmd *cobra.Command, args []string) error {
+	if runFlags.maxCost < 0 {
+		return fmt.Errorf("--max-cost must be >= 0 (0 means no cap); got %v", runFlags.maxCost)
+	}
 	raw := "."
 	if len(args) > 0 {
 		raw = args[0]
@@ -125,6 +145,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		MaxDuration:            maxDuration,
 		RequireGPU:             runFlags.gpu,
 		TargetName:             runFlags.target,
+		Region:                 runFlags.region,
 		WatchdogTTL:            watchdogTTL,
 		RetryTransientFailures: runFlags.retryTransient,
 		AllowSSHFrom:           runFlags.allowSSHFrom,
@@ -135,7 +156,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	dim := color.New(color.Faint)
 
 	bold.Fprintln(os.Stderr, "Planning...")
-	catalog := loadLiveCatalog(os.Stderr)
+	catalog := loadLiveCatalogScoped(os.Stderr, constraints.TargetName, constraints.Region)
 	p, err := plan.Build(path, constraints, catalog)
 	if err != nil {
 		return fmt.Errorf("plan failed: %w", err)
@@ -150,10 +171,11 @@ func runRun(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no recommendation in plan")
 	}
 
-	// Per-run firewall is only implemented for Hetzner; fail before creating a
-	// run/VM rather than deep inside provisioning.
-	if runFlags.allowSSHFrom != "" && p.Recommendation.Target != "hetzner-vm" {
-		return fmt.Errorf("--allow-ssh-from is only supported on hetzner-vm; recommended target is %s — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
+	// Reject --allow-ssh-from for targets whose provider doesn't implement a
+	// per-run firewall, failing before creating a run/VM rather than deep inside
+	// provisioning (or silently ignoring the requested restriction).
+	if runFlags.allowSSHFrom != "" && !perRunFirewallSupported(p.Recommendation.Target) {
+		return fmt.Errorf("--allow-ssh-from is not supported on %s (only hetzner-vm and aws-vm implement a per-run SSH firewall) — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
 	}
 
 	// Show summary
@@ -169,10 +191,65 @@ func runRun(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stderr)
 	}
 
-	// Select adapter
-	a, err := adapterForTarget(p.Recommendation.Target)
+	// Sharded fan-out: run the workload across N shards, each a full run.
+	if p.Workload.Shard.Enabled() {
+		// A sharded run auto-approves each shard, so a plan needing approval
+		// must be approved once, up front, via --yes — never silently bypassed.
+		if len(p.RequiredApprovals) > 0 && !runFlags.yes {
+			return fmt.Errorf("this plan requires approval; sharded runs auto-approve each shard — pass --yes to approve the whole fan-out")
+		}
+		shardCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if maxDuration > 0 {
+			var cancel context.CancelFunc
+			shardCtx, cancel = context.WithTimeout(shardCtx, maxDuration)
+			defer cancel()
+		}
+		outcomes := newShardOutcomes()
+		runErr := runSharded(shardCtx, p, func(ctx context.Context, a shard.Assignment) error {
+			r, err := runOneShard(ctx, p, a)
+			outcomes.record(a.Index, r)
+			return err
+		})
+		// Aggregate outputs regardless of the run outcome — a partial fan-out
+		// still collected whatever its shards produced.
+		if dirs := outcomes.artifactDirs(); len(dirs) > 0 {
+			runsDir, _ := run.StoreDir()
+			destRoot := filepath.Join(runsDir, p.Metadata.ID+"-shards")
+			if n, aggErr := aggregateShardArtifacts(destRoot, dirs); aggErr != nil {
+				dim.Fprintf(os.Stderr, "warning: shard output aggregation incomplete: %v\n", aggErr)
+			} else if n > 0 {
+				fmt.Fprintf(os.Stderr, "Aggregated outputs from %d shards under %s\n", n, destRoot)
+			}
+		}
+		return runErr
+	}
+
+	// Select adapter — confidential runs take an attesting backend; everything
+	// else resolves by target ID.
+	a, err := adapterForPlan(cmd.Context(), p)
 	if err != nil {
 		return err
+	}
+
+	// Preflight external inputs before provisioning: a bounded Range read of each
+	// DISPATCHER_INPUT* URI catches a 403/404 source failure here — before a paid
+	// VM is created — instead of after staging fails on the box. A definitive
+	// source error aborts; a transport error also aborts (don't pay to provision
+	// against an unreachable source) but is labeled as possibly transient.
+	env, _ := workload.LoadDotEnv(p.Workload.Source.Path) // best-effort; refs also come from spec env
+	if env == nil {
+		env = map[string]string{}
+	}
+	for k, v := range p.Workload.Env {
+		env[k] = v // spec-level env wins over .env
+	}
+	if refs := workload.InputRefs(env); len(refs) > 0 {
+		client := workload.NewInputPreflightClient(20 * time.Second)
+		if err := workload.PreflightInputs(cmd.Context(), refs, client); err != nil {
+			return fmt.Errorf("input preflight failed: %w", err)
+		}
+		dim.Fprintf(os.Stderr, "Preflighted %d external input(s)\n", len(refs))
 	}
 
 	// Create and execute run
@@ -184,9 +261,22 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// "interactive" approvals).
 	if runFlags.yes {
 		executor.SetApprovalFunc(yesApproval)
-	} else {
+	} else if stdinIsTerminal() {
 		executor.SetApprovalFunc(terminalApproval)
+	} else if len(p.RequiredApprovals) > 0 {
+		// Non-TTY without --yes and the plan needs approval: install no in-process
+		// approver so the gate waits on an external `dispatcher approve <run-id>`
+		// (honoring ctx). The gate has no internal timeout, so make the wait
+		// explicit — without this notice the process appears to hang silently.
+		color.New(color.FgYellow).Fprintf(os.Stderr,
+			"This run requires approval and stdin is not a terminal.\nWaiting for `dispatcher approve %s` from another terminal (Ctrl-C to abort)", r.ID)
+		if maxDuration <= 0 {
+			fmt.Fprint(os.Stderr, "; no timeout is set, so it will wait until approved or interrupted")
+		}
+		fmt.Fprintln(os.Stderr, ".")
 	}
+	// else: non-TTY without --yes and no approvals required — the gate is never
+	// consulted, so no approver is needed.
 
 	bold.Fprintf(os.Stderr, "\nRun: %s\n", r.ID)
 	fmt.Fprintln(os.Stderr, "Status: running")
@@ -324,6 +414,48 @@ func recordRunHistory(r *run.Run, p *types.Plan) {
 // uses to resolve an adapter; tests override it to inject a fake durable adapter.
 var adapterForTargetFn = adapterForTarget
 
+// adapterForPlan selects the execution adapter for a plan: an attesting
+// confidential backend when the workload requests confidential compute, else
+// the plain target adapter. Every execution path (single run AND each shard)
+// must go through this — resolving a confidential plan via adapterForTarget
+// would silently drop attestation.
+func adapterForPlan(ctx context.Context, p *types.Plan) (adapter.TargetAdapter, error) {
+	// Fail closed on a measured-profile / target mismatch. Feasibility already
+	// prevents the plan from recommending a cross-cloud target, but a persisted
+	// or hand-forced plan must never silently fall through to a provider's
+	// unmeasured default backend.
+	if c := p.Workload.Requirements.Confidential; c.Required && c.Attestation != "off" && p.Recommendation != nil {
+		if req := target.RequiredTargetForProfile(c.Profile); req != "" && p.Recommendation.Target != req {
+			return nil, fmt.Errorf("confidential.profile: %s requires target %s, but the plan selected %s", c.Profile, req, p.Recommendation.Target)
+		}
+	}
+	switch {
+	case usesConfidentialSpace(p):
+		return newConfidentialSpaceAdapter(ctx)
+	case usesAzureSNP(p):
+		return newAzureSNPConfidentialAdapter(ctx)
+	case usesAWSNitro(p):
+		return newNitroConfidentialAdapter(ctx)
+	default:
+		// A confidential run with attestation on MUST resolve to an attesting
+		// backend. If none of the predicates matched (e.g. an empty profile on a
+		// target that isn't one of the three cloud confidential backends), fail
+		// closed rather than silently using a plain, non-attesting adapter.
+		// `attestation: off` is the escape hatch and still uses the plain path.
+		if c := p.Workload.Requirements.Confidential; c.Required && c.Attestation != "off" && p.Recommendation != nil {
+			switch p.Recommendation.Target {
+			case "aws-vm":
+				return nil, fmt.Errorf("AWS attestation requires confidential.profile: nitro; the standard SEV-SNP path cannot release secrets because its post-boot agent is not measured")
+			case "azure-vm":
+				return nil, fmt.Errorf("confidential attestation on azure-vm requires confidential.profile: azure-snp; the standard MAA path cannot release secrets because its post-boot agent is not measured")
+			default:
+				return nil, fmt.Errorf("confidential attestation required but target %q has no attesting backend", p.Recommendation.Target)
+			}
+		}
+		return adapterForTarget(p.Recommendation.Target)
+	}
+}
+
 func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 	// Check known adapters by ID first
 	switch targetID {
@@ -358,6 +490,26 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 			cloudvm.NewAzureProvider("dispatcher-rg", ""),
 			cloudvm.Config{ProviderID: cloudvm.ProviderAzure, SSHUser: "dispatcher"},
 		), nil
+	case "oci-vm":
+		// SSHUser is image-dependent (Ubuntu images use "ubuntu", Oracle Linux
+		// "opc"); the operator supplies a matching DISPATCHER_OCI_IMAGE_ID.
+		return cloudvm.NewCloudVMAdapter(
+			cloudvm.NewOCIProvider(os.Getenv("DISPATCHER_OCI_REGION")),
+			cloudvm.Config{ProviderID: cloudvm.ProviderOCI, SSHUser: "ubuntu"},
+		), nil
+	case "gcp-confidential-space":
+		// Reconnect/status/cleanup only drive VM lifecycle + stored state, so the
+		// verifier keys and image builder (needed only by Execute) are nil here.
+		return cloudvm.NewConfidentialSpaceAdapter(
+			cloudvm.NewGCPProvider(gcpProject(), ""),
+			nil, nil,
+			cloudvm.Config{ProviderID: cloudvm.ProviderGCP},
+		), nil
+	case "firecracker-vm":
+		return cloudvm.NewCloudVMAdapter(
+			cloudvm.NewFirecrackerProvider(),
+			cloudvm.Config{ProviderID: cloudvm.ProviderFirecracker, SSHUser: "root"},
+		), nil
 	}
 
 	// For unknown IDs, check the target registry for SSH targets
@@ -369,7 +521,7 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 
 	if t.Kind == types.TargetKindSSH {
 		if t.SSH == nil || t.SSH.Host == "" {
-			return nil, fmt.Errorf("ssh target %q has no host configured; set ssh.host in its target YAML or recreate with dispatcher targets add %s --host ...", targetID, targetID)
+			return nil, fmt.Errorf("ssh target %q has no host configured; set ssh.host in its target YAML or recreate with `dispatcher targets add %s --host <addr>`", targetID, targetID)
 		}
 		cfg := adapter.SSHConfig{Host: t.SSH.Host, User: "root", Port: 22}
 		if t.SSH.User != "" {

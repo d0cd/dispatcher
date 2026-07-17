@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+Landed since v0.1.0 (on the `confidential-compute` branch):
+
+- **Confidential computing, end-to-end on GCP / AWS / Azure.** Typed
+  `confidential:` requirement (`type` + measured `profile: azure-snp | nitro`),
+  SEV-SNP / MAA / Nitro verifiers with pinned roots, an in-TEE measured agent
+  that binds the per-run nonce, HPKE (RFC 9180) secret sealing, and the
+  `dispatcher confidential pins|pin|capture|build|check` measured-image pin
+  pipeline.
+- **Sharding / fan-out** (`shard:` / `aggregate:`, count + discover modes,
+  bounded-parallel engine, output aggregation).
+- **Firecracker microVM backend** and **GPU end-to-end** (GCP + AWS, driver-baked
+  images).
+- **`dispatcher trace`** (Chrome/Perfetto phase timeline), `gc` cost audit +
+  `bill` per-cloud spend, and the bring-your-own-hosts `targets import`.
+
 ## v0.1.0 — 2026-06-15
 
 Initial public release.

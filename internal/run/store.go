@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,6 +33,11 @@ type RunRecord struct {
 	// (OOM, signal, exit code) without re-running anything.
 	Failure    adapter.FailureDetails `json:"failure,omitempty"`
 	RetryCount int                    `json:"retryCount,omitempty"`
+	// CleanupError flags a failed teardown even when State is already terminal.
+	CleanupError string `json:"cleanupError,omitempty"`
+
+	// Timeline records the entry time of each phase, for `dispatcher trace`.
+	Timeline []PhaseMark `json:"timeline,omitempty"`
 
 	// Durable execution fields
 	HandleID      string          `json:"handleId,omitempty"`
@@ -60,6 +66,8 @@ func (r *Run) ToRecord() RunRecord {
 		Cost:          r.Cost,
 		Failure:       r.Failure,
 		RetryCount:    r.RetryCount,
+		CleanupError:  r.CleanupError,
+		Timeline:      r.Timeline,
 		HandleID:      r.HandleID,
 		HandleState:   r.HandleState,
 		Lifecycle:     r.Lifecycle,
@@ -105,13 +113,12 @@ func atomicWriteLocked(path string, data []byte, perm os.FileMode) error {
 	if err != nil {
 		return fmt.Errorf("open lock %s: %w", lockPath, err)
 	}
-	// Remove the lock file before closing the descriptor: flock still
-	// protects us while the fd lives, and removal stops .lock files from
-	// accumulating across long-lived deployments.
-	defer func() {
-		_ = os.Remove(lockPath)
-		lock.Close()
-	}()
+	// Do NOT unlink the lock file: removing it while holding the flock lets a
+	// second process os.OpenFile a fresh inode at the same path and flock that, so
+	// two writers would both believe they hold the lock. Keeping a stable lock file
+	// is what makes the flock actually mutually exclusive; it is one-per-run-state-
+	// file and reaped with the run dir.
+	defer lock.Close()
 	if err := flockExclusive(lock); err != nil {
 		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
 	}
@@ -138,6 +145,39 @@ func atomicWriteLocked(path string, data []byte, perm os.FileMode) error {
 	return os.Rename(tmpPath, path)
 }
 
+var planIDPattern = regexp.MustCompile(`"planId"\s*:\s*"([^"]+)"`)
+
+// RecoverPlanID returns the plan id a run record references even when the record
+// can't be fully parsed (truncated/corrupt), so gc can still protect the run's
+// (possibly live) cloud resources — VMs are tagged with the plan id, not the run
+// id. Returns "" only if the plan id can't be recovered at all.
+func RecoverPlanID(id string) string {
+	if err := validateRunID(id); err != nil {
+		return ""
+	}
+	dir, err := StoreDir()
+	if err != nil {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(dir, id+".json"))
+	if err != nil {
+		return ""
+	}
+	// Common case: a schema/field error, not truncation — a strict parse of just
+	// the plan id still works.
+	var rec struct {
+		PlanID string `json:"planId"`
+	}
+	if json.Unmarshal(data, &rec) == nil && rec.PlanID != "" {
+		return rec.PlanID
+	}
+	// Truncated/invalid JSON: recover the plan id lexically.
+	if m := planIDPattern.FindSubmatch(data); m != nil {
+		return string(m[1])
+	}
+	return ""
+}
+
 func LoadRecord(id string) (*RunRecord, error) {
 	if err := validateRunID(id); err != nil {
 		return nil, err
@@ -162,6 +202,31 @@ func LoadRecord(id string) (*RunRecord, error) {
 	}
 
 	return &record, nil
+}
+
+// LoadRecordByPlanID returns the run record whose PlanID matches planID. Cloud
+// VMs are tagged with the plan id (the adapter is handed a Plan, not a run), so
+// callers holding a VM's dispatcher-run-id tag must resolve the record this way
+// rather than treating the tag as a record id. Returns os.ErrNotExist wrapped
+// when no record references the plan id.
+func LoadRecordByPlanID(planID string) (*RunRecord, error) {
+	if planID == "" {
+		return nil, fmt.Errorf("plan id is empty")
+	}
+	ids, err := ListRecords()
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		rec, err := LoadRecord(id)
+		if err != nil {
+			continue // skip unreadable records; the caller reports them separately
+		}
+		if rec.PlanID == planID {
+			return rec, nil
+		}
+	}
+	return nil, fmt.Errorf("no run record references plan %q: %w", planID, os.ErrNotExist)
 }
 
 func validateRunID(id string) error {

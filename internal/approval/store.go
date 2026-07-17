@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -82,27 +81,63 @@ type wireReply struct {
 	Reason string `json:"reason,omitempty"`
 }
 
-// Gate is single-shot: `done` CAS-flips on the first valid decision; the
-// loser (in-process or external) is rejected with "already decided".
+// Gate is single-shot: the first valid decision settles it. Conflicts resolve
+// deny-first — a racing approval can't override an explicit denial. Once Wait
+// returns on ctx cancellation the gate is abandoned and rejects late decisions.
 type Gate struct {
 	runID    string
 	reqs     []types.PolicyRequirement
 	sockPath string
 	listener net.Listener
 
-	once    sync.Once
-	done    atomic.Bool
-	decided chan decisionMsg
-	closed  chan struct{}
+	once   sync.Once
+	closed chan struct{}
+
+	mu        sync.Mutex
+	settled   bool
+	abandoned bool
+	result    decisionMsg
+	resultCh  chan struct{} // closed once when a decision settles
+}
+
+// settle records a decision. The first decision wins; afterward a denial still
+// takes precedence over an already-recorded approval (fail closed on conflict).
+// Returns whether the caller's decision was accepted (an external caller that
+// loses is told "already decided"). A decision on an abandoned gate is refused.
+func (g *Gate) settle(d decisionMsg) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.abandoned {
+		return false
+	}
+	if !g.settled {
+		g.settled = true
+		g.result = d
+		close(g.resultCh)
+		return true
+	}
+	if d.decision == DecisionDenied && g.result.decision == DecisionApproved {
+		g.result = d
+		return true
+	}
+	return false
+}
+
+// abandon marks the gate as no longer accepting decisions. Called when Wait
+// returns on ctx cancellation, closing the window where an external decision
+// could be acked 'ok' for a run that has already been torn down.
+func (g *Gate) abandon() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !g.settled {
+		g.abandoned = true
+	}
 }
 
 type decisionMsg struct {
 	decision Decision
 	decider  string
 }
-
-// umaskMu serializes syscall.Umask (process-wide) across concurrent NewGate.
-var umaskMu sync.Mutex
 
 // NewGate opens the per-run socket. Removes any stale socket from a
 // crashed predecessor; the 0700 parent dir prevents path hijack.
@@ -113,23 +148,22 @@ func NewGate(runID string, reqs []types.PolicyRequirement) (*Gate, error) {
 	}
 	_ = os.Remove(sock)
 
-	umaskMu.Lock()
-	oldMask := syscall.Umask(0o177)
 	l, err := net.Listen("unix", sock)
-	syscall.Umask(oldMask)
-	umaskMu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("listen approval socket: %w", err)
 	}
-	_ = os.Chmod(sock, 0o600) // some BSDs ignore umask for unix sockets
+	// The 0700 parent dir is the auth boundary, so the socket is unreachable by
+	// other users even during this window; Chmod pins 0600 without a process-wide
+	// umask side effect (which would race unrelated file creation elsewhere).
+	_ = os.Chmod(sock, 0o600)
 
 	g := &Gate{
 		runID:    runID,
 		reqs:     reqs,
 		sockPath: sock,
 		listener: l,
-		decided:  make(chan decisionMsg, 1),
 		closed:   make(chan struct{}),
+		resultCh: make(chan struct{}),
 	}
 	go g.serve()
 	return g, nil
@@ -166,20 +200,18 @@ func (g *Gate) Wait(ctx context.Context, inProcess ApprovalFunc) (Record, error)
 			} else {
 				d = decisionMsg{decision: DecisionApproved, decider: decider}
 			}
-			if !g.done.CompareAndSwap(false, true) {
-				return // external decider won the race
-			}
-			select {
-			case g.decided <- d:
-			case <-g.closed:
-			}
+			g.settle(d)
 		}()
 	}
 
 	select {
 	case <-ctx.Done():
+		g.abandon()
 		return rec, ctx.Err()
-	case d := <-g.decided:
+	case <-g.resultCh:
+		g.mu.Lock()
+		d := g.result
+		g.mu.Unlock()
 		rec.DecidedAt = time.Now().UTC()
 		rec.Decision = d.decision
 		rec.Decider = d.decider
@@ -223,25 +255,22 @@ func (g *Gate) handleConn(conn net.Conn) {
 			})
 			return
 		}
-		if !g.done.CompareAndSwap(false, true) {
-			_ = json.NewEncoder(conn).Encode(wireReply{
-				Status: "error",
-				Reason: "already decided",
-			})
-			return
-		}
 		// "external:" prefix tells audit reviewers the name came over the
-		// socket — same-uid wire input, not a locally-verified approver.
+		// socket — same-uid wire input, not a locally-verified approver. An
+		// empty decider is recorded as "unknown" so the audit trail never
+		// attributes a decision to a nameless actor.
 		decider := msg.Decider
+		if decider == "" {
+			decider = "unknown"
+		}
 		if !strings.HasPrefix(decider, "external:") {
 			decider = "external:" + decider
 		}
-		select {
-		case g.decided <- decisionMsg{decision: msg.Decision, decider: decider}:
-			_ = json.NewEncoder(conn).Encode(wireReply{Status: "ok"})
-		case <-g.closed:
-			_ = json.NewEncoder(conn).Encode(wireReply{Status: "error", Reason: "gate closed"})
+		if !g.settle(decisionMsg{decision: msg.Decision, decider: decider}) {
+			_ = json.NewEncoder(conn).Encode(wireReply{Status: "error", Reason: "already decided"})
+			return
 		}
+		_ = json.NewEncoder(conn).Encode(wireReply{Status: "ok"})
 	default:
 		_ = json.NewEncoder(conn).Encode(wireReply{
 			Status: "error",
@@ -280,8 +309,10 @@ func SendDecision(runID string, decision Decision, decider string) error {
 	return nil
 }
 
-// ListPending returns run IDs with an open approval gate. Stale sockets
-// from crashed runs are cleaned up as a side effect.
+// ListPending returns the run ids of approval gates whose sockets are still
+// alive, GC'ing crashed sockets and non-socket leftovers along the way. It
+// pings rather than blank-closing so the gate server doesn't mistake a probe
+// for a malformed decide.
 func ListPending() ([]string, error) {
 	dir, err := state.Subdir("approvals")
 	if err != nil {
@@ -312,7 +343,12 @@ func ListPending() ([]string, error) {
 		if err != nil {
 			if errors.Is(err, syscall.ECONNREFUSED) {
 				_ = os.Remove(sock) // socket file with no listener = crashed
+				continue
 			}
+			// Any other dial error (timeout, accept-backlog full) on an existing
+			// socket is inconclusive — assume the run is still awaiting approval
+			// rather than hiding it from `dispatcher list`.
+			alive = append(alive, strings.TrimSuffix(e.Name(), ".sock"))
 			continue
 		}
 		// Ping rather than blank-Close so the gate's server doesn't see EOF

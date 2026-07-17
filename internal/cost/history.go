@@ -6,6 +6,8 @@ package cost
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -13,14 +15,31 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// maxEntries is the cap on retained run history. Old entries are trimmed
-// when the on-disk file grows past 2x this number.
+// maxEntries is the cap on retained run history. The on-disk file is compacted
+// on load once its size exceeds ~4*maxEntries*400 bytes (see load()).
 const maxEntries = 500
+
+// maxWorkloadNameBytes bounds the stored workload name so a history line stays
+// well under PIPE_BUF; longer names are rune-truncated and hash-suffixed.
+const maxWorkloadNameBytes = 256
+
+// truncateToRuneBoundary returns the longest prefix of s that is at most
+// maxBytes long and does not end in the middle of a UTF-8 rune.
+func truncateToRuneBoundary(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
+}
 
 // RunHistory records the actual outcome of a completed run.
 type RunHistory struct {
@@ -71,9 +90,14 @@ func NewHistoryStore() (*HistoryStore, error) {
 func (h *HistoryStore) Record(entry RunHistory) error {
 	// Defensive bound: workload names can theoretically be large; cap the
 	// serialized line at 1 KiB so it stays well under PIPE_BUF (4 KiB)
-	// and Linux/macOS guarantee O_APPEND atomicity.
-	if len(entry.WorkloadName) > 256 {
-		entry.WorkloadName = entry.WorkloadName[:256] + "…"
+	// and Linux/macOS guarantee O_APPEND atomicity. Truncate on a rune
+	// boundary (never leave a partial rune that json.Marshal would corrupt to
+	// U+FFFD) and append a short hash of the full name so two distinct long
+	// names sharing a prefix don't collapse into one Flakiness signal.
+	if len(entry.WorkloadName) > maxWorkloadNameBytes {
+		sum := sha256.Sum256([]byte(entry.WorkloadName))
+		prefix := truncateToRuneBoundary(entry.WorkloadName, maxWorkloadNameBytes)
+		entry.WorkloadName = prefix + "…" + hex.EncodeToString(sum[:4])
 	}
 	line, err := json.Marshal(entry)
 	if err != nil {
@@ -86,18 +110,13 @@ func (h *HistoryStore) Record(entry RunHistory) error {
 		return fmt.Errorf("history entry exceeds PIPE_BUF (%d bytes); refusing to risk torn write", len(line))
 	}
 
-	// O_APPEND is atomic for writes < PIPE_BUF on both Linux and macOS:
-	// two concurrent Record calls produce two complete lines in some
-	// interleaved order rather than one mangled line.
-	f, err := os.OpenFile(h.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return fmt.Errorf("open history: %w", err)
-	}
-	if _, err := f.Write(line); err != nil {
-		f.Close()
-		return fmt.Errorf("write history entry: %w", err)
-	}
-	if err := f.Close(); err != nil {
+	// Append under the same flock compactOnLoad uses, so a concurrent CLI's
+	// compaction (which renames a fresh file over h.path) can't unlink the inode
+	// out from under this append and silently discard it. O_APPEND alone is atomic
+	// for writes < PIPE_BUF but does not guard against that rename race. The lock is
+	// taken in a self-contained scope (not around compactOnLoad below) so the two
+	// never nest into a same-process flock deadlock.
+	if err := h.appendLine(line); err != nil {
 		return err
 	}
 
@@ -186,6 +205,38 @@ func (h *HistoryStore) ConfidenceForTarget(targetID string) types.Confidence {
 		return types.ConfidenceMedium
 	}
 	return types.ConfidenceLow
+}
+
+// StabilityReport summarizes a workload's recent stability on a target.
+type StabilityReport struct {
+	Runs     int  `json:"runs"`
+	Failures int  `json:"failures"`
+	Flaky    bool `json:"flaky"`
+}
+
+// Flakiness reports whether a workload has been unstable on a target: among its
+// retained runs, both successes and failures appear. A workload that always
+// passes — or always fails — is not flaky; a consistent failure is a different
+// signal (broken, not flaky). Needs at least two runs to have a basis.
+func (h *HistoryStore) Flakiness(workloadName, targetID string) StabilityReport {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	var rep StabilityReport
+	var successes int
+	for _, e := range h.entries {
+		if e.WorkloadName != workloadName || e.TargetID != targetID {
+			continue
+		}
+		rep.Runs++
+		if e.Success {
+			successes++
+		} else {
+			rep.Failures++
+		}
+	}
+	rep.Flaky = rep.Runs >= 2 && successes > 0 && rep.Failures > 0
+	return rep
 }
 
 // Stats returns summary statistics for a target.
@@ -287,13 +338,38 @@ func (h *HistoryStore) load() {
 	}
 }
 
-// compactOnLoad atomically rewrites the file to contain just the
-// in-memory entries (already capped at maxEntries). Uses temp+rename so
-// concurrent O_APPEND writers from another CLI invocation might land in
-// the old inode and lose their write — to avoid this, we acquire an
-// exclusive flock on a sibling .lock file, blocking any other CLI's
-// compactOnLoad until we finish. Record() doesn't take this lock; it
-// only appends, which is atomic regardless.
+// appendLine appends one framed line to the history file while holding the
+// compaction flock, so a concurrent compaction's temp+rename cannot unlink the
+// inode out from under the append and discard it.
+func (h *HistoryStore) appendLine(line []byte) error {
+	lock, err := os.OpenFile(h.path+".compact.lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return fmt.Errorf("open history lock: %w", err)
+	}
+	defer lock.Close()
+	if err := flockExclusive(lock); err != nil {
+		return fmt.Errorf("lock history: %w", err)
+	}
+	defer flockUnlock(lock)
+
+	f, err := os.OpenFile(h.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("open history: %w", err)
+	}
+	if _, err := f.Write(line); err != nil {
+		f.Close()
+		return fmt.Errorf("write history entry: %w", err)
+	}
+	return f.Close()
+}
+
+// compactOnLoad atomically rewrites the file to contain just the in-memory
+// entries (already capped at maxEntries). Uses temp+rename, so a concurrent
+// O_APPEND writer from another CLI could otherwise land in the old inode and lose
+// its write; both this and Record's appendLine take the same exclusive flock, so
+// the rename and the appends are mutually exclusive. The lock file is kept stable
+// (never unlinked) so the flock actually excludes — unlinking it while held lets a
+// second process create a fresh inode at the same path and lock that.
 func (h *HistoryStore) compactOnLoad() error {
 	lockPath := h.path + ".compact.lock"
 	lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
@@ -301,7 +377,6 @@ func (h *HistoryStore) compactOnLoad() error {
 		return err
 	}
 	defer lock.Close()
-	defer os.Remove(lockPath)
 	if err := flockExclusive(lock); err != nil {
 		return err
 	}

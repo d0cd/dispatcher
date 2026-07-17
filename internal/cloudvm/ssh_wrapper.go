@@ -36,7 +36,7 @@ func writeSSHWrapper(state *CloudVMState, runID string) (string, error) {
 	}
 
 	var b strings.Builder
-	b.WriteString("#!/bin/sh\nexec ssh -o ConnectTimeout=10")
+	b.WriteString("#!/bin/sh\nexec ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=6")
 	if state.KnownHostsPath != "" {
 		b.WriteString(" -o StrictHostKeyChecking=yes")
 		fmt.Fprintf(&b, " -o UserKnownHostsFile=%s", adapter.ShellQuote(state.KnownHostsPath))
@@ -44,6 +44,7 @@ func writeSSHWrapper(state *CloudVMState, runID string) (string, error) {
 		b.WriteString(" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null")
 	}
 	if state.SSHKeyPath != "" {
+		b.WriteString(" -o IdentitiesOnly=yes")
 		fmt.Fprintf(&b, " -i %s", adapter.ShellQuote(state.SSHKeyPath))
 	}
 	fmt.Fprintf(&b, " -p %d", port)

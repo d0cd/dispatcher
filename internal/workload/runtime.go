@@ -7,22 +7,6 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
-// runtimeSignal maps a filename to the runtime it indicates.
-var runtimeSignals = map[string]types.Runtime{
-	"requirements.txt": types.RuntimePython,
-	"setup.py":         types.RuntimePython,
-	"pyproject.toml":   types.RuntimePython,
-	"Pipfile":          types.RuntimePython,
-	"package.json":     types.RuntimeNode,
-	"yarn.lock":        types.RuntimeNode,
-	"go.mod":           types.RuntimeGo,
-	"go.sum":           types.RuntimeGo,
-	"Cargo.toml":       types.RuntimeRust,
-	"pom.xml":          types.RuntimeJava,
-	"build.gradle":     types.RuntimeJava,
-	"Gemfile":          types.RuntimeRuby,
-}
-
 // DetectRuntime identifies the primary language/runtime from project files.
 func DetectRuntime(path string) types.Runtime {
 	// Check signals in priority order

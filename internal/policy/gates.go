@@ -9,11 +9,15 @@ const DefaultCostAutoApproveUSD = 5.0
 func Evaluate(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate) []types.PolicyRequirement {
 	var reqs []types.PolicyRequirement
 
-	// Unknown cost requires approval
-	if est.Confidence == types.ConfidenceUnknown {
+	// An unknown cost — or a low-confidence CLOUD cost (offline/no-live-pricing
+	// fallback, which is a rough rate-card number) — requires approval, so an
+	// unconfirmed cloud spend can't silently pass a --max-cost cap as if it were a
+	// confirmed price. Local/docker low-confidence costs are cheap and exempt.
+	if est.Confidence == types.ConfidenceUnknown ||
+		(est.Confidence == types.ConfidenceLow && t.Kind == types.TargetKindCloudVM) {
 		reqs = append(reqs, types.PolicyRequirement{
-			Name:   "unknown-cost",
-			Reason: "cost estimate is unknown; approval required before execution",
+			Name:   "unconfirmed-cost",
+			Reason: "cost estimate is unconfirmed (no live pricing); approval required before execution",
 		})
 	}
 
@@ -52,6 +56,15 @@ func Evaluate(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate
 	return reqs
 }
 
+// isExternalProvider reports whether the target ships the workload (and its
+// secrets) off the local machine — any non-local kind. Kubernetes clusters and
+// imported SSH hosts are just as external as a cloud VM, so secrets on them
+// require the same approval.
 func isExternalProvider(t types.TargetConfig) bool {
-	return t.Kind == types.TargetKindCloudVM
+	switch t.Kind {
+	case types.TargetKindCloudVM, types.TargetKindKubernetes, types.TargetKindSSH:
+		return true
+	default:
+		return false
+	}
 }

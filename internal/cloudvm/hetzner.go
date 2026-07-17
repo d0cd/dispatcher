@@ -117,7 +117,7 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 			return nil, err
 		}
 		fwName = firewallName(opts)
-		if out, e := exec.CommandContext(ctx, "hcloud", hetznerFirewallCreateArgs(fwName)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already") {
+		if out, e := exec.CommandContext(ctx, "hcloud", hetznerFirewallCreateArgs(fwName, opts.Tags)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already") {
 			return nil, fmt.Errorf("hcloud firewall create: %s: %w", string(out), e)
 		}
 		if out, e := exec.CommandContext(ctx, "hcloud", hetznerFirewallRuleArgs(fwName, opts.AllowSSHFrom)...).CombinedOutput(); e != nil && !strings.Contains(string(out), "already") {
@@ -129,8 +129,14 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 
 	output, err := retryCLIOutput(ctx, "hcloud", "hcloud server create", args...)
 	if err != nil {
-		// VM creation failed but we may have already uploaded the SSH key and
-		// created the firewall. Best-effort cleanup so we don't leak them.
+		// A transient error after the server was created would otherwise leak it
+		// (and its ssh-key/firewall). Adopt it if the retry left one behind — and do
+		// NOT delete the ssh-key/firewall, which the live server still needs.
+		if vm := adoptCreatedVM(ctx, h, opts.Tags["dispatcher-run-id"]); vm != nil {
+			return vm, nil
+		}
+		// VM creation genuinely failed but we may have already uploaded the SSH key
+		// and created the firewall. Best-effort cleanup so we don't leak them.
 		if sshKeyName != "" {
 			_ = exec.CommandContext(context.Background(), "hcloud", "ssh-key", "delete", sshKeyName).Run()
 		}
@@ -172,7 +178,10 @@ func (h *HetznerProvider) WaitReady(ctx context.Context, _ string, ip string, _ 
 func (h *HetznerProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 	output, err := runCLI(ctx, "hcloud", "server", "describe", vmID, "-o", "json")
 	if err != nil {
-		return nil, fmt.Errorf("hcloud server describe failed: %w", err)
+		if isVMNotFound(err, vmID) {
+			return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		}
+		return nil, wrapExecError("hcloud server describe", err)
 	}
 
 	var server struct {
@@ -221,11 +230,10 @@ func (h *HetznerProvider) DestroyVM(ctx context.Context, vmID string) error {
 	if runID != "" {
 		// Best-effort: the firewall only exists when --allow-ssh-from was set.
 		_, _ = runCLI(ctx, "hcloud", "firewall", "delete", firewallNameFromString(runID))
+		// Delete the per-run SSH key using the run id recovered BEFORE deletion —
+		// re-describing the now-deleted server would fail and leak the key.
+		_, _ = runCLI(ctx, "hcloud", "ssh-key", "delete", "dispatcher-"+runID)
 	}
-	// Best-effort: clean up any dispatcher-managed SSH keys for this VM.
-	// We don't know the run ID from vmID alone, so list and delete by
-	// label match. Errors are non-fatal — `dispatcher gc` is the backstop.
-	_ = cleanupHetznerSSHKeysForVM(ctx, vmID)
 	return nil
 }
 
@@ -273,32 +281,6 @@ func uploadHetznerSSHKey(ctx context.Context, name, pubKeyPath string) error {
 			return nil
 		}
 		return fmt.Errorf("hcloud ssh-key create: %s: %w", string(out), err)
-	}
-	return nil
-}
-
-// cleanupHetznerSSHKeysForVM removes the dispatcher-uploaded SSH key
-// associated with a VM. The key is named "dispatcher-<run-id>"; we find
-// the right one by listing keys with the dispatcher label and matching
-// against the VM's run-id label.
-//
-// Best-effort: failures are logged but not propagated.
-func cleanupHetznerSSHKeysForVM(ctx context.Context, vmID string) error {
-	// Read the VM's labels to recover the run id.
-	out, err := runCLI(ctx, "hcloud", "server", "describe", vmID, "-o", "json")
-	if err != nil {
-		// VM is gone already (typical — we just deleted it). The label
-		// info we need is gone too; give up cleanly.
-		return nil
-	}
-	var srv struct {
-		Labels map[string]string `json:"labels"`
-	}
-	if err := json.Unmarshal(out, &srv); err != nil {
-		return nil
-	}
-	if runID := srv.Labels["dispatcher-run-id"]; runID != "" {
-		_, _ = runCLI(ctx, "hcloud", "ssh-key", "delete", "dispatcher-"+runID)
 	}
 	return nil
 }

@@ -2,7 +2,9 @@ package approval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -102,6 +104,128 @@ func TestGate_ExternalDenial(t *testing.T) {
 	assert.Equal(t, "external:security-team", rec.Decider)
 }
 
+// A non-ErrDenied approver error must fail closed as a Denied decision, tagged
+// so audit shows it came from an approver fault (not an explicit deny).
+func TestGate_InProcessApproverErrorDenies(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_apperr", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	approver := func(_ []types.PolicyRequirement) (string, error) {
+		return "carol", errors.New("boom")
+	}
+
+	rec, err := g.Wait(context.Background(), approver)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrDenied), "an approver fault must fail closed as Denied")
+	assert.Equal(t, DecisionDenied, rec.Decision)
+	assert.Contains(t, rec.Decider, "approver-error:")
+}
+
+// A canceled context must abandon the wait with the context error and no
+// recorded decision (operator never responded / Ctrl-C).
+func TestGate_ContextCancelReturnsError(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_ctx", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
+
+	rec, err := g.Wait(ctx, nil) // no approver, no external decision
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled))
+	assert.Equal(t, Decision(""), rec.Decision, "no decision must be recorded on cancel")
+}
+
+// A denial takes precedence over an approval already recorded on the gate, so a
+// racing approve can't flip an explicit deny to approved (fail closed).
+func TestGate_DenyOverridesRecordedApproval(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_denyprec", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	require.True(t, g.settle(decisionMsg{decision: DecisionApproved, decider: "a"}))
+	// A subsequent denial is accepted (overrides), and the settled result is deny.
+	require.True(t, g.settle(decisionMsg{decision: DecisionDenied, decider: "b"}))
+	g.mu.Lock()
+	got := g.result.decision
+	g.mu.Unlock()
+	assert.Equal(t, DecisionDenied, got)
+	// A further approval can no longer flip it.
+	assert.False(t, g.settle(decisionMsg{decision: DecisionApproved, decider: "c"}))
+}
+
+// After Wait returns on ctx cancellation, a late external decision must be
+// refused rather than acked 'ok' for an abandoned run.
+func TestGate_AbandonedGateRefusesLateDecision(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_abandon", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = g.Wait(ctx, nil)
+	require.Error(t, err)
+
+	// The gate is abandoned; an external decision is rejected.
+	err = SendDecision("run_abandon", DecisionApproved, "late")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already decided")
+}
+
+// A wire decision with no decider is attributed to "external:unknown", never a
+// nameless "external:".
+func TestGate_EmptyDeciderRecordedAsUnknown(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_nodecider", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = SendDecision("run_nodecider", DecisionApproved, "")
+	}()
+	rec, err := g.Wait(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "external:unknown", rec.Decider)
+}
+
+// An invalid decision on the wire must be rejected before the single-shot CAS,
+// so it doesn't consume the gate — a subsequent valid decision still wins.
+func TestGate_InvalidDecisionDoesNotConsumeGate(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_baddec", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	sock, err := socketPath("run_baddec")
+	require.NoError(t, err)
+	conn, err := net.DialTimeout("unix", sock, 5*time.Second)
+	require.NoError(t, err)
+	require.NoError(t, json.NewEncoder(conn).Encode(wireMsg{
+		Action: "decide", Decision: Decision("maybe"), Decider: "x",
+	}))
+	var reply wireReply
+	require.NoError(t, json.NewDecoder(conn).Decode(&reply))
+	conn.Close()
+	assert.Equal(t, "error", reply.Status)
+	assert.Contains(t, reply.Reason, "invalid decision")
+
+	// Gate must still be open: a valid decision now wins.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = SendDecision("run_baddec", DecisionApproved, "ci")
+	}()
+	rec, err := g.Wait(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionApproved, rec.Decision)
+}
+
 // Socket perms are the auth boundary; loosening them lets other uids in.
 func TestGate_FilesystemPermissions(t *testing.T) {
 	newTestState(t)
@@ -146,28 +270,6 @@ func TestSendDecision_NoGate(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestListPending_AliveAndStale(t *testing.T) {
-	newTestState(t)
-	g, err := NewGate("run_alive", nil)
-	require.NoError(t, err)
-	defer g.Close()
-
-	// Plant a stale socket file by creating one and closing it without
-	// keeping a listener.
-	sockDir, err := socketPath("run_stale")
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(sockDir, []byte("stale"), 0o600))
-
-	pending, err := ListPending()
-	require.NoError(t, err)
-	assert.Contains(t, pending, "run_alive")
-	assert.NotContains(t, pending, "run_stale")
-
-	// Stale file should have been removed.
-	_, statErr := os.Stat(sockDir)
-	assert.True(t, os.IsNotExist(statErr), "stale socket should have been cleaned up")
-}
-
 func TestGate_InvalidRunID(t *testing.T) {
 	newTestState(t)
 	cases := []string{"", "../etc/passwd", "run/../escape", "run\\with\\backslash"}
@@ -203,4 +305,26 @@ func TestGate_ConcurrentProbesDoNotConsume(t *testing.T) {
 	rec, err := g.Wait(ctx, nil)
 	require.NoError(t, err)
 	assert.Equal(t, DecisionApproved, rec.Decision)
+}
+
+func TestListPending_AliveAndStale(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_alive", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	// Plant a stale socket file by creating one and closing it without
+	// keeping a listener.
+	sockDir, err := socketPath("run_stale")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(sockDir, []byte("stale"), 0o600))
+
+	pending, err := ListPending()
+	require.NoError(t, err)
+	assert.Contains(t, pending, "run_alive")
+	assert.NotContains(t, pending, "run_stale")
+
+	// Stale file should have been removed.
+	_, statErr := os.Stat(sockDir)
+	assert.True(t, os.IsNotExist(statErr), "stale socket should have been cleaned up")
 }

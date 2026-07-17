@@ -21,6 +21,8 @@ func TestValidateLabelKV(t *testing.T) {
 		{"newline", "k", "v\nmore", true},
 		{"shell-meta", "k", "v$(echo bad)", true},
 		{"quotes", "k", `v"injected`, true},
+		{"leading-dash-key-is-flag-injection", "--admin-password", "v", true},
+		{"leading-dash-value-is-flag-injection", "k", "-rf", true},
 		{"unicode-rejected", "k", "café", true},
 	}
 	for _, c := range cases {

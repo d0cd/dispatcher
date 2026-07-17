@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -95,11 +96,17 @@ func (k *KubernetesProvider) WaitReady(ctx context.Context, _ string, _ string, 
 }
 
 func (k *KubernetesProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
-	cmd := exec.CommandContext(ctx, "kubectl", "get", "job", vmID,
-		"-n", k.namespace, "-o", "json")
-	output, err := cmd.Output()
+	output, err := runCLI(ctx, "kubectl", "get", "job", vmID, "-n", k.namespace, "-o", "json")
 	if err != nil {
-		return &VMInfo{ID: vmID, State: VMStateTerminated}, nil
+		if isVMNotFound(err, vmID) {
+			// The Job vanished (deleted / TTL-GC'd). We can't confirm it
+			// succeeded, so this is NOT a completion — report Error, never
+			// Terminated (which Status maps to a successful Completed).
+			return &VMInfo{ID: vmID, State: VMStateError}, nil
+		}
+		// Transient/unexpected kubectl failure: propagate so the executor's
+		// poll tolerance handles it rather than declaring the run finished.
+		return nil, wrapExecError("kubectl get job", err)
 	}
 
 	var job struct {
@@ -137,7 +144,18 @@ func (k *KubernetesProvider) DestroyVM(ctx context.Context, vmID string) error {
 }
 
 func (k *KubernetesProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {
-	selector := "dispatcher=true"
+	// Honor the caller's tag filter (e.g. a run-scoped reap) in addition to the
+	// dispatcher-ownership label; ignoring it would return every dispatcher Job
+	// across all runs, not just the requested one.
+	parts := []string{"dispatcher=true"}
+	for key, val := range tags {
+		if key == "dispatcher" {
+			continue
+		}
+		parts = append(parts, key+"="+val)
+	}
+	sort.Strings(parts) // deterministic argv
+	selector := strings.Join(parts, ",")
 	cmd := exec.CommandContext(ctx, "kubectl", "get", "jobs",
 		"-n", k.namespace, "-l", selector, "-o", "json")
 	output, err := cmd.Output()

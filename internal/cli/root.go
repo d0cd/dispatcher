@@ -105,7 +105,7 @@ var rootCmd = &cobra.Command{
 			return fmt.Errorf("invalid --output %q: must be \"text\" or \"json\"", rootFlags.output)
 		}
 		if jsonOutput() && cmd.Annotations[supportsJSON] != "true" {
-			return fmt.Errorf("--json is not supported by %q (supported: plan, audit, status, cost, list, bill)", cmd.CommandPath())
+			return fmt.Errorf("--json is not supported by %q (supported: plan, audit, status, cost, list, bill, history, recover, gc)", cmd.CommandPath())
 		}
 		// Reap orphaned plaintext-secret tempfiles left by a crashed run.
 		_ = adapter.SweepStaleEnvFiles()
@@ -142,6 +142,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVar(&rootFlags.json, "json", false, "shorthand for --output json")
 
 	rootCmd.AddCommand(planCmd)
+	rootCmd.AddCommand(confidentialCmd)
 	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(targetsCmd)
 }

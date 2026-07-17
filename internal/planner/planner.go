@@ -137,6 +137,7 @@ func (p *Planner) Plan(ctx context.Context, path string, constraints types.PlanC
 				ToolsUsed:   toolsUsed,
 			}
 			mergeStructuredOutput(res, response.Content)
+			p.validateRecommendation(res)
 			return res, nil
 		}
 
@@ -160,8 +161,40 @@ func (p *Planner) Plan(ctx context.Context, path string, constraints types.PlanC
 	return nil, fmt.Errorf("planner exceeded maximum turns (%d)", p.maxTurns)
 }
 
-// DeterministicPlan runs the same tool pipeline without an LLM.
-// Useful as a fallback or when no API key is configured.
+// withinBudget reports whether a cost estimate is confirmably within a budget.
+// A zero/negative budget means "no cap" (always true). A nil or unknown-confidence
+// estimate cannot be confirmed within a budget and fails — a $0 "unknown" must
+// not pass as if it were free (mirrors plan.Build.orderAndFilter).
+func withinBudget(cost *types.CostEstimate, budget float64) bool {
+	if budget <= 0 {
+		return true
+	}
+	if cost == nil || cost.Confidence == types.ConfidenceUnknown {
+		return false
+	}
+	return cost.Value <= budget
+}
+
+// costLess orders cost estimates cheapest-first, with unknown/nil cost sorted
+// after every priced estimate so it can't rank as the cheapest.
+func costLess(a, b *types.CostEstimate) bool {
+	aUnknown := a == nil || a.Confidence == types.ConfidenceUnknown
+	bUnknown := b == nil || b.Confidence == types.ConfidenceUnknown
+	if aUnknown != bUnknown {
+		return !aUnknown
+	}
+	av, bv := 0.0, 0.0
+	if a != nil {
+		av = a.Value
+	}
+	if b != nil {
+		bv = b.Value
+	}
+	return av < bv
+}
+
+// DeterministicPlan runs the same tool pipeline without an LLM — a fallback for
+// when no API key is configured.
 func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraints types.PlanConstraints) (*PlanResult, error) {
 	if err := p.tools.SetWorkloadRoot(path); err != nil {
 		return nil, fmt.Errorf("scope workload: %w", err)
@@ -198,6 +231,11 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 	var feasible []scored
 
 	for _, ev := range evals {
+		// Honor a pinned --target: consider only that target, so the fallback
+		// planner doesn't silently recommend a cheaper one (matching plan.Build).
+		if constraints.TargetName != "" && ev.TargetID != constraints.TargetName {
+			continue
+		}
 		if !ev.Feasible {
 			reason := "not feasible"
 			if len(ev.Reasons) > 0 {
@@ -210,11 +248,16 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 			continue
 		}
 
-		// Budget filter
-		if constraints.MaxEstimatedCostUSD > 0 && ev.Cost != nil && ev.Cost.Value > constraints.MaxEstimatedCostUSD {
+		// Budget filter — an unknown-cost estimate cannot be confirmed within a
+		// budget, so it is rejected rather than passing as if it were free.
+		if !withinBudget(ev.Cost, constraints.MaxEstimatedCostUSD) {
+			reason := fmt.Sprintf("cost unknown; cannot confirm within budget $%.2f", constraints.MaxEstimatedCostUSD)
+			if ev.Cost != nil && ev.Cost.Confidence != types.ConfidenceUnknown {
+				reason = fmt.Sprintf("estimated cost $%.2f exceeds budget $%.2f", ev.Cost.Value, constraints.MaxEstimatedCostUSD)
+			}
 			result.Rejected = append(result.Rejected, types.RejectedTarget{
 				Target: ev.TargetID,
-				Reason: fmt.Sprintf("estimated cost $%.2f exceeds budget $%.2f", ev.Cost.Value, constraints.MaxEstimatedCostUSD),
+				Reason: reason,
 			})
 			continue
 		}
@@ -225,20 +268,17 @@ func (p *Planner) DeterministicPlan(ctx context.Context, path string, constraint
 
 	if len(feasible) == 0 {
 		result.Explanation = "No feasible targets found for this workload."
+		if constraints.TargetName != "" {
+			result.Explanation = fmt.Sprintf("Requested target %q is not feasible or exceeds the budget for this workload.", constraints.TargetName)
+		}
 		return &result, nil
 	}
 
-	// Sort by cost
+	// Sort cheapest-first; unknown-cost candidates sort last so a $0 "unknown"
+	// can't masquerade as the cheapest option.
 	for i := 0; i < len(feasible); i++ {
 		for j := i + 1; j < len(feasible); j++ {
-			ci, cj := 0.0, 0.0
-			if feasible[i].eval.Cost != nil {
-				ci = feasible[i].eval.Cost.Value
-			}
-			if feasible[j].eval.Cost != nil {
-				cj = feasible[j].eval.Cost.Value
-			}
-			if cj < ci {
+			if costLess(feasible[j].eval.Cost, feasible[i].eval.Cost) {
 				feasible[i], feasible[j] = feasible[j], feasible[i]
 			}
 		}
@@ -292,9 +332,28 @@ func mustJSON(v any) json.RawMessage {
 
 // mergeStructuredOutput is invoked after the loop ends so agentic backends
 // that return a single JSON message can populate typed PlanResult fields.
+// validateRecommendation cross-checks the LLM's recommended target against the
+// configured registry: the agent can hallucinate a target that doesn't exist or
+// isn't feasible, and the plan/explain display would otherwise present it as
+// dispatcher's recommendation. A mismatch is surfaced as a suggestion rather than
+// silently trusted (the deterministic run/plan paths don't use this value).
+func (p *Planner) validateRecommendation(res *PlanResult) {
+	if res == nil || res.Recommendation == nil || res.Recommendation.Target == "" {
+		return
+	}
+	if !p.tools.targetExists(res.Recommendation.Target) {
+		res.Suggestions = append(res.Suggestions, fmt.Sprintf(
+			"the AI recommended target %q, which is not a configured target — verify feasibility with `dispatcher plan` before relying on it",
+			res.Recommendation.Target))
+	}
+}
+
 func mergeStructuredOutput(res *PlanResult, content string) {
+	// Strip a markdown code fence first (like the audit path): a backend that wraps
+	// its JSON in ```json ... ``` would otherwise leave the raw fenced blob as the
+	// plan explanation with all structured fields empty.
 	var parsed PlanResult
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(stripMarkdownFence(content)), &parsed); err != nil {
 		return
 	}
 	if parsed.Explanation != "" {

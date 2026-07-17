@@ -1,0 +1,401 @@
+package cloudvm
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/d0cd/dispatcher/internal/adapter"
+)
+
+// gcpMonthlyHours approximates a 30-day month for turning hourly rates into a
+// monthly figure.
+const gcpMonthlyHours = 730.0
+
+// GCP storage list prices (us-central1, USD). These are rough list rates for
+// cost visibility, not billing-accurate quotes — enough to flag a resource
+// that is quietly costing money.
+const (
+	gcpImageRatePerGBMonth    = 0.050 // custom image storage
+	gcpSnapshotRatePerGBMonth = 0.026 // snapshot storage
+	gcpAddressMonthlyReserved = 0.010 * gcpMonthlyHours
+)
+
+// gcpDiskRatePerGBMonth maps a persistent-disk type to its $/GB-month rate.
+var gcpDiskRatePerGBMonth = map[string]float64{
+	"pd-standard":        0.040,
+	"pd-balanced":        0.100,
+	"pd-ssd":             0.170,
+	"pd-extreme":         0.125,
+	"hyperdisk-balanced": 0.081,
+}
+
+const gcpDiskRateDefault = 0.100
+
+// ListResources enumerates billable GCP resources for the cost audit and GC.
+// The instances list is reaping-critical and fails loud; the auxiliary billable
+// kinds (disks/images/snapshots/addresses) are best-effort so a single denied
+// list (e.g. no snapshots permission) can never blind GC to reapable instances
+// — missing one only reduces cost visibility, never causes wrong reaping.
+func (g *GCPProvider) ListResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	out, err := g.listInstanceResources(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, step := range []func(context.Context) ([]adapter.ResourceInfo, error){
+		g.listDiskResources, g.listImageResources, g.listSnapshotResources, g.listAddressResources,
+		g.listFirewallResources, g.listArtifactRegistryResources,
+	} {
+		if rs, err := step(ctx); err == nil {
+			out = append(out, rs...)
+		}
+	}
+	return out, nil
+}
+
+// gcpScopeTag records, on an enumerated disk/address, whether it is zonal,
+// regional, or global so DestroyResource targets the right scope. It is an
+// internal marker, not a cloud label.
+const gcpScopeTag = "_gcp-scope"
+
+// DestroyResource deletes a single GCP resource by kind. The adapter enforces
+// the dispatcher-owned boundary; this method re-checks it so the destructive
+// call can never run on a resource dispatcher doesn't own.
+func (g *GCPProvider) DestroyResource(ctx context.Context, res adapter.ResourceInfo) error {
+	if !res.DispatcherOwned() {
+		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
+	}
+	if !destroyArgsSafe(res.ResourceID, res.Region) {
+		return fmt.Errorf("gcp: refusing to destroy %q: unsafe resource id or region", res.ResourceID)
+	}
+	var args []string
+	switch res.Kind {
+	case adapter.ResourceInstance:
+		args = []string{"compute", "instances", "delete", res.ResourceID, "--zone", res.Region, "--quiet"}
+	case adapter.ResourceDisk:
+		if res.Tags[gcpScopeTag] == "regional" {
+			args = []string{"compute", "disks", "delete", res.ResourceID, "--region", res.Region, "--quiet"}
+		} else {
+			args = []string{"compute", "disks", "delete", res.ResourceID, "--zone", res.Region, "--quiet"}
+		}
+	case adapter.ResourceImage:
+		args = []string{"compute", "images", "delete", res.ResourceID, "--quiet"}
+	case adapter.ResourceSnapshot:
+		args = []string{"compute", "snapshots", "delete", res.ResourceID, "--quiet"}
+	case adapter.ResourceAddress:
+		if res.Tags[gcpScopeTag] == "global" {
+			args = []string{"compute", "addresses", "delete", res.ResourceID, "--global", "--quiet"}
+		} else {
+			args = []string{"compute", "addresses", "delete", res.ResourceID, "--region", res.Region, "--quiet"}
+		}
+	case adapter.ResourceFirewall:
+		args = []string{"compute", "firewall-rules", "delete", res.ResourceID, "--quiet"}
+	case adapter.ResourceContainerImage:
+		// Artifact Registry repos are location-scoped, not under `compute`.
+		arArgs := []string{"artifacts", "repositories", "delete", res.ResourceID, "--location", res.Region, "--quiet"}
+		if g.project != "" {
+			arArgs = append(arArgs, "--project", g.project)
+		}
+		if _, err := runCLI(ctx, "gcloud", arArgs...); err != nil {
+			return fmt.Errorf("gcloud artifacts repositories delete failed: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("gcp: cannot destroy resource of kind %q", res.Kind)
+	}
+	if g.project != "" {
+		args = append(args, "--project", g.project)
+	}
+	if _, err := runCLI(ctx, "gcloud", args...); err != nil {
+		return fmt.Errorf("gcloud %s delete failed: %w", res.Kind, err)
+	}
+	return nil
+}
+
+func (g *GCPProvider) listArgs(kind string, extra ...string) []string {
+	args := append([]string{"compute", kind, "list"}, extra...)
+	args = append(args, "--format", "json")
+	if g.project != "" {
+		args = append(args, "--project", g.project)
+	}
+	return args
+}
+
+func (g *GCPProvider) listInstanceResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "gcloud", g.listArgs("instances")...)
+	if err != nil {
+		return nil, wrapExecError("gcloud compute instances list", err)
+	}
+	var instances []struct {
+		Name        string            `json:"name"`
+		MachineType string            `json:"machineType"`
+		Status      string            `json:"status"`
+		Zone        string            `json:"zone"`
+		Labels      map[string]string `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &instances); err != nil {
+		return nil, fmt.Errorf("parse gcp instances: %w", err)
+	}
+	catalog := NewCatalog()
+	var res []adapter.ResourceInfo
+	for _, in := range instances {
+		if in.Status == "TERMINATED" {
+			continue // stopped: not billing for compute
+		}
+		machineType := gcpLastSegment(in.MachineType)
+		res = append(res, adapter.ResourceInfo{
+			ResourceID:   in.Name,
+			Provider:     string(ProviderGCP),
+			Kind:         adapter.ResourceInstance,
+			Region:       gcpLastSegment(in.Zone),
+			InstanceType: machineType,
+			RunID:        in.Labels["dispatcher-run-id"],
+			Tags:         in.Labels,
+			MonthlyUSD:   catalog.PriceByName(ProviderGCP, machineType) * gcpMonthlyHours,
+		})
+	}
+	return res, nil
+}
+
+func (g *GCPProvider) listDiskResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "gcloud", g.listArgs("disks")...)
+	if err != nil {
+		return nil, err
+	}
+	var disks []struct {
+		Name   string            `json:"name"`
+		SizeGb string            `json:"sizeGb"`
+		Type   string            `json:"type"`
+		Zone   string            `json:"zone"`
+		Region string            `json:"region"`
+		Labels map[string]string `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &disks); err != nil {
+		return nil, fmt.Errorf("parse gcp disks: %w", err)
+	}
+	var res []adapter.ResourceInfo
+	for _, d := range disks {
+		sizeGb, _ := strconv.ParseFloat(d.SizeGb, 64)
+		rate, ok := gcpDiskRatePerGBMonth[gcpLastSegment(d.Type)]
+		if !ok {
+			rate = gcpDiskRateDefault
+		}
+		// A disk is zonal (has a zone self-link) or regional (has a region self-
+		// link with an empty zone); DestroyResource needs to know which.
+		loc, scope := gcpLastSegment(d.Zone), "zonal"
+		if loc == "" && d.Region != "" {
+			loc, scope = gcpLastSegment(d.Region), "regional"
+		}
+		res = append(res, adapter.ResourceInfo{
+			ResourceID: d.Name,
+			Provider:   string(ProviderGCP),
+			Kind:       adapter.ResourceDisk,
+			Region:     loc,
+			RunID:      d.Labels["dispatcher-run-id"],
+			Tags:       mergeTag(d.Labels, gcpScopeTag, scope),
+			MonthlyUSD: sizeGb * rate,
+		})
+	}
+	return res, nil
+}
+
+func (g *GCPProvider) listImageResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "gcloud", g.listArgs("images", "--no-standard-images")...)
+	if err != nil {
+		return nil, err
+	}
+	var images []struct {
+		Name             string            `json:"name"`
+		ArchiveSizeBytes string            `json:"archiveSizeBytes"`
+		Labels           map[string]string `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &images); err != nil {
+		return nil, fmt.Errorf("parse gcp images: %w", err)
+	}
+	var res []adapter.ResourceInfo
+	for _, im := range images {
+		bytes, _ := strconv.ParseFloat(im.ArchiveSizeBytes, 64)
+		res = append(res, adapter.ResourceInfo{
+			ResourceID: im.Name,
+			Provider:   string(ProviderGCP),
+			Kind:       adapter.ResourceImage,
+			RunID:      im.Labels["dispatcher-run-id"],
+			Tags:       im.Labels,
+			MonthlyUSD: gcpBytesToGiB(bytes) * gcpImageRatePerGBMonth,
+		})
+	}
+	return res, nil
+}
+
+func (g *GCPProvider) listSnapshotResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "gcloud", g.listArgs("snapshots")...)
+	if err != nil {
+		return nil, err
+	}
+	var snaps []struct {
+		Name         string            `json:"name"`
+		StorageBytes string            `json:"storageBytes"`
+		Labels       map[string]string `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &snaps); err != nil {
+		return nil, fmt.Errorf("parse gcp snapshots: %w", err)
+	}
+	var res []adapter.ResourceInfo
+	for _, s := range snaps {
+		bytes, _ := strconv.ParseFloat(s.StorageBytes, 64)
+		res = append(res, adapter.ResourceInfo{
+			ResourceID: s.Name,
+			Provider:   string(ProviderGCP),
+			Kind:       adapter.ResourceSnapshot,
+			RunID:      s.Labels["dispatcher-run-id"],
+			Tags:       s.Labels,
+			MonthlyUSD: gcpBytesToGiB(bytes) * gcpSnapshotRatePerGBMonth,
+		})
+	}
+	return res, nil
+}
+
+func (g *GCPProvider) listAddressResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "gcloud", g.listArgs("addresses")...)
+	if err != nil {
+		return nil, err
+	}
+	var addrs []struct {
+		Name   string            `json:"name"`
+		Status string            `json:"status"`
+		Region string            `json:"region"`
+		Labels map[string]string `json:"labels"`
+	}
+	if err := json.Unmarshal(out, &addrs); err != nil {
+		return nil, fmt.Errorf("parse gcp addresses: %w", err)
+	}
+	var res []adapter.ResourceInfo
+	for _, a := range addrs {
+		// An IN_USE address is free while attached to a running instance; only a
+		// RESERVED (unattached) static IP bills on its own. Cost only the latter
+		// so the total isn't double-counted against the instance.
+		monthly := 0.0
+		if a.Status == "RESERVED" {
+			monthly = gcpAddressMonthlyReserved
+		}
+		// A regional address has a region self-link; a global address's region is
+		// empty and needs --global to delete.
+		loc, scope := gcpLastSegment(a.Region), "regional"
+		if loc == "" {
+			scope = "global"
+		}
+		res = append(res, adapter.ResourceInfo{
+			ResourceID: a.Name,
+			Provider:   string(ProviderGCP),
+			Kind:       adapter.ResourceAddress,
+			Region:     loc,
+			RunID:      a.Labels["dispatcher-run-id"],
+			Tags:       mergeTag(a.Labels, gcpScopeTag, scope),
+			MonthlyUSD: monthly,
+		})
+	}
+	return res, nil
+}
+
+// gcpArtifactRegistryRatePerGBMonth is a rough Artifact Registry storage list
+// rate (USD/GB-month) for cost visibility.
+const gcpArtifactRegistryRatePerGBMonth = 0.10
+
+// listFirewallResources enumerates dispatcher-created firewall rules (GCP takes
+// no labels on them, so ownership is the name prefix + the run-id description
+// marker). A leaked per-run agent-port rule is thus an orphan of a gone run, not
+// silent standing infra. Firewalls are free, so cost stays 0 — the value is
+// reaping a rule whose VM's teardown never ran.
+func (g *GCPProvider) listFirewallResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	out, err := runCLI(ctx, "gcloud", g.listArgs("firewall-rules")...)
+	if err != nil {
+		return nil, err
+	}
+	var rules []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(out, &rules); err != nil {
+		return nil, fmt.Errorf("parse gcp firewall-rules: %w", err)
+	}
+	var res []adapter.ResourceInfo
+	for _, r := range rules {
+		if !strings.HasPrefix(r.Name, dispatcherFirewallPrefix) {
+			continue // never touch the project's own rules
+		}
+		runID := ""
+		if i := strings.Index(r.Description, firewallRunIDMarker); i >= 0 {
+			runID = strings.TrimSpace(r.Description[i+len(firewallRunIDMarker):])
+		}
+		res = append(res, adapter.ResourceInfo{
+			ResourceID: r.Name,
+			Provider:   string(ProviderGCP),
+			Kind:       adapter.ResourceFirewall,
+			RunID:      runID,
+			Tags:       map[string]string{"dispatcher": "true", "dispatcher-run-id": runID},
+		})
+	}
+	return res, nil
+}
+
+// listArtifactRegistryResources surfaces dispatcher's measured-agent image repo
+// so its storage never slips past the audit. It is shared infra reused across
+// runs (no run id), so gc classifies it as standing — listed, not auto-reaped.
+func (g *GCPProvider) listArtifactRegistryResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	args := []string{"artifacts", "repositories", "list", "--format", "json"}
+	if g.project != "" {
+		args = append(args, "--project", g.project)
+	}
+	out, err := runCLI(ctx, "gcloud", args...)
+	if err != nil {
+		return nil, err
+	}
+	var repos []struct {
+		Name      string `json:"name"` // projects/P/locations/L/repositories/NAME
+		SizeBytes string `json:"sizeBytes"`
+	}
+	if err := json.Unmarshal(out, &repos); err != nil {
+		return nil, fmt.Errorf("parse gcp artifact repositories: %w", err)
+	}
+	var res []adapter.ResourceInfo
+	for _, r := range repos {
+		if gcpLastSegment(r.Name) != "dispatcher-cs" {
+			continue // only dispatcher's own agent-image repo
+		}
+		bytes, _ := strconv.ParseFloat(r.SizeBytes, 64)
+		res = append(res, adapter.ResourceInfo{
+			ResourceID: gcpLastSegment(r.Name),
+			Provider:   string(ProviderGCP),
+			Kind:       adapter.ResourceContainerImage,
+			Region:     gcpArtifactRegistryLocation(r.Name),
+			Tags:       map[string]string{"dispatcher": "true"},
+			MonthlyUSD: gcpBytesToGiB(bytes) * gcpArtifactRegistryRatePerGBMonth,
+		})
+	}
+	return res, nil
+}
+
+// gcpArtifactRegistryLocation extracts the location from a repo resource name
+// like "projects/P/locations/us-east1/repositories/dispatcher-cs".
+func gcpArtifactRegistryLocation(name string) string {
+	parts := strings.Split(name, "/")
+	for i, p := range parts {
+		if p == "locations" && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
+}
+
+// gcpLastSegment returns the trailing path segment of a GCP self-link URL (e.g.
+// ".../zones/us-central1-a" -> "us-central1-a"). A bare value passes through.
+func gcpLastSegment(url string) string {
+	if i := strings.LastIndexByte(url, '/'); i >= 0 {
+		return url[i+1:]
+	}
+	return url
+}
+
+func gcpBytesToGiB(b float64) float64 { return b / (1024 * 1024 * 1024) }

@@ -80,13 +80,40 @@ func ShellQuoteArgs(args []string) string {
 	return strings.Join(quoted, " ")
 }
 
+// applyExtraEnv merges the extra maps into kv (extra wins over .env), lazily
+// allocating kv. Used to inject runtime env (e.g. a shard's identity) alongside
+// the workload's .env. Keys are validated the same way LoadDotEnv validates
+// .env keys, since extra keys don't pass through that path and a key with shell
+// metacharacters would be command injection on the `export <key>=...` path.
+// Extra values are validated only where the caller renders them (the heredoc/
+// newline check in DotEnvFileLines); WriteDotEnvFile performs no such check.
+func applyExtraEnv(kv map[string]string, extra []map[string]string) (map[string]string, error) {
+	for _, m := range extra {
+		for k, v := range m {
+			if !workload.IsValidEnvKey(k) {
+				return nil, fmt.Errorf("invalid env key %q: must match [A-Za-z_][A-Za-z0-9_]*", k)
+			}
+			if kv == nil {
+				kv = map[string]string{}
+			}
+			kv[k] = v
+		}
+	}
+	return kv, nil
+}
+
 // injectDotEnv reads .env (and .env.local) from dir and returns base extended
-// with their KEY=VALUE pairs. Existing keys in base are overridden so workload
-// .env wins over the inherited shell environment.
-func injectDotEnv(base []string, dir string) ([]string, error) {
+// with their KEY=VALUE pairs, plus any extra env (which wins over both .env and
+// base). Existing keys in base are overridden so workload env wins over the
+// inherited shell environment.
+func injectDotEnv(base []string, dir string, extra ...map[string]string) ([]string, error) {
 	kv, err := workload.LoadDotEnv(dir)
 	if err != nil {
 		return nil, fmt.Errorf("load .env from %s: %w", dir, err)
+	}
+	kv, err = applyExtraEnv(kv, extra)
+	if err != nil {
+		return nil, err
 	}
 	if len(kv) == 0 {
 		return base, nil
@@ -113,9 +140,13 @@ func injectDotEnv(base []string, dir string) ([]string, error) {
 // and returns the path plus a cleanup func. Empty .env returns ("", noop, nil).
 // Values stay off argv (where `ps` could see them); the file is the standard
 // way to feed env into docker --env-file or similar.
-func WriteDotEnvFile(dir string) (path string, cleanup func(), err error) {
+func WriteDotEnvFile(dir string, extra ...map[string]string) (path string, cleanup func(), err error) {
 	noop := func() {}
 	kv, err := workload.LoadDotEnv(dir)
+	if err != nil {
+		return "", noop, err
+	}
+	kv, err = applyExtraEnv(kv, extra)
 	if err != nil {
 		return "", noop, err
 	}
@@ -124,6 +155,12 @@ func WriteDotEnvFile(dir string) (path string, cleanup func(), err error) {
 	}
 	var buf strings.Builder
 	for k, v := range kv {
+		// One KEY=VALUE per line is the --env-file contract; a newline in a value
+		// would inject a spurious extra variable, so reject it rather than write
+		// it raw.
+		if strings.ContainsAny(v, "\n\r") {
+			return "", noop, fmt.Errorf("env value for %q cannot contain a newline", k)
+		}
 		fmt.Fprintf(&buf, "%s=%s\n", k, v)
 	}
 	name, err := WriteSecureTempFile("dispatcher-env-*.env", []byte(buf.String()))
@@ -143,18 +180,24 @@ const staleEnvFileThreshold = time.Hour
 // Only files older than staleEnvFileThreshold are removed so a freshly
 // written sibling file is never deleted out from under another process.
 func SweepStaleEnvFiles() error {
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "dispatcher-env-*.env"))
-	if err != nil {
-		return nil
-	}
 	cutoff := time.Now().Add(-staleEnvFileThreshold)
-	for _, m := range matches {
-		info, err := os.Stat(m)
+	// Sweep both the sealed-env temp files and the shard work-item files: a crash
+	// between creation and the deferred cleanup would otherwise leave either
+	// (potentially sensitive — object keys, .env contents) in the world-traversable
+	// temp dir indefinitely.
+	for _, pattern := range []string{"dispatcher-env-*.env", "dispatcher-shard-items-*.txt"} {
+		matches, err := filepath.Glob(filepath.Join(os.TempDir(), pattern))
 		if err != nil {
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(m)
+		for _, m := range matches {
+			info, err := os.Stat(m)
+			if err != nil {
+				continue
+			}
+			if info.ModTime().Before(cutoff) {
+				_ = os.Remove(m)
+			}
 		}
 	}
 	return nil
@@ -205,8 +248,12 @@ func expandTempPattern(p string) (string, error) {
 
 // DotEnvExportScript renders .env as `export K='V'` lines for stdin-piped
 // bash; values stay off argv. Empty string when no .env.
-func DotEnvExportScript(dir string) (string, error) {
+func DotEnvExportScript(dir string, extra ...map[string]string) (string, error) {
 	kv, err := workload.LoadDotEnv(dir)
+	if err != nil {
+		return "", err
+	}
+	kv, err = applyExtraEnv(kv, extra)
 	if err != nil {
 		return "", err
 	}
@@ -235,8 +282,12 @@ const dotEnvHeredocTerminator = "DISPATCHER_ENV_EOF"
 // literally). It returns an error if any value contains a newline or the
 // heredoc terminator token, which would corrupt a `--env-file /dev/stdin`
 // heredoc. Empty string when no .env.
-func DotEnvFileLines(dir string) (string, error) {
+func DotEnvFileLines(dir string, extra ...map[string]string) (string, error) {
 	kv, err := workload.LoadDotEnv(dir)
+	if err != nil {
+		return "", err
+	}
+	kv, err = applyExtraEnv(kv, extra)
 	if err != nil {
 		return "", err
 	}

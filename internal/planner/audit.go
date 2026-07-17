@@ -148,13 +148,15 @@ func (p *Planner) Audit(ctx context.Context, path string) (*AuditResult, error) 
 				ToolsUsed: toolsUsed,
 			}
 			parsed := mergeAuditStructured(res, response.Content)
-			switch {
-			case parsed && res.Verdict == "":
-				res.Verdict = verdictFromFindings(res.Findings)
-			case !parsed:
+			if !parsed {
 				// LLM ignored the schema and returned prose. Surface the
 				// uncertainty rather than silently defaulting to "ready".
 				res.Verdict = "unknown"
+			} else if fromFindings := verdictFromFindings(res.Findings); verdictRank(fromFindings) > verdictRank(res.Verdict) {
+				// Never trust the model's own verdict to be at least as severe as its
+				// own findings — a buggy or prompt-injected agent could emit "ready"
+				// alongside a critical finding. Escalate to what the findings imply.
+				res.Verdict = fromFindings
 			}
 			return res, nil
 		}
@@ -261,6 +263,22 @@ func stripMarkdownFence(s string) string {
 		body = body[:idx]
 	}
 	return strings.TrimSpace(body)
+}
+
+// verdictRank orders audit verdicts by severity so the merged verdict can be
+// escalated to (never lowered below) what the findings imply. An unrecognized
+// verdict ranks below "ready" so any finding escalates it.
+func verdictRank(v string) int {
+	switch v {
+	case "blocked":
+		return 2
+	case "concerns":
+		return 1
+	case "ready":
+		return 0
+	default:
+		return -1
+	}
 }
 
 func verdictFromFindings(fs []AuditFinding) string {

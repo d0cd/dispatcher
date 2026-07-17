@@ -30,3 +30,19 @@ func TestRemoveRunKeyFiles(t *testing.T) {
 	_, statErr := os.Stat(filepath.Join(keyDir, "dispatcher-other"))
 	assert.NoError(t, statErr, "another run's key must not be touched")
 }
+
+// RunID can originate from a cloud VM tag (via gc), so a traversal in it must
+// never let os.Remove escape the keys dir.
+func TestRemoveRunKeyFiles_RefusesTraversal(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	keyDir, err := statedir.Subdir("keys")
+	require.NoError(t, err)
+
+	victim := filepath.Join(filepath.Dir(keyDir), "victim")
+	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0o600))
+
+	RemoveRunKeyFiles("x/../../victim")
+
+	_, statErr := os.Stat(victim)
+	assert.NoError(t, statErr, "a traversal RunID must not delete files outside the keys dir")
+}

@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,10 +28,15 @@ func captureRunCLI(t *testing.T) *[]cliCall {
 // run id) instead of failing at the first call.
 func captureRunCLIWith(t *testing.T, resp func(name string, args ...string) ([]byte, error)) *[]cliCall {
 	t.Helper()
+	var mu sync.Mutex
 	var calls []cliCall
 	prev := runCLI
 	runCLI = func(_ context.Context, name string, args ...string) ([]byte, error) {
+		// Providers may enumerate regions concurrently, so the recorder must be
+		// safe for parallel calls.
+		mu.Lock()
 		calls = append(calls, cliCall{name: name, args: append([]string(nil), args...)})
+		mu.Unlock()
 		return resp(name, args...)
 	}
 	t.Cleanup(func() { runCLI = prev })
@@ -57,6 +63,42 @@ func lastCall(t *testing.T, calls *[]cliCall) cliCall {
 		t.Fatal("runCLI was never called")
 	}
 	return (*calls)[len(*calls)-1]
+}
+
+// AWS run-instances has no name uniqueness, so a transient error after the
+// instance exists would make the retry create a SECOND instance. A per-run
+// --client-token makes the create idempotent (the retry returns the same
+// instance instead of double-provisioning a billing VM).
+func TestAWSCreateVM_PassesIdempotencyClientToken(t *testing.T) {
+	// Stub the security-group setup so CreateVM reaches run-instances.
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-123"), nil
+		case slices.Contains(args, "create-security-group"):
+			return []byte("sg-123"), nil
+		default:
+			return []byte(""), nil
+		}
+	})
+	var runArgs []string
+	prevRetry := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, args ...string) ([]byte, error) {
+		runArgs = append([]string(nil), args...)
+		return nil, assert.AnError // args already captured; final error is irrelevant
+	}
+	t.Cleanup(func() { retryCLIOutput = prevRetry })
+
+	p := NewAWSProvider("us-east-1")
+	_, _ = p.CreateVM(context.Background(), VMOptions{
+		Region: "us-east-1", Image: "ami-123",
+		Tags: map[string]string{"dispatcher": "true", "dispatcher-run-id": "plan_x"},
+	})
+
+	i := slices.Index(runArgs, "--client-token")
+	if assert.GreaterOrEqual(t, i, 0, "run-instances must carry a --client-token for idempotent retries") {
+		assert.Equal(t, "plan_x", runArgs[i+1], "the client token must be the stable per-run id")
+	}
 }
 
 func TestAWSProvider_Argv(t *testing.T) {
@@ -180,7 +222,10 @@ func TestAzureProvider_Argv(t *testing.T) {
 	})
 
 	t.Run("DestroyVM", func(t *testing.T) {
-		calls := captureRunCLI(t)
+		// gatherVMResources' `az vm show` must succeed (return valid JSON) so
+		// teardown proceeds to the delete rather than aborting to avoid an
+		// untagged-satellite leak; the VM here has no satellites ({}).
+		calls := captureRunCLIWith(t, func(string, ...string) ([]byte, error) { return []byte("{}"), nil })
 		_ = p.DestroyVM(context.Background(), "vmA")
 		got := lastCall(t, calls)
 		assert.Equal(t, "az", got.name)
