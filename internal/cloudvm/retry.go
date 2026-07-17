@@ -193,10 +193,16 @@ func IsTransient(err error) bool {
 // keeps billing. Before surfacing such an error, look up the run-tagged VM and, if
 // exactly one exists, adopt it (hydrated via GetVM). Returns nil if nothing was
 // created (a genuine create failure), so the caller surfaces the original error.
-func adoptCreatedVM(ctx context.Context, p Provider, runID string) *VMInfo {
+func adoptCreatedVM(_ context.Context, p Provider, runID string) *VMInfo {
 	if runID == "" {
 		return nil
 	}
+	// Use a fresh, detached context: the leak this recovers is precisely the
+	// timeout/Ctrl-C-after-create case, so the caller's ctx is often already
+	// cancelled — reusing it would defeat the recovery (mirrors the DestroyVM
+	// teardown paths, which also detach).
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	vms, err := p.ListVMs(ctx, map[string]string{"dispatcher-run-id": runID})
 	if err != nil || len(vms) != 1 {
 		return nil
