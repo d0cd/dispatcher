@@ -17,7 +17,11 @@ type TargetsFile struct {
 }
 
 // LoadFromFile loads target definitions from a YAML file into the registry.
-// Targets loaded from files override builtins with the same ID.
+// A config target whose ID collides with a builtin is rejected: adapterForTarget
+// dispatches builtin IDs to hardcoded adapters that ignore a config override, so
+// allowing the override would let an (untrusted-repo) dispatcher.yaml compute
+// feasibility/cost from config-chosen capabilities while execution uses a
+// different backend.
 func (r *Registry) LoadFromFile(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -29,9 +33,13 @@ func (r *Registry) LoadFromFile(path string) error {
 		return fmt.Errorf("cannot parse targets file %s: %w", path, err)
 	}
 
+	reserved := reservedIDs()
 	for _, t := range tf.Targets {
 		if t.ID == "" {
 			return fmt.Errorf("target in %s is missing required field 'id'", path)
+		}
+		if reserved[t.ID] {
+			return fmt.Errorf("target %q in %s collides with a builtin id (reserved); pick a different id", t.ID, path)
 		}
 		// Validate SSH targets on load, not just on save/import — a file-loaded
 		// (state-dir or project-local dispatcher.yaml) host/user is interpolated
@@ -118,6 +126,11 @@ func ValidateSSHTarget(c *types.SSHTargetConfig) error {
 		if err := validateSSHWord("user", c.User); err != nil {
 			return err
 		}
+	}
+	// Port 0 means "default to 22"; anything else must be a valid TCP port. Reject
+	// an out-of-range value at the boundary rather than emitting `-p -1` into ssh.
+	if c.Port < 0 || c.Port > 65535 {
+		return fmt.Errorf("ssh port %d is out of range [1, 65535]", c.Port)
 	}
 	if c.KeyFile != "" {
 		if err := validateSSHKeyFile(c.KeyFile); err != nil {

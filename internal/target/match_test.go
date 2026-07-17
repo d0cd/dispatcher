@@ -1,6 +1,7 @@
 package target
 
 import (
+	"runtime"
 	"testing"
 
 	"github.com/d0cd/dispatcher/internal/types"
@@ -114,6 +115,41 @@ func TestCheckFeasibility_GPUModel(t *testing.T) {
 	w.Requirements.GPU.Model = ""
 	target.Capabilities.Resources.GPU.Models = []string{"t4"}
 	assert.True(t, CheckFeasibility(target, w).Feasible)
+
+	// A specific model against a GPU target that lists NO models must fail closed
+	// (empty Models must not accept any requested model).
+	w.Requirements.GPU.Model = "h100"
+	target.Capabilities.Resources.GPU.Models = nil
+	res = CheckFeasibility(target, w)
+	assert.False(t, res.Feasible, "empty model list must not accept an arbitrary model")
+	assert.Contains(t, joinReasons(res), "h100")
+}
+
+func TestCheckFeasibility_ArchMismatchOnHostBoundTarget(t *testing.T) {
+	otherArch := "arm64"
+	if runtime.GOARCH == "arm64" {
+		otherArch = "amd64"
+	}
+	w := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{Arch: otherArch},
+	}
+	local := types.TargetConfig{
+		Enabled: true, Kind: types.TargetKindLocal,
+		Capabilities: types.Capabilities{WorkloadKinds: []types.WorkloadKind{types.WorkloadKindScript}},
+	}
+	res := CheckFeasibility(local, w)
+	assert.False(t, res.Feasible, "a foreign-arch workload can't run on a host-bound target")
+	assert.Contains(t, joinReasons(res), "architecture")
+
+	// A cloud-VM target is not gated here (arch is chosen at instance selection).
+	cloud := local
+	cloud.Kind = types.TargetKindCloudVM
+	assert.True(t, CheckFeasibility(cloud, w).Feasible)
+
+	// The host's own arch is feasible on the local target.
+	w.Requirements.Arch = runtime.GOARCH
+	assert.True(t, CheckFeasibility(local, w).Feasible)
 }
 
 // A workload requiring BOTH confidential and GPU must be infeasible everywhere:

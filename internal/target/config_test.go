@@ -127,7 +127,10 @@ func TestLoadFromDir_NonExistent(t *testing.T) {
 	assert.NoError(t, err) // should not error on missing dir
 }
 
-func TestLoadFromFile_OverridesBuiltin(t *testing.T) {
+func TestLoadFromFile_RejectsBuiltinOverride(t *testing.T) {
+	// A config file must not be able to redefine a builtin id: adapterForTarget
+	// routes builtin ids to hardcoded adapters that ignore the override, so an
+	// override would desync feasibility/cost from execution.
 	dir := t.TempDir()
 	yamlContent := `targets:
   - id: local-docker
@@ -140,14 +143,13 @@ func TestLoadFromFile_OverridesBuiltin(t *testing.T) {
 	r := NewRegistry()
 	r.LoadBuiltins()
 
-	// Before: enabled
+	err := r.LoadFromFile(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "reserved")
+
+	// The builtin is unchanged.
 	target, _ := r.Get("local-docker")
 	assert.True(t, target.Enabled)
-
-	// After override: disabled
-	require.NoError(t, r.LoadFromFile(path))
-	target, _ = r.Get("local-docker")
-	assert.False(t, target.Enabled)
 }
 
 func TestSaveTarget(t *testing.T) {
@@ -191,10 +193,16 @@ func TestValidateSSHTarget(t *testing.T) {
 		"user leading dash":     {Host: "h", User: "-x"},
 		"key_file with newline": {Host: "h", KeyFile: "/k\nevil"},
 		"key_file flag-like":    {Host: "h", KeyFile: "-k"},
+		"port negative":         {Host: "h", Port: -1},
+		"port too large":        {Host: "h", Port: 999999},
 	}
 	for name, c := range bad {
 		t.Run(name, func(t *testing.T) { assert.Error(t, ValidateSSHTarget(c)) })
 	}
+
+	// Port 0 (unset → default 22) and a valid port both pass.
+	require.NoError(t, ValidateSSHTarget(&types.SSHTargetConfig{Host: "h", Port: 0}))
+	require.NoError(t, ValidateSSHTarget(&types.SSHTargetConfig{Host: "h", Port: 2222}))
 }
 
 func TestSaveTarget_RejectsUnsafeSSHHost(t *testing.T) {

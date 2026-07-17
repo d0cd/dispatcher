@@ -1,6 +1,7 @@
 package target
 
 import (
+	"runtime"
 	"strings"
 
 	"github.com/d0cd/dispatcher/internal/types"
@@ -30,8 +31,15 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 		gpu := t.Capabilities.Resources.GPU
 		if !gpu.Supported {
 			reasons = append(reasons, "GPU required but target does not support GPU")
-		} else if m := w.Requirements.GPU.Model; m != "" && len(gpu.Models) > 0 && !offersGPUModel(gpu.Models, m) {
-			reasons = append(reasons, "GPU model "+m+" not offered by target (offers: "+strings.Join(gpu.Models, ", ")+")")
+		} else if m := w.Requirements.GPU.Model; m != "" {
+			// A specific model was requested. A target that advertises GPU support
+			// but enumerates no models can't confirm it — fail closed rather than
+			// accept any model (which would recommend a target that can't run it).
+			if len(gpu.Models) == 0 {
+				reasons = append(reasons, "GPU model "+m+" requested but target lists no specific GPU models")
+			} else if !offersGPUModel(gpu.Models, m) {
+				reasons = append(reasons, "GPU model "+m+" not offered by target (offers: "+strings.Join(gpu.Models, ", ")+")")
+			}
 		}
 	}
 
@@ -74,6 +82,13 @@ func CheckFeasibility(t types.TargetConfig, w types.WorkloadSpec) FeasibilityRes
 		}
 	}
 
+	// Architecture: a host-bound target (this machine) can only run the host's
+	// arch, so an arch-constrained workload that doesn't match is infeasible here.
+	// Cloud VMs pick a matching instance arch later, so they're not gated here.
+	if a := normalizeArch(w.Requirements.Arch); a != "" && isHostBound(t.Kind) && a != normalizeArch(runtime.GOARCH) {
+		reasons = append(reasons, "workload requires "+a+" but target runs on the host architecture "+normalizeArch(runtime.GOARCH))
+	}
+
 	// Sandbox requires isolation stronger than a bare host process (container or
 	// VM level), so a process-only target (local-process) is infeasible.
 	if w.Requirements.Sandbox && !offersIsolation(t.Capabilities.Isolation.Levels) {
@@ -105,6 +120,31 @@ func RequiredTargetForProfile(profile string) string {
 		return "azure-vm"
 	default:
 		return ""
+	}
+}
+
+// isHostBound reports whether a target kind runs on dispatcher's own host (so it
+// is fixed to the host architecture). SSH/cloud/k8s targets run elsewhere and
+// have their arch validated at provisioning, not here.
+func isHostBound(k types.TargetKind) bool {
+	switch k {
+	case types.TargetKindLocal, types.TargetKindDocker, types.TargetKindLocalVM:
+		return true
+	default:
+		return false
+	}
+}
+
+// normalizeArch folds common architecture spellings to a canonical token so an
+// "x86_64" workload matches an "amd64" host.
+func normalizeArch(a string) string {
+	switch strings.ToLower(strings.TrimSpace(a)) {
+	case "amd64", "x86_64", "x86-64", "x64":
+		return "amd64"
+	case "arm64", "aarch64":
+		return "arm64"
+	default:
+		return strings.ToLower(strings.TrimSpace(a))
 	}
 }
 
