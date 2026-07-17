@@ -118,6 +118,25 @@ func TestRunSaveWithError(t *testing.T) {
 
 // RecoverPlanID must extract the plan id even from a truncated/corrupt record so
 // gc can protect a live run whose record file is damaged.
+func TestLoadRecordByPlanID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	p := &types.Plan{Metadata: types.PlanMetadata{ID: "plan_abc"}, Recommendation: &types.Recommendation{Target: "aws-vm"}}
+	r := NewRun(p)
+	_, err := r.Save()
+	require.NoError(t, err)
+
+	// A VM's dispatcher-run-id tag carries the plan id; resolving by it must find
+	// the record even though its filename is the (distinct) run id.
+	require.NotEqual(t, r.ID, r.PlanID)
+	got, err := LoadRecordByPlanID("plan_abc")
+	require.NoError(t, err)
+	assert.Equal(t, r.ID, got.ID)
+
+	_, err = LoadRecordByPlanID("plan_missing")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
 func TestRecoverPlanID(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	p := &types.Plan{Metadata: types.PlanMetadata{ID: "plan_live"}, Recommendation: &types.Recommendation{Target: "aws-vm"}}

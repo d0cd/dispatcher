@@ -263,10 +263,20 @@ func runRun(cmd *cobra.Command, args []string) error {
 		executor.SetApprovalFunc(yesApproval)
 	} else if stdinIsTerminal() {
 		executor.SetApprovalFunc(terminalApproval)
+	} else if len(p.RequiredApprovals) > 0 {
+		// Non-TTY without --yes and the plan needs approval: install no in-process
+		// approver so the gate waits on an external `dispatcher approve <run-id>`
+		// (honoring ctx). The gate has no internal timeout, so make the wait
+		// explicit — without this notice the process appears to hang silently.
+		color.New(color.FgYellow).Fprintf(os.Stderr,
+			"This run requires approval and stdin is not a terminal.\nWaiting for `dispatcher approve %s` from another terminal (Ctrl-C to abort)", r.ID)
+		if maxDuration <= 0 {
+			fmt.Fprint(os.Stderr, "; no timeout is set, so it will wait until approved or interrupted")
+		}
+		fmt.Fprintln(os.Stderr, ".")
 	}
-	// else: non-TTY without --yes — install no in-process approver, so the gate
-	// waits on an external `dispatcher approve <run-id>` (honoring ctx) instead of
-	// instantly denying the run, which is what the guidance message promises.
+	// else: non-TTY without --yes and no approvals required — the gate is never
+	// consulted, so no approver is needed.
 
 	bold.Fprintf(os.Stderr, "\nRun: %s\n", r.ID)
 	fmt.Fprintln(os.Stderr, "Status: running")

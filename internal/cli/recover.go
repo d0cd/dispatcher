@@ -92,10 +92,14 @@ func runRecover(cmd *cobra.Command, args []string) error {
 		for _, res := range resources {
 			e := recoverEntry{ResourceID: res.ResourceID, Provider: res.Provider, RunID: res.RunID, CreatedAt: res.CreatedAt}
 			if res.RunID != "" {
-				if _, err := run.LoadRecord(res.RunID); err == nil {
+				// res.RunID is the plan id carried in the VM tag (the adapter is
+				// handed a Plan, not a run), so resolve the record by plan id — the
+				// record's filename is the distinct run id. attachable must carry
+				// that run id so `dispatcher status` can load it.
+				if rec, err := run.LoadRecordByPlanID(res.RunID); err == nil {
 					e.LocalRecord = "yes"
 					e.Attachable = true
-					attachable = append(attachable, res.RunID)
+					attachable = append(attachable, rec.ID)
 				} else if errors.Is(err, os.ErrNotExist) || strings.Contains(err.Error(), "not found") {
 					e.LocalRecord = "missing"
 				} else {

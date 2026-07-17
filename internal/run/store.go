@@ -204,6 +204,31 @@ func LoadRecord(id string) (*RunRecord, error) {
 	return &record, nil
 }
 
+// LoadRecordByPlanID returns the run record whose PlanID matches planID. Cloud
+// VMs are tagged with the plan id (the adapter is handed a Plan, not a run), so
+// callers holding a VM's dispatcher-run-id tag must resolve the record this way
+// rather than treating the tag as a record id. Returns os.ErrNotExist wrapped
+// when no record references the plan id.
+func LoadRecordByPlanID(planID string) (*RunRecord, error) {
+	if planID == "" {
+		return nil, fmt.Errorf("plan id is empty")
+	}
+	ids, err := ListRecords()
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		rec, err := LoadRecord(id)
+		if err != nil {
+			continue // skip unreadable records; the caller reports them separately
+		}
+		if rec.PlanID == planID {
+			return rec, nil
+		}
+	}
+	return nil, fmt.Errorf("no run record references plan %q: %w", planID, os.ErrNotExist)
+}
+
 func validateRunID(id string) error {
 	if id == "" {
 		return fmt.Errorf("run id is empty")

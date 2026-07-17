@@ -114,3 +114,18 @@ func TestFinalizeCost(t *testing.T) {
 	r.FinalizeCost()
 	assert.Equal(t, "USD", r.Cost.Currency)
 }
+
+func TestFinalizeCost_PreservesAccruedCostWithoutPlan(t *testing.T) {
+	// A run reconstructed from a record (force-stop, or a stop whose plan file is
+	// gone) has no Plan but carries an accrued cost. FinalizeCost must not zero it.
+	r := RunFromRecord(&RunRecord{
+		ID:    "r1",
+		State: types.RunStateRunning,
+		Cost:  types.CostEstimate{Value: 1.2345, Currency: "USD", Confidence: types.ConfidenceHigh},
+	})
+	require.Nil(t, r.Plan)
+
+	r.FinalizeCost()
+	assert.Equal(t, 1.2345, r.Cost.Value, "accrued cost must survive when the plan is unavailable")
+	assert.Equal(t, "USD", r.Cost.Currency)
+}
