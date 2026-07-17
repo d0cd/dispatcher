@@ -63,6 +63,32 @@ func TestScanSourceFiles_DepthLimit(t *testing.T) {
 	assert.GreaterOrEqual(t, len(files), 4)
 }
 
+func TestScanSourceFiles_SkipsSymlinkedFiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "real.py", "print('real')")
+	// A symlink with a source extension pointing at a host file must not be
+	// collected for inspection.
+	host := filepath.Join(t.TempDir(), "secret.py")
+	require.NoError(t, os.WriteFile(host, []byte("SECRET=1"), 0o600))
+	require.NoError(t, os.Symlink(host, filepath.Join(dir, "link.py")))
+
+	files := scanSourceFiles(dir, []string{".py"})
+	assert.Len(t, files, 1)
+	assert.Contains(t, files[0], "real.py")
+}
+
+func TestScanSourceFiles_MultiSegmentIgnore(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src", "vendor"), 0o755))
+	writeFile(t, dir, ".dispatchignore", "src/vendor\n")
+	writeFile(t, filepath.Join(dir, "src"), "main.py", "print('keep')")
+	writeFile(t, filepath.Join(dir, "src", "vendor"), "dep.py", "# skip")
+
+	files := scanSourceFiles(dir, []string{".py"})
+	assert.Len(t, files, 1)
+	assert.Contains(t, files[0], "main.py")
+}
+
 func TestDetectEntrypoints_Procfile(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "Procfile", "web: gunicorn app:app")

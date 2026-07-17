@@ -3,8 +3,11 @@ package workload
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // inputEnvPrefix marks a workload env var as a large-immutable-input reference:
@@ -84,6 +87,46 @@ func (e *InputTransportError) Error() string {
 // production, a stub in tests).
 type HTTPDoer interface {
 	Do(*http.Request) (*http.Response, error)
+}
+
+// isBlockedInputHost reports whether ip is in a range the input preflight must
+// not dial. The input URL is repo-controlled, so without this guard a malicious
+// dispatcher.yaml could point DISPATCHER_INPUT at the cloud metadata service
+// (169.254.169.254) or an internal host and use the preflight as an SSRF probe.
+func isBlockedInputHost(ip net.IP) bool {
+	return ip.IsLoopback() ||
+		ip.IsLinkLocalUnicast() || // 169.254.0.0/16 (incl. cloud metadata), fe80::/10
+		ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified() ||
+		ip.IsPrivate() // 10/8, 172.16/12, 192.168/16, fc00::/7
+}
+
+// NewInputPreflightClient builds the HTTP client PreflightInputs should use in
+// production. Its dialer refuses to connect to any address that resolves into a
+// blocked range (checked on the actual dialed IP, so DNS rebinding can't slip
+// past a pre-resolution check), closing the SSRF vector on repo-controlled input
+// URLs.
+func NewInputPreflightClient(timeout time.Duration) *http.Client {
+	dialer := &net.Dialer{
+		Timeout: timeout,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return err
+			}
+			ip := net.ParseIP(host)
+			if ip == nil || isBlockedInputHost(ip) {
+				return fmt.Errorf("input URL resolves to a disallowed address %q", host)
+			}
+			return nil
+		},
+	}
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &http.Transport{DialContext: dialer.DialContext},
+	}
 }
 
 // PreflightInputs does a bounded Range read of each input URI to confirm the

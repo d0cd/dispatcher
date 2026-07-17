@@ -33,16 +33,26 @@ func scanSourceFiles(root string, extensions []string) []string {
 		if len(files) >= maxScanFiles {
 			return filepath.SkipAll
 		}
+		rel, _ := filepath.Rel(root, path)
+		relSlash := filepath.ToSlash(rel)
 		if info.IsDir() {
 			name := info.Name()
-			if shouldSkipDir(name) || ignored[name] {
+			// Match .dispatchignore both by bare directory name and by the
+			// root-relative path, so a multi-segment entry like "src/vendor"
+			// (which never equals a base name) still skips.
+			if shouldSkipDir(name) || ignored[name] || ignored[relSlash] {
 				return filepath.SkipDir
 			}
 			// Enforce depth limit
-			rel, _ := filepath.Rel(root, path)
 			if rel != "." && strings.Count(rel, string(os.PathSeparator)) >= maxScanDepth {
 				return filepath.SkipDir
 			}
+			return nil
+		}
+		// Skip symlinks (Walk reports them via Lstat, so info.IsDir is false): a
+		// repo could symlink a source-extension name at a host file and pull its
+		// contents into the inspection set.
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		ext := filepath.Ext(info.Name())

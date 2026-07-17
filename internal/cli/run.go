@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -246,7 +245,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		env[k] = v // spec-level env wins over .env
 	}
 	if refs := workload.InputRefs(env); len(refs) > 0 {
-		client := &http.Client{Timeout: 20 * time.Second}
+		client := workload.NewInputPreflightClient(20 * time.Second)
 		if err := workload.PreflightInputs(cmd.Context(), refs, client); err != nil {
 			return fmt.Errorf("input preflight failed: %w", err)
 		}

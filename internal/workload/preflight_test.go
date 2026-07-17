@@ -3,13 +3,41 @@ package workload
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNewInputPreflightClient_BlocksSSRFTargets(t *testing.T) {
+	client := NewInputPreflightClient(2 * time.Second)
+	// The dialer must refuse loopback and the cloud metadata service even though
+	// they're reachable, closing the SSRF vector on repo-controlled input URLs.
+	for _, url := range []string{
+		"http://127.0.0.1:1/x",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://[::1]:1/x",
+	} {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+		require.NoError(t, err)
+		_, err = client.Do(req)
+		require.Error(t, err, "expected %s to be blocked", url)
+		assert.Contains(t, err.Error(), "disallowed")
+	}
+}
+
+func TestIsBlockedInputHost(t *testing.T) {
+	for _, ip := range []string{"127.0.0.1", "169.254.169.254", "10.0.0.1", "192.168.1.1", "::1", "fe80::1", "0.0.0.0"} {
+		assert.True(t, isBlockedInputHost(net.ParseIP(ip)), "%s should be blocked", ip)
+	}
+	for _, ip := range []string{"8.8.8.8", "1.1.1.1", "93.184.216.34"} {
+		assert.False(t, isBlockedInputHost(net.ParseIP(ip)), "%s should be allowed", ip)
+	}
+}
 
 func TestInputRefs_ParsesEnvContract(t *testing.T) {
 	refs := InputRefs(map[string]string{

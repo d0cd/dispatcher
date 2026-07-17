@@ -41,6 +41,19 @@ func TestLoadDotEnv_RejectsInjectionKey(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid key")
 }
 
+func TestLoadDotEnv_RejectsSymlink(t *testing.T) {
+	// A .env symlinked at a host file would export that file's contents into the
+	// remote env; refuse to follow it.
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "host-secret")
+	require.NoError(t, os.WriteFile(secret, []byte("API_KEY=leaked\n"), 0o600))
+	require.NoError(t, os.Symlink(secret, filepath.Join(dir, ".env")))
+
+	_, err := LoadDotEnv(dir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+}
+
 func TestIsValidEnvKey(t *testing.T) {
 	for _, ok := range []string{"FOO", "_X", "A1_B2", "lower_case"} {
 		assert.Truef(t, isValidEnvKey(ok), "%q should be valid", ok)
