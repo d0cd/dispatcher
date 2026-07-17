@@ -190,7 +190,7 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 
 	destroyOnErr = false // the run completed; the VM is owned by the run until Cleanup
 	return &confidentialRunState{
-		Provider:    a2provider(d.provider),
+		Provider:    d.provider.Name(),
 		VMID:        vm.ID,
 		Region:      region,
 		ImageRef:    imageRef,
@@ -205,8 +205,6 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 // drive the flow without a live agent (the attested exchange is tested in the
 // attest packages).
 var runOverATLS = agent.RunOverATLS
-
-func a2provider(p Provider) ProviderID { return p.Name() }
 
 // buildConfidentialPayload assembles what dispatcher seals to the TEE: the
 // workload command, its source (tarred, minus the usual heavy dirs), the .env,

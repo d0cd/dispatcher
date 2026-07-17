@@ -14,6 +14,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -55,7 +56,7 @@ func verifyAzureSNP(ev agent.AzureSNPEvidence, p AzureSNPPolicy) (measurement st
 		return "", nil, fmt.Errorf("azure snp policy pins no PCRs — fail closed")
 	}
 	for idx, want := range p.PCRs {
-		if !containsInt(quoted, idx) {
+		if !slices.Contains(quoted, idx) {
 			return "", nil, fmt.Errorf("pinned pcr%d was not covered by the signed quote", idx)
 		}
 		got, ok := pcrs[uint32(idx)]
@@ -140,8 +141,8 @@ func verifyAzureSNPEvidence(ev agent.AzureSNPEvidence, roots []*x509.Certificate
 	}
 
 	// 5. Freshness + channel binding: the quote's extraData is this run's binding.
-	if len(nonce) == 0 {
-		return nil, nil, nil, fmt.Errorf("azure snp nonce missing — fail closed")
+	if len(nonce) != 32 {
+		return nil, nil, nil, fmt.Errorf("azure snp nonce must be exactly 32 bytes, got %d — fail closed", len(nonce))
 	}
 	if !bytes.Equal(ad.ExtraData, agent.MAABindingNonce(nonce, ev.ChannelKey)) {
 		return nil, nil, nil, fmt.Errorf("quote extraData does not match this run's binding (replay/relay)")
@@ -200,7 +201,7 @@ func captureAzureSNPPCR11(ev agent.AzureSNPEvidence, roots []*x509.Certificate, 
 	if err != nil {
 		return "", fmt.Errorf("verify azure snp evidence: %w", err)
 	}
-	if !containsInt(quoted, 11) {
+	if !slices.Contains(quoted, 11) {
 		return "", fmt.Errorf("evidence quote does not cover pcr11 — refusing to capture an unmeasured value")
 	}
 	v, ok := pcrs[11]
@@ -267,15 +268,6 @@ func azureSNPCheckRevocation(vcek, ask *x509.Certificate, roots []*x509.Certific
 		}
 	}
 	return nil
-}
-
-func containsInt(s []int, v int) bool {
-	for _, x := range s {
-		if x == v {
-			return true
-		}
-	}
-	return false
 }
 
 // hclAkPub extracts the vTPM Attestation Key (the "HCLAkPub" RSA JWK) from the HCL

@@ -91,8 +91,8 @@ func verifyNitroDoc(coseBytes []byte, roots *x509.CertPool, p NitroPolicy) (meas
 
 	// 3. Freshness + channel-key binding: the doc must echo this run's nonce and
 	// carry the channel key to seal to.
-	if len(p.Nonce) == 0 {
-		return "", nil, fmt.Errorf("nitro policy nonce missing — fail closed")
+	if len(p.Nonce) != 32 {
+		return "", nil, fmt.Errorf("nitro policy nonce must be exactly 32 bytes, got %d — fail closed", len(p.Nonce))
 	}
 	if !bytes.Equal(doc.Nonce, p.Nonce) {
 		return "", nil, fmt.Errorf("nitro attestation nonce does not match this run's challenge (replay/relay)")
