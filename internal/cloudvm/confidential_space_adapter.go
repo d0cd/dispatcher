@@ -5,7 +5,6 @@ import (
 	"crypto"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +14,6 @@ import (
 	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/attest/agent"
 	"github.com/d0cd/dispatcher/internal/dlog"
-	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -26,9 +24,12 @@ import (
 // from the SSH-VM CloudVMAdapter — no SSH, no rsync, no PID; the run is synchronous
 // (the aTLS exchange blocks until the workload finishes).
 type ConfidentialSpaceAdapter struct {
-	targetID string
-	deps     csDeps
-	config   Config
+	// The shared post-run lifecycle (ID/Validate/EstimateCost/Prepare/Status/
+	// FailureDetails/Logs/Artifacts/Terminate) is inherited from the base; this
+	// adapter overrides only Execute (container path) and Cleanup (also reaps the
+	// per-run agent firewall). Its base provider is the same one carried in deps.
+	confidentialVMAdapter
+	deps csDeps
 }
 
 // csDeps are the ConfidentialSpaceAdapter's collaborators. The live-infra
@@ -81,8 +82,12 @@ func (s *confidentialRunState) MarshalHandleState() (json.RawMessage, error) { r
 // environment-specific; the remaining collaborators default to live behaviour.
 func NewConfidentialSpaceAdapter(provider Provider, keys map[string]crypto.PublicKey, buildImage func(context.Context, types.WorkloadSpec) (string, string, error), cfg Config) *ConfidentialSpaceAdapter {
 	return &ConfidentialSpaceAdapter{
-		targetID: string(cfg.ProviderID) + "-confidential-space",
-		config:   cfg,
+		confidentialVMAdapter: confidentialVMAdapter{
+			targetID:       string(cfg.ProviderID) + "-confidential-space",
+			provider:       provider,
+			config:         cfg,
+			costAssumption: "confidential (SEV) VM",
+		},
 		deps: csDeps{
 			provider:   provider,
 			keys:       keys,
@@ -93,8 +98,6 @@ func NewConfidentialSpaceAdapter(provider Provider, keys map[string]crypto.Publi
 		},
 	}
 }
-
-func (a *ConfidentialSpaceAdapter) ID() string { return a.targetID }
 
 // executeConfidentialSpace is the orchestration core: build the measured image,
 // provision the CS VM pinned to its digest, verify attestation over the untrusted
@@ -280,99 +283,6 @@ func (a *ConfidentialSpaceAdapter) Execute(ctx context.Context, p *types.Plan) (
 	}
 	return &adapter.RunHandle{ID: state.VMID, TargetID: a.targetID, State: state}, nil
 }
-
-func (a *ConfidentialSpaceAdapter) Validate(ctx context.Context, _ types.WorkloadSpec) (types.ValidationResult, error) {
-	v := types.ValidationResult{
-		Schema: types.ValidationPass, PackageBuild: types.ValidationPass,
-		TargetCapabilities: types.ValidationPass, Credentials: types.ValidationPass,
-		Quota: types.ValidationSkipped, Network: types.ValidationPass,
-		Policy: types.ValidationPass, CostEstimate: types.ValidationPass, CleanupPlan: types.ValidationPass,
-	}
-	if err := a.deps.provider.CheckCLI(ctx); err != nil {
-		v.Credentials = types.ValidationFail
-		return v, fmt.Errorf("provider CLI check failed: %w", err)
-	}
-	return v, nil
-}
-
-func (a *ConfidentialSpaceAdapter) EstimateCost(_ context.Context, w types.WorkloadSpec) (types.CostEstimate, error) {
-	hours := 1.0
-	if w.DetectedKind == types.WorkloadKindService {
-		hours = 24.0
-	}
-	total := providerBaseRate(a.config.ProviderID) * hours
-	return types.CostEstimate{
-		Value: float64(int(total*1000)) / 1000, Currency: "USD", Confidence: types.ConfidenceMedium,
-		Assumptions: []string{fmt.Sprintf("assumes %.0fh runtime", hours), "confidential (SEV) VM"},
-		Exclusions:  []string{"excludes network egress", "excludes registry storage"},
-	}, nil
-}
-
-func (a *ConfidentialSpaceAdapter) Prepare(context.Context, *types.Plan) error { return nil }
-
-// Status reports the terminal state captured during Execute — the sealed
-// exchange runs synchronously, so a returned handle is always finished.
-func (a *ConfidentialSpaceAdapter) Status(_ context.Context, h *adapter.RunHandle) (types.RunState, error) {
-	state := h.State.(*confidentialRunState)
-	if state.Result.ExitCode != 0 {
-		return types.RunStateExecutionFailed, nil
-	}
-	return types.RunStateCompleted, nil
-}
-
-func (a *ConfidentialSpaceAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDetails {
-	state, ok := h.State.(*confidentialRunState)
-	if !ok {
-		return adapter.FailureDetails{Message: "no confidential space state"}
-	}
-	fd := adapter.FailureDetails{ExitCode: state.Result.ExitCode}
-	if state.Result.ExitCode != 0 {
-		fd.Message = fmt.Sprintf("confidential workload exited with code %d", state.Result.ExitCode)
-	}
-	return fd
-}
-
-// Logs writes the captured (sealed-then-opened) workload output.
-func (a *ConfidentialSpaceAdapter) Logs(_ context.Context, h *adapter.RunHandle, w io.Writer) error {
-	state := h.State.(*confidentialRunState)
-	if len(state.Result.Stdout) > 0 {
-		_, _ = w.Write(state.Result.Stdout)
-	}
-	if len(state.Result.Stderr) > 0 {
-		_, _ = w.Write(state.Result.Stderr)
-	}
-	return nil
-}
-
-// Artifacts extracts the sealed outputs tarball into runs/<id>/artifacts/.
-func (a *ConfidentialSpaceAdapter) Artifacts(_ context.Context, h *adapter.RunHandle) ([]adapter.ArtifactRef, error) {
-	state := h.State.(*confidentialRunState)
-	if len(state.Result.OutputsTarGz) == 0 {
-		return nil, nil
-	}
-	indexKey := h.RunID
-	if indexKey == "" {
-		indexKey = h.ID
-	}
-	dest, err := statedir.Subdir(filepath.Join("runs", indexKey, "artifacts"))
-	if err != nil {
-		return nil, fmt.Errorf("create artifacts dir: %w", err)
-	}
-	if err := agent.UnTarGz(state.Result.OutputsTarGz, dest); err != nil {
-		return nil, fmt.Errorf("extract outputs: %w", err)
-	}
-	var refs []adapter.ArtifactRef
-	_ = filepath.Walk(dest, func(pth string, info os.FileInfo, _ error) error {
-		if info == nil || info.IsDir() {
-			return nil
-		}
-		refs = append(refs, adapter.ArtifactRef{Name: filepath.Base(pth), Path: pth, Size: info.Size()})
-		return nil
-	})
-	return refs, nil
-}
-
-func (a *ConfidentialSpaceAdapter) Terminate(context.Context, *adapter.RunHandle) error { return nil }
 
 func (a *ConfidentialSpaceAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
 	state := h.State.(*confidentialRunState)

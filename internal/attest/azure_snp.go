@@ -100,7 +100,7 @@ func verifyAzureSNPEvidence(ev agent.AzureSNPEvidence, roots []*x509.Certificate
 		return nil, nil, nil, err
 	}
 
-	// 1b. Guest policy + TCB (matches applyPolicy on the raw/AWS SNP paths): a
+	// 1b. Guest policy + TCB: a
 	// DEBUG guest lets the host read/write guest memory and forge the vTPM AK, and
 	// MIGRATE_MA permits a migration agent — both defeat the whole guarantee. A
 	// reported TCB below the operator minimum is running known-vulnerable firmware.

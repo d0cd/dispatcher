@@ -12,9 +12,9 @@ import (
 // the verifiers in this package, and TestMatrix_DocInSync locks the rendered
 // table into the doc so a code change that isn't reflected in the docs fails CI.
 //
-// Every cell here must match the corresponding verifier: csAttester
-// (confidential_space.go), azureSNPAttester (azure_snp.go), nitroAttester
-// (nitro.go), and the shared applyPolicy (attestation_policy.go).
+// Every cell here must match the corresponding verifier: verifyCSToken
+// (confidential_space.go), verifyAzureSNP (azure_snp.go), verifyNitroDoc
+// (nitro.go); shared measurement/TCB helpers live in attestation_policy.go.
 // TestMatrix_GroundedInCode ties the security-critical cells to the actual
 // verifier behavior. Only the measured backends are supported; the unmeasured
 // standard SEV-SNP / MAA paths were removed (see docs/SECURITY.md).

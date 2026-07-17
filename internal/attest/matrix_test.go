@@ -4,14 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"encoding/hex"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/d0cd/dispatcher/internal/attest/agent"
 )
 
 // Every backend must define every control (no missing cells) with a known
@@ -49,32 +48,26 @@ func TestMatrix_DocInSync(t *testing.T) {
 // cells to the actual verifier behavior, so the matrix can't silently misdescribe
 // what the code enforces.
 func TestMatrix_GroundedInCode(t *testing.T) {
-	// The raw-report paths (AWS SEV-SNP; the shared azure-snp logic mirrors it)
-	// enforce debug-off, migration-off, and the TCB floor via applyPolicy. Ground
-	// those "enforced" cells against the real policy engine.
-	nonce := bytes.Repeat([]byte{0x5a}, 32)
-	channelKey := bytes.Repeat([]byte{0x11}, 32)
-	good := Claims{
-		TEEType: "sev-snp", Measurement: "aa", TCB: 0xFF,
-		ReportData: agent.BindingHash(nonce, channelKey),
-	}
-	pol := VerificationPolicy{
-		ExpectedType: "sev-snp", Measurements: []string{"aa"},
-		Nonce: nonce, ChannelKey: channelKey,
-	}
-	require.NoError(t, applyPolicy(good, pol), "a clean report must verify")
+	// The measured SEV-SNP path (azure-snp) enforces debug-off, migration-off, and
+	// the TCB floor. Ground those "enforced" cells against the LIVE verifier
+	// (verifyAzureSNP), not a parallel policy impl — a full evidence bundle carrying
+	// each violation must be rejected.
+	snpNonce := bytes.Repeat([]byte{0x5a}, 32)
+	snpCK := []byte("azure-channel-public-key-32-byte")
+	snpPCR11 := make48(0xAB)[:32]
+	snpPin := map[int]string{11: hex.EncodeToString(snpPCR11)}
 
-	dbg := good
-	dbg.DebugEnabled = true
-	assert.Error(t, applyPolicy(dbg, pol), "matrix says debug-off is enforced on the applyPolicy paths")
+	evDbg, roots := azureEvidencePolicy(t, snpNonce, snpCK, snpPCR11, snpPolicyDebug, 9)
+	_, _, err := verifyAzureSNP(evDbg, AzureSNPPolicy{Roots: roots, Nonce: snpNonce, PCRs: snpPin})
+	assert.Error(t, err, "matrix says debug-off is enforced on the SNP path")
 
-	mig := good
-	mig.MigrationEnabled = true
-	assert.Error(t, applyPolicy(mig, pol), "matrix says migration-off is enforced on the applyPolicy paths")
+	evMig, roots := azureEvidencePolicy(t, snpNonce, snpCK, snpPCR11, snpPolicyMigrateMA, 9)
+	_, _, err = verifyAzureSNP(evMig, AzureSNPPolicy{Roots: roots, Nonce: snpNonce, PCRs: snpPin})
+	assert.Error(t, err, "matrix says migration-off is enforced on the SNP path")
 
-	weak := good
-	weak.TCB = 0x01
-	assert.Error(t, applyPolicy(weak, pol.withMinTCB(0xFF)), "matrix says the TCB floor is enforced on the applyPolicy paths")
+	evWeak, roots := azureEvidencePolicy(t, snpNonce, snpCK, snpPCR11, 0, 1)
+	_, _, err = verifyAzureSNP(evWeak, AzureSNPPolicy{Roots: roots, Nonce: snpNonce, PCRs: snpPin, MinTCB: 0xFF})
+	assert.Error(t, err, "matrix says the TCB floor is enforced on the SNP path")
 
 	// The GCP Confidential Space path can't read a TCB, so it fail-closes on
 	// minTCB (no silent ignore) — matching the matrix.
@@ -109,10 +102,4 @@ func cellFor(t *testing.T, backendID string, ctrl Control) Enforcement {
 	}
 	t.Fatalf("unknown backend %q", backendID)
 	return ""
-}
-
-// withMinTCB returns a copy of the policy with a raised TCB floor.
-func (p VerificationPolicy) withMinTCB(min uint64) VerificationPolicy {
-	p.MinTCB = min
-	return p
 }
