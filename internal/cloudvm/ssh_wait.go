@@ -76,7 +76,13 @@ func WaitForSSHOnPort(ctx context.Context, host string, port int, timeout time.D
 			conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 			if err == nil {
 				conn.Close()
-				time.Sleep(10 * time.Second)
+				// Give cloud-init a moment to settle, but abort promptly if the
+				// caller's context is cancelled instead of sleeping the full window.
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(10 * time.Second):
+				}
 				return nil
 			}
 		}

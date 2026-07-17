@@ -15,10 +15,10 @@ func fcSubnetIndex(runID string) int {
 	return int(crc32.ChecksumIEEE([]byte(runID)) % 16384)
 }
 
-// fcNet returns the /30 endpoints for a run: the host (gateway) IP, the guest
-// IP, and the dotted netmask.
-func fcNet(runID string) (hostIP, guestIP, mask string) {
-	base := fcSubnetIndex(runID) * 4 // first address of the /30
+// fcNetFromIndex returns the /30 endpoints for a subnet index: the host
+// (gateway) IP, the guest IP, and the dotted netmask.
+func fcNetFromIndex(idx int) (hostIP, guestIP, mask string) {
+	base := idx * 4 // first address of the /30
 	third := (base >> 8) & 0xff
 	low := base & 0xff
 	hostIP = fmt.Sprintf("%s.%d.%d", fcNetPrefix, third, low+1)
@@ -26,12 +26,24 @@ func fcNet(runID string) (hostIP, guestIP, mask string) {
 	return hostIP, guestIP, "255.255.255.252"
 }
 
-// fcNetworkCIDR returns the /30 network address in CIDR form (e.g. for NAT).
-func fcNetworkCIDR(runID string) string {
-	base := fcSubnetIndex(runID) * 4
+// fcCIDRFromIndex returns the /30 network address in CIDR form (e.g. for NAT).
+func fcCIDRFromIndex(idx int) string {
+	base := idx * 4
 	third := (base >> 8) & 0xff
 	low := base & 0xff
 	return fmt.Sprintf("%s.%d.%d/30", fcNetPrefix, third, low)
+}
+
+// fcNet returns the hash-derived /30 endpoints for a run. The create path uses
+// the persisted allocated index instead (fcNetFromIndex); this remains for
+// callers/tests that only have the run id.
+func fcNet(runID string) (hostIP, guestIP, mask string) {
+	return fcNetFromIndex(fcSubnetIndex(runID))
+}
+
+// fcNetworkCIDR returns the hash-derived /30 in CIDR form for a run.
+func fcNetworkCIDR(runID string) string {
+	return fcCIDRFromIndex(fcSubnetIndex(runID))
 }
 
 // fcTapName is the host tap interface for a run. Must fit IFNAMSIZ (15 chars);

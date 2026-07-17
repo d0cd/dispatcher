@@ -134,7 +134,14 @@ func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types
 	// self-destruct at the last deadline. Only backends that expose SSH (the Nitro
 	// parent) can renew; the measured CVM ships no login and relies on gc.
 	if d.sshKeyPath != "" {
-		st := &CloudVMState{IP: vm.IP, SSHKeyPath: d.sshKeyPath, SSHUser: d.sshUser}
+		st := &CloudVMState{VMID: vm.ID, IP: vm.IP, SSHKeyPath: d.sshKeyPath, SSHUser: d.sshUser}
+		// Pin the parent's host key so renewal SSH uses StrictHostKeyChecking=yes
+		// against it rather than the permissive /dev/null fallback (which would let
+		// a MITM intercept the deadline-extension). Best-effort: a keyscan failure
+		// leaves renewal running, backstopped by the VM's own boot-relative deadline.
+		if err := PinHostKey(ctx, st, p.Metadata.ID); err != nil {
+			dlog.L().Warn("sshconf.watchdog.pin_host_key.failed", "run", p.Metadata.ID, "err", err.Error())
+		}
 		stopRenew := make(chan struct{})
 		defer close(stopRenew)
 		go renewWatchdogUntil(ctx, st, ttl, stopRenew)

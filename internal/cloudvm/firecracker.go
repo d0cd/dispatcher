@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -141,8 +142,81 @@ func fcRunDir(id string) (string, error) {
 	return statedir.Subdir(filepath.Join("firecracker", id))
 }
 
-// fcID derives a stable, charset-safe id used for all per-run derivations (tap,
-// subnet, MAC, run dir). DestroyVM re-derives everything from this id alone.
+// fcAllocSubnetIndex picks a free /30 subnet index for a run and persists it in
+// the run dir. It starts from the run's hash bucket and linear-probes so two
+// concurrent runs whose ids collide mod 16384 don't land on the same host IP.
+// GetVM/teardown read the persisted value via fcReadSubnetIndex.
+func fcAllocSubnetIndex(id, dir string) (int, error) {
+	used, err := fcUsedSubnetIndices(id)
+	if err != nil {
+		return 0, err
+	}
+	start := fcSubnetIndex(id)
+	for i := 0; i < 16384; i++ {
+		cand := (start + i) % 16384
+		if used[cand] {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, "subnet"), []byte(strconv.Itoa(cand)), 0o600); err != nil {
+			return 0, err
+		}
+		return cand, nil
+	}
+	return 0, fmt.Errorf("no free firecracker /30 subnet (16384 in use)")
+}
+
+// fcUsedSubnetIndices returns the subnet indices in use by every run dir other
+// than selfID, so allocation can avoid them.
+func fcUsedSubnetIndices(selfID string) (map[int]bool, error) {
+	used := map[int]bool{}
+	base, err := statedir.Subdir("firecracker")
+	if err != nil {
+		return used, err
+	}
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return used, nil // no runs yet
+	}
+	for _, e := range entries {
+		if !e.IsDir() || e.Name() == selfID {
+			continue
+		}
+		if b, err := os.ReadFile(filepath.Join(base, e.Name(), "subnet")); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+				used[n] = true
+			}
+		}
+	}
+	return used, nil
+}
+
+// fcReadSubnetIndex reads the persisted /30 index for a run, falling back to the
+// hash bucket when no allocation was recorded (a partial/legacy run dir).
+func fcReadSubnetIndex(id string) int {
+	if dir, err := fcRunDir(id); err == nil {
+		if b, err := os.ReadFile(filepath.Join(dir, "subnet")); err == nil {
+			if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && n >= 0 && n < 16384 {
+				return n
+			}
+		}
+	}
+	return fcSubnetIndex(id)
+}
+
+// fcReadIface reads the host egress interface recorded at network setup, or ""
+// when none was persisted.
+func fcReadIface(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, "iface"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// fcID derives a stable, charset-safe id used for the tap, MAC, and run dir. The
+// per-run /30 subnet and the egress interface are allocated at create and
+// persisted in the run dir (fcReadSubnetIndex/fcReadIface) so teardown removes
+// exactly what create added even if the default route later changes.
 func fcID(opts VMOptions) string {
 	id := opts.Tags["dispatcher-run-id"]
 	if id == "" {
@@ -185,14 +259,12 @@ func (f *FirecrackerProvider) CheckCLI(_ context.Context) error {
 	return nil
 }
 
-func (f *FirecrackerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
+func (f *FirecrackerProvider) CreateVM(ctx context.Context, opts VMOptions) (retInfo *VMInfo, retErr error) {
 	if err := f.CheckCLI(ctx); err != nil {
 		return nil, err
 	}
 	id := fcID(opts)
 	tap := fcTapName(id)
-	hostIP, guestIP, mask := fcNet(id)
-	cidr := fcNetworkCIDR(id)
 	mac := fcGuestMAC(id)
 
 	// Clear any stale state from a prior run reusing this id.
@@ -202,6 +274,24 @@ func (f *FirecrackerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VM
 	if err != nil {
 		return nil, err
 	}
+
+	// Allocate a free /30 (probing past hash collisions) and derive addresses.
+	idx, err := fcAllocSubnetIndex(id, dir)
+	if err != nil {
+		return nil, err
+	}
+	hostIP, guestIP, mask := fcNetFromIndex(idx)
+	cidr := fcCIDRFromIndex(idx)
+
+	// Once host networking is up, any later failure must tear down the tap and
+	// iptables rules — otherwise privileged host state leaks and needs manual
+	// `ip link del` / `iptables -D`.
+	netUp := false
+	defer func() {
+		if retErr != nil && netUp {
+			_ = f.teardown(context.Background(), id)
+		}
+	}()
 
 	// 1. Per-run rootfs copy so guest writes never touch the shared base.
 	rootfs := filepath.Join(dir, "rootfs.ext4")
@@ -217,9 +307,10 @@ func (f *FirecrackerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VM
 	}
 
 	// 3. Host networking: tap on a per-run /30 + NAT for guest egress.
-	if err := fcSetupNetwork(ctx, tap, hostIP, cidr); err != nil {
+	if err := fcSetupNetwork(ctx, tap, hostIP, cidr, dir); err != nil {
 		return nil, err
 	}
+	netUp = true
 
 	// 4. Write the machine config (kernel ip= gives the guest its address).
 	spec := firecrackerVMSpec{
@@ -255,7 +346,7 @@ func (f *FirecrackerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VM
 	launch.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := launch.Start(); err != nil {
 		logf.Close()
-		_ = f.teardown(ctx, id)
+		// The deferred cleanup tears down the tap/NAT on this error return.
 		return nil, fmt.Errorf("launch firecracker: %w", err)
 	}
 	// Start has duplicated the fd into the child (its stdout/stderr); the parent's
@@ -276,7 +367,7 @@ func (f *FirecrackerProvider) WaitReady(ctx context.Context, _ string, ip string
 }
 
 func (f *FirecrackerProvider) GetVM(ctx context.Context, id string) (*VMInfo, error) {
-	_, guestIP, _ := fcNet(id)
+	_, guestIP, _ := fcNetFromIndex(fcReadSubnetIndex(id))
 	dir, err := fcRunDir(id)
 	if err != nil {
 		return &VMInfo{ID: id, IP: guestIP, State: VMStateTerminated}, nil
@@ -300,8 +391,14 @@ func (f *FirecrackerProvider) teardown(ctx context.Context, id string) error {
 	}
 	_, _ = fcSudo(ctx, "pkill", "-f", filepath.Join(dir, "config.json"))
 	tap := fcTapName(id)
-	cidr := fcNetworkCIDR(id)
-	if iface, err := fcDefaultIface(ctx); err == nil {
+	cidr := fcCIDRFromIndex(fcReadSubnetIndex(id))
+	// Prefer the iface recorded at setup so the delete matches the insert even if
+	// the default route changed; fall back to the current default route.
+	iface := fcReadIface(dir)
+	if iface == "" {
+		iface, _ = fcDefaultIface(ctx)
+	}
+	if iface != "" {
 		for _, c := range fcNATArgs(cidr, iface, tap, true) {
 			_, _ = fcSudo(ctx, c[0], c[1:]...)
 		}
@@ -368,8 +465,9 @@ func fcInjectSSHKey(ctx context.Context, rootfs, pubKeyPath, workDir string) err
 }
 
 // fcSetupNetwork brings up the per-run tap and NATs guest egress out the host's
-// default interface.
-func fcSetupNetwork(ctx context.Context, tap, hostIP, cidr string) error {
+// default interface. The chosen interface is persisted in dir so teardown can
+// delete exactly the rules it added, even if the default route later changes.
+func fcSetupNetwork(ctx context.Context, tap, hostIP, cidr, dir string) error {
 	_, _ = fcSudo(ctx, "sysctl", "-w", "net.ipv4.ip_forward=1")
 	for _, c := range fcTapUpArgs(tap, hostIP) {
 		if out, err := fcSudo(ctx, c[0], c[1:]...); err != nil {
@@ -380,6 +478,9 @@ func fcSetupNetwork(ctx context.Context, tap, hostIP, cidr string) error {
 	if err != nil {
 		return err
 	}
+	// Record the egress iface before inserting the rules so teardown can remove
+	// them by the exact spec even if the create later fails partway.
+	_ = os.WriteFile(filepath.Join(dir, "iface"), []byte(iface), 0o600)
 	for _, c := range fcNATArgs(cidr, iface, tap, false) {
 		if out, err := fcSudo(ctx, c[0], c[1:]...); err != nil {
 			return fmt.Errorf("nat setup %v: %s: %w", c, strings.TrimSpace(string(out)), err)

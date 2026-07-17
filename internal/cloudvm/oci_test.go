@@ -89,6 +89,25 @@ func TestOCICreateVM_RequiresOCIDs(t *testing.T) {
 	assert.Contains(t, err.Error(), "DISPATCHER_OCI_")
 }
 
+func TestOCICreateVM_RejectsUnsafeShapeAndImage(t *testing.T) {
+	withOCIEnv(t)
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	runCLI = func(context.Context, string, ...string) ([]byte, error) {
+		t.Fatal("CLI must not be invoked when a value fails the boundary check")
+		return nil, nil
+	}
+	o := NewOCIProvider("us-phoenix-1")
+	// A flag-like InstanceType (shape) must be rejected before reaching the argv.
+	_, err := o.CreateVM(context.Background(), VMOptions{
+		Name:         "x",
+		InstanceType: "--privileged",
+		Tags:         map[string]string{"dispatcher-run-id": "r"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "oci")
+}
+
 func TestOCICreateVM_PublicIPFailureUsesFreshCleanupContext(t *testing.T) {
 	withOCIEnv(t)
 	prev := runCLI

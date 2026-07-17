@@ -154,6 +154,16 @@ func (o *OCIProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	shape := ociShape(opts)
 
+	// Validate the plan/catalog/env-supplied values at the boundary, as every
+	// other provider does — a leading '-' or stray metacharacter must not reach
+	// the oci argv. Region is optional (empty falls back to the CLI profile).
+	if !isSafeArg(shape) || !isSafeArg(image) {
+		return nil, fmt.Errorf("oci: shape %q or image %q contains characters outside [a-zA-Z0-9_.:/@-] or is empty/flag-like", shape, image)
+	}
+	if o.region != "" && !isSafeArg(o.region) {
+		return nil, fmt.Errorf("oci: region %q contains characters outside [a-zA-Z0-9_.:/@-] or is flag-like", o.region)
+	}
+
 	// SSH key + cloud-init ride in instance metadata. Write the metadata as a
 	// file:// input so neither the key nor the (secret-bearing) user-data appears
 	// in argv (ps-visible to other users on the host).

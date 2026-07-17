@@ -217,7 +217,12 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	// Wait for public IP
 	ip, err := a.waitForIP(ctx, instanceID, region)
 	if err != nil {
-		_ = a.DestroyVM(ctx, instanceID)
+		// waitForIP typically fails because ctx was cancelled (timeout/Ctrl-C), so
+		// tearing the instance down on that same ctx would no-op and leak a live,
+		// billing instance. Destroy on a fresh detached context.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		_ = a.DestroyVM(cleanupCtx, instanceID)
 		return nil, err
 	}
 

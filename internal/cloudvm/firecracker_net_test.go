@@ -2,11 +2,37 @@ package cloudvm
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
+	statedir "github.com/d0cd/dispatcher/internal/state"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestFCAllocSubnetIndex_ProbesPastUsedAndPersists(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	id := "run_alpha"
+	hashIdx := fcSubnetIndex(id)
+
+	// Occupy this run's hash bucket with a sibling run so allocation must probe.
+	base, err := statedir.Subdir("firecracker")
+	require.NoError(t, err)
+	sib := filepath.Join(base, "other")
+	require.NoError(t, os.MkdirAll(sib, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(sib, "subnet"), []byte(strconv.Itoa(hashIdx)), 0o600))
+
+	dir, err := fcRunDir(id)
+	require.NoError(t, err)
+	got, err := fcAllocSubnetIndex(id, dir)
+	require.NoError(t, err)
+	assert.NotEqual(t, hashIdx, got, "must not reuse a sibling's subnet")
+	// The allocation is persisted so teardown/GetVM resolve the same /30.
+	assert.Equal(t, got, fcReadSubnetIndex(id))
+}
 
 func TestFCNet_DistinctPer30AndStable(t *testing.T) {
 	host, guest, mask := fcNet("run_abc")
