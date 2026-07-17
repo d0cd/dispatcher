@@ -157,6 +157,11 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 
 	output, err := retryCLIOutput(ctx, "az", "az vm create", args...)
 	if err != nil {
+		// A transient error after the VM was created would otherwise leak it; adopt
+		// it if the retry-then-"already exists" left one behind.
+		if vm := adoptCreatedVM(ctx, a, opts.Tags["dispatcher-run-id"]); vm != nil {
+			return vm, nil
+		}
 		// az masks a NotAvailableForSubscription error as a "content already
 		// consumed" CLI crash. Only in that case, probe the SKU to surface the
 		// real, actionable reason instead of the opaque crash.

@@ -86,6 +86,18 @@ type ToolRegistry struct {
 	workloadRoot string // absolute, resolved, no trailing slash
 }
 
+// targetExists reports whether id names a configured target, so the AI-plan path
+// can flag a recommendation for a target that does not exist (the deterministic
+// plan/run paths never surface such a value; this guards the display path).
+func (tr *ToolRegistry) targetExists(id string) bool {
+	for _, t := range tr.registry.List() {
+		if t.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // NewToolRegistry creates a registry with all planner tools wired up. The
 // workload root is set later via SetWorkloadRoot; tools that need a path
 // boundary error if SetWorkloadRoot wasn't called.

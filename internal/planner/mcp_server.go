@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,7 +121,14 @@ const (
 
 func (s *MCPServer) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	// Accept the session token via an Authorization: Bearer header as well as the
+	// URL query. The header keeps the token out of access logs (where query strings
+	// commonly land); the query remains the working default until aitelier is
+	// confirmed to forward per-MCP-server headers to the inner agent.
 	provided := r.URL.Query().Get("token")
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		provided = strings.TrimPrefix(h, "Bearer ")
+	}
 	if len(provided) != len(s.token) || subtle.ConstantTimeCompare([]byte(provided), []byte(s.token)) != 1 {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return

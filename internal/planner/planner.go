@@ -137,6 +137,7 @@ func (p *Planner) Plan(ctx context.Context, path string, constraints types.PlanC
 				ToolsUsed:   toolsUsed,
 			}
 			mergeStructuredOutput(res, response.Content)
+			p.validateRecommendation(res)
 			return res, nil
 		}
 
@@ -331,6 +332,22 @@ func mustJSON(v any) json.RawMessage {
 
 // mergeStructuredOutput is invoked after the loop ends so agentic backends
 // that return a single JSON message can populate typed PlanResult fields.
+// validateRecommendation cross-checks the LLM's recommended target against the
+// configured registry: the agent can hallucinate a target that doesn't exist or
+// isn't feasible, and the plan/explain display would otherwise present it as
+// dispatcher's recommendation. A mismatch is surfaced as a suggestion rather than
+// silently trusted (the deterministic run/plan paths don't use this value).
+func (p *Planner) validateRecommendation(res *PlanResult) {
+	if res == nil || res.Recommendation == nil || res.Recommendation.Target == "" {
+		return
+	}
+	if !p.tools.targetExists(res.Recommendation.Target) {
+		res.Suggestions = append(res.Suggestions, fmt.Sprintf(
+			"the AI recommended target %q, which is not a configured target — verify feasibility with `dispatcher plan` before relying on it",
+			res.Recommendation.Target))
+	}
+}
+
 func mergeStructuredOutput(res *PlanResult, content string) {
 	// Strip a markdown code fence first (like the audit path): a backend that wraps
 	// its JSON in ```json ... ``` would otherwise leave the raw fenced blob as the

@@ -185,3 +185,27 @@ func IsTransient(err error) bool {
 	}
 	return false
 }
+
+// adoptCreatedVM makes CreateVM idempotent under the retry-then-"already exists"
+// failure: a create CLI can create the instance server-side, then return a
+// transient error, so the retry re-issues create and gets a non-transient
+// "already exists" that surfaces as a failed run while the (dispatcher-tagged) VM
+// keeps billing. Before surfacing such an error, look up the run-tagged VM and, if
+// exactly one exists, adopt it (hydrated via GetVM). Returns nil if nothing was
+// created (a genuine create failure), so the caller surfaces the original error.
+func adoptCreatedVM(ctx context.Context, p Provider, runID string) *VMInfo {
+	if runID == "" {
+		return nil
+	}
+	vms, err := p.ListVMs(ctx, map[string]string{"dispatcher-run-id": runID})
+	if err != nil || len(vms) != 1 {
+		return nil
+	}
+	full, err := p.GetVM(ctx, vms[0].ID)
+	if err != nil || full == nil {
+		return nil
+	}
+	dlog.L().Warn("createvm.adopted", "run", runID, "vm_id", full.ID,
+		"note", "create reported an error but the instance exists; adopting it instead of leaking")
+	return full
+}

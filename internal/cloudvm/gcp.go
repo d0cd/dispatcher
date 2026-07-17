@@ -165,6 +165,11 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	output, err := retryCLIOutput(ctx, "gcloud", "gcloud compute instances create", args...)
 	if err != nil {
+		// A transient error after the instance was created would otherwise leak a
+		// billing VM; adopt it if the retry-then-"already exists" left one behind.
+		if vm := adoptCreatedVM(ctx, g, opts.Tags["dispatcher-run-id"]); vm != nil {
+			return vm, nil
+		}
 		return nil, err
 	}
 

@@ -129,8 +129,14 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 
 	output, err := retryCLIOutput(ctx, "hcloud", "hcloud server create", args...)
 	if err != nil {
-		// VM creation failed but we may have already uploaded the SSH key and
-		// created the firewall. Best-effort cleanup so we don't leak them.
+		// A transient error after the server was created would otherwise leak it
+		// (and its ssh-key/firewall). Adopt it if the retry left one behind — and do
+		// NOT delete the ssh-key/firewall, which the live server still needs.
+		if vm := adoptCreatedVM(ctx, h, opts.Tags["dispatcher-run-id"]); vm != nil {
+			return vm, nil
+		}
+		// VM creation genuinely failed but we may have already uploaded the SSH key
+		// and created the firewall. Best-effort cleanup so we don't leak them.
 		if sshKeyName != "" {
 			_ = exec.CommandContext(context.Background(), "hcloud", "ssh-key", "delete", sshKeyName).Run()
 		}

@@ -89,3 +89,21 @@ func TestWrapExecError_IdempotentOverRunCLI(t *testing.T) {
 	assert.Contains(t, wrapped.Error(), "delete vm")
 	assert.Equal(t, 1, strings.Count(wrapped.Error(), "boom detail"), "stderr must appear exactly once")
 }
+
+// adoptCreatedVM makes CreateVM idempotent: if a create CLI errored transiently
+// after the instance was created, the run-tagged VM is adopted instead of leaked.
+func TestAdoptCreatedVM(t *testing.T) {
+	p := NewMockProvider(ProviderGCP)
+	vm, err := p.CreateVM(context.Background(), VMOptions{
+		Name: "x", Tags: map[string]string{"dispatcher-run-id": "run-1", "dispatcher": "true"},
+	})
+	require.NoError(t, err)
+
+	adopted := adoptCreatedVM(context.Background(), p, "run-1")
+	require.NotNil(t, adopted, "a run-tagged VM that exists must be adopted, not leaked")
+	assert.Equal(t, vm.ID, adopted.ID)
+	assert.NotEmpty(t, adopted.IP, "the adopted VM is hydrated via GetVM (has its IP)")
+
+	assert.Nil(t, adoptCreatedVM(context.Background(), p, "run-none"), "a genuine create failure (no VM) surfaces the original error")
+	assert.Nil(t, adoptCreatedVM(context.Background(), p, ""), "no run id to adopt by")
+}
