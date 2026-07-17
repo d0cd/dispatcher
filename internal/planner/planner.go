@@ -332,8 +332,11 @@ func mustJSON(v any) json.RawMessage {
 // mergeStructuredOutput is invoked after the loop ends so agentic backends
 // that return a single JSON message can populate typed PlanResult fields.
 func mergeStructuredOutput(res *PlanResult, content string) {
+	// Strip a markdown code fence first (like the audit path): a backend that wraps
+	// its JSON in ```json ... ``` would otherwise leave the raw fenced blob as the
+	// plan explanation with all structured fields empty.
 	var parsed PlanResult
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(stripMarkdownFence(content)), &parsed); err != nil {
 		return
 	}
 	if parsed.Explanation != "" {

@@ -148,11 +148,11 @@ func (s *MCPServer) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serialize all dispatch() calls: inspect_workload writes shared spec that
-	// evaluate_all_targets reads. Concurrent requests must not see a torn view.
-	s.mu.Lock()
+	// The shared spec that inspect_workload writes and later tools read is guarded
+	// inside toolsCall (only around the pointer read/write), NOT across the whole
+	// dispatch — holding the lock over a filesystem-bound InspectCodebase would
+	// serialize every concurrent tool call and risk the server's WriteTimeout.
 	result, rpcErr := s.dispatch(req.Method, req.Params)
-	s.mu.Unlock()
 
 	isNotification := len(req.ID) == 0 || string(req.ID) == "null"
 	if isNotification {
@@ -174,7 +174,8 @@ func writeRPC(w http.ResponseWriter, resp rpcResponse) {
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-// dispatch must be called with s.mu held.
+// dispatch routes an RPC method. The shared spec it touches is guarded inside
+// toolsCall, so this need not be called under s.mu.
 func (s *MCPServer) dispatch(method string, params json.RawMessage) (any, *rpcError) {
 	switch method {
 	case "initialize":
@@ -211,7 +212,8 @@ func (s *MCPServer) toolList() []map[string]any {
 	return out
 }
 
-// toolsCall must be called with s.mu held.
+// toolsCall runs one tool. It guards the shared spec pointer with s.mu only
+// around the read/write, not across the tool Execute.
 func (s *MCPServer) toolsCall(params json.RawMessage) map[string]any {
 	var callParams struct {
 		Name      string          `json:"name"`
@@ -224,12 +226,20 @@ func (s *MCPServer) toolsCall(params json.RawMessage) map[string]any {
 		callParams.Arguments = json.RawMessage("{}")
 	}
 
-	result := s.registry.Execute(ToolCall{Name: callParams.Name, Input: callParams.Arguments}, s.spec)
+	// Read the shared spec under the lock, then run the (possibly filesystem-bound)
+	// tool WITHOUT the lock so a slow scan doesn't block concurrent tool calls.
+	s.mu.Lock()
+	spec := s.spec
+	s.mu.Unlock()
+
+	result := s.registry.Execute(ToolCall{Name: callParams.Name, Input: callParams.Arguments}, spec)
 
 	payloadResult := result.Result
 	if callParams.Name == "inspect_workload" && result.Error == "" {
 		if ws, ok := result.Result.(types.WorkloadSpec); ok {
+			s.mu.Lock()
 			s.spec = &ws
+			s.mu.Unlock()
 			payloadResult = redactWorkloadForAI(ws)
 		}
 	}
@@ -258,10 +268,15 @@ func redactWorkloadForAI(ws types.WorkloadSpec) types.WorkloadSpec {
 	ws.Source.Path = "."
 	ws.Command = nil
 	ws.Env = nil
+	// Deep-copy the Secrets/Data slices before redacting: ws is a value copy but
+	// its slices share their backing arrays with the retained s.spec, so in-place
+	// edits would silently corrupt the real spec that evaluate_all_targets scores.
+	ws.Secrets = append([]types.SecretRef(nil), ws.Secrets...)
 	for i := range ws.Secrets {
 		ws.Secrets[i].Name = "[redacted]"
 		ws.Secrets[i].Location = "[redacted]"
 	}
+	ws.Data = append([]types.DataRequirement(nil), ws.Data...)
 	for i := range ws.Data {
 		ws.Data[i].Location = "[redacted]"
 		ws.Data[i].Details = ""

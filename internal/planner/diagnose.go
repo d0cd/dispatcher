@@ -127,8 +127,11 @@ func (p *Planner) DeterministicDiagnose(ctx context.Context, runID string) (*Dia
 }
 
 func mergeDiagnoseStructured(res *DiagnoseResult, content string) {
+	// Strip a markdown code fence first (like the audit path): a backend that wraps
+	// its JSON in ```json ... ``` would otherwise fail to parse and leave the raw
+	// fenced blob as the explanation shown to the user.
 	var parsed DiagnoseResult
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(stripMarkdownFence(content)), &parsed); err != nil {
 		return
 	}
 	if parsed.Explanation != "" {
