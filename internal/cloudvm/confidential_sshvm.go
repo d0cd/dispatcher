@@ -26,13 +26,42 @@ type sshConfidentialDeps struct {
 	secureBootOff bool   // Secure Boot off (the Azure direct-SNP unsigned UKI image)
 	instanceType  string // optional; a Nitro parent pins an enclave-capable type
 	sshPubKey     string
-	sshUser       string
-	startAgent    func(ctx context.Context, vm *VMInfo) (baseURL string, err error)
-	waitReady     func(ctx context.Context, baseURL string) error
+	// sshKeyPath is the private key for renewing the self-destruct watchdog over
+	// SSH during the synchronous run. Set only for backends whose VM exposes SSH
+	// (the Nitro parent); empty for the measured CVM path, which ships no login.
+	sshKeyPath string
+	sshUser    string
+	startAgent func(ctx context.Context, vm *VMInfo) (baseURL string, err error)
+	waitReady  func(ctx context.Context, baseURL string) error
 	// validator builds the provider's aTLS attestation validator (azure-snp SNP+
 	// vTPM, Nitro doc) for a run; it records the verified verdict as it validates
 	// the evidence delivered over the attested TLS session.
 	validator func(req types.ConfidentialRequirement) *attest.AttestValidator
+}
+
+// extendWatchdog is the watchdog-renewal seam (stubbed in tests).
+var extendWatchdog = ExtendWatchdogViaSSH
+
+// renewWatchdogUntil pushes out the VM's self-destruct deadline every ttl/3 until
+// stop is closed or ctx is cancelled. A failed renewal is logged, not fatal — the
+// VM's own boot-relative deadline is the backstop.
+func renewWatchdogUntil(ctx context.Context, st *CloudVMState, ttl time.Duration, stop <-chan struct{}) {
+	t := time.NewTicker(ttl / 3)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			rctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			if _, err := extendWatchdog(rctx, st, ttl); err != nil {
+				dlog.L().Warn("sshconf.watchdog.renew.failed", "vm_id", st.VMID, "err", err.Error())
+			}
+			cancel()
+		}
+	}
 }
 
 // executeSSHConfidential is the shared SSH-VM confidential orchestration:
@@ -96,6 +125,20 @@ func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types
 		defer cancel()
 		_ = d.provider.DestroyVM(cctx, vm.ID)
 	}()
+
+	// The run below is synchronous, so the executor's watchdog renewal (which only
+	// runs for durable adapters, after Execute returns) never fires here. Renew the
+	// boot-relative deadline ourselves for the duration of the run, so a long-but-
+	// live confidential job isn't hard-killed by the default TTL. Renewal stops when
+	// this returns (or ctx is cancelled), so a dead CLI still lets the VM
+	// self-destruct at the last deadline. Only backends that expose SSH (the Nitro
+	// parent) can renew; the measured CVM ships no login and relies on gc.
+	if d.sshKeyPath != "" {
+		st := &CloudVMState{IP: vm.IP, SSHKeyPath: d.sshKeyPath, SSHUser: d.sshUser}
+		stopRenew := make(chan struct{})
+		defer close(stopRenew)
+		go renewWatchdogUntil(ctx, st, ttl, stopRenew)
+	}
 
 	baseURL, err := d.startAgent(ctx, vm)
 	if err != nil {

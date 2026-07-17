@@ -173,6 +173,63 @@ func TestClientAttestTimesOutOnStalledPeer(t *testing.T) {
 	require.Less(t, time.Since(start), 3*time.Second, "must not hang")
 }
 
+func swapAttestTimeout(d time.Duration) func() {
+	prev := attestPhaseTimeout
+	attestPhaseTimeout = d
+	return func() { attestPhaseTimeout = prev }
+}
+
+// TestClientAttestBoundsWithoutCtxDeadline: a default run (ctx carries no deadline
+// because --max-duration was not set) must still fail fast against a peer that
+// handshakes then stalls — the pre-verification exchange with an untrusted peer is
+// bounded independently of MaxDuration.
+func TestClientAttestBoundsWithoutCtxDeadline(t *testing.T) {
+	defer swapAttestTimeout(200 * time.Millisecond)()
+	serverCfg, _ := mustServerCfg(t)
+	client, server := tlsLoopback(t, serverCfg, NewClientConfig())
+	go func() { _ = server.HandshakeContext(context.Background()); select {} }()
+
+	start := time.Now()
+	err := ClientAttest(context.Background(), client, &synthValidator{})
+	require.Error(t, err, "a stalled peer must fail even without a ctx deadline")
+	require.Less(t, time.Since(start), 3*time.Second, "must not hang")
+}
+
+// TestServerAttestBoundsStalledHandshake: the agent serves with context.Background(),
+// so it must still bound a client that connects but never completes the handshake —
+// otherwise each stalled connection pins a goroutine forever (DoS).
+func TestServerAttestBoundsStalledHandshake(t *testing.T) {
+	defer swapAttestTimeout(200 * time.Millisecond)()
+	serverCfg, spki := mustServerCfg(t)
+	_, server := tlsLoopback(t, serverCfg, NewClientConfig()) // client never handshakes
+	start := time.Now()
+	err := ServerAttest(context.Background(), server, spki, &synthIssuer{})
+	require.Error(t, err, "a client that never handshakes must not pin the agent forever")
+	require.Less(t, time.Since(start), 3*time.Second, "must not hang")
+}
+
+// TestClientRunAbortsOnCtxCancel: cancelling the run context (Ctrl-C, a MaxDuration
+// deadline, or a budget breach) must abort a blocked run-phase read, not hang for
+// the whole workload — the confidential-run enforcement path.
+func TestClientRunAbortsOnCtxCancel(t *testing.T) {
+	serverCfg, spki := mustServerCfg(t)
+	client, server := tlsLoopback(t, serverCfg, NewClientConfig())
+	go func() { // attest honestly, read the request, then never respond
+		if err := ServerAttest(context.Background(), server, spki, &synthIssuer{}); err != nil {
+			return
+		}
+		_, _ = readMsg(server, maxMessage)
+		select {}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+	start := time.Now()
+	_, err := ClientRun(ctx, client, &synthValidator{}, []byte("payload"))
+	require.Error(t, err, "ctx cancellation must abort the run-phase read")
+	require.Less(t, time.Since(start), 3*time.Second, "must not hang past cancellation")
+}
+
 func TestExporterIsPerSession(t *testing.T) {
 	get := func() []byte {
 		serverCfg, _ := mustServerCfg(t)

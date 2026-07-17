@@ -34,8 +34,10 @@ func ServeATLS(l net.Listener, cfg *tls.Config, certSPKI []byte, attest AttestFu
 // reading the payload).
 func serveATLSConn(conn *tls.Conn, certSPKI []byte, issuer atls.Issuer, runner func(ctx context.Context, p Payload) Result) {
 	defer conn.Close()
-	// The run may take arbitrarily long; the attest phase's own deadline is set by
-	// the caller's ctx inside atls.ServerRun, then cleared before the run.
+	// The run may take arbitrarily long, so the run phase is served under
+	// context.Background(); the attest phase bounds itself with its own deadline
+	// inside atls.ServerAttest (independent of ctx), so a stalled handshake can't
+	// pin this goroutine.
 	_ = atls.ServerRun(context.Background(), conn, certSPKI, issuer, func(ctx context.Context, request []byte) ([]byte, error) {
 		var p Payload
 		if err := json.Unmarshal(request, &p); err != nil {

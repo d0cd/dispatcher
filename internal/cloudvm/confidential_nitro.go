@@ -32,6 +32,7 @@ type nitroDeps struct {
 	instanceType string
 	pcr0         string
 	sshPubKey    string
+	sshKeyPath   string
 	sshUser      string
 	startAgent   func(ctx context.Context, vm *VMInfo) (string, error)
 	waitReady    func(ctx context.Context, baseURL string) error
@@ -44,7 +45,7 @@ type nitroDeps struct {
 func executeNitroConfidential(ctx context.Context, d nitroDeps, p *types.Plan) (*confidentialRunState, error) {
 	deps := sshConfidentialDeps{
 		provider: d.provider, image: d.image, enclave: true, instanceType: d.instanceType,
-		sshPubKey: d.sshPubKey, sshUser: d.sshUser,
+		sshPubKey: d.sshPubKey, sshKeyPath: d.sshKeyPath, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
 		validator: func(_ types.ConfidentialRequirement) *attest.AttestValidator {
 			return attest.NitroValidatorPinned(map[int]string{0: d.pcr0})
@@ -176,6 +177,7 @@ func (a *AWSNitroConfidentialAdapter) Execute(ctx context.Context, p *types.Plan
 		instanceType: a.instanceType,
 		pcr0:         a.pcr0,
 		sshPubKey:    keyPath + ".pub",
+		sshKeyPath:   keyPath, // Nitro parent exposes SSH: renew the watchdog during the run
 		sshUser:      a.config.SSHUser,
 		startAgent:   nitroStartAgent(a.eifPath, a.proxyBin, keyPath, a.config.SSHUser, egress, a.provider),
 		waitReady:    waitForAgentEndpoint,

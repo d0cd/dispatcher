@@ -128,6 +128,9 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 		Region:                 region,
 		ConfidentialType:       "sev-snp",
 		ConfidentialSpaceImage: imageRef,
+		// A bounded run caps the instance lifetime at the source too, so a CLI
+		// crash that skips the deferred teardown can't leak a billing SEV VM.
+		MaxLifetimeSeconds: int(p.Constraints.MaxDuration.Seconds()),
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",

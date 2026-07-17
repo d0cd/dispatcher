@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/adapter"
 	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/attest/agent"
+	"github.com/d0cd/dispatcher/internal/attest/atls"
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
@@ -84,6 +86,45 @@ func TestExecuteSSHConfidential_HappyPath(t *testing.T) {
 // self-destruct watchdog the regular cloud path does: it is the only backstop
 // against an unbounded bill if the dispatcher CLI is killed mid-run. The TTL
 // must honor the plan's WatchdogTTL.
+// TestExecuteSSHConfidential_RenewsWatchdogDuringRun: a synchronous confidential
+// run whose VM exposes SSH (sshKeyPath set — the Nitro parent) must renew the
+// self-destruct watchdog while the run is in flight, so a long-but-live job isn't
+// hard-killed by the boot-relative TTL.
+func TestExecuteSSHConfidential_RenewsWatchdogDuringRun(t *testing.T) {
+	var renewals int32
+	prevExt := extendWatchdog
+	extendWatchdog = func(context.Context, *CloudVMState, time.Duration) (time.Time, error) {
+		atomic.AddInt32(&renewals, 1)
+		return time.Now(), nil
+	}
+	t.Cleanup(func() { extendWatchdog = prevExt })
+
+	prev := runOverATLS
+	runOverATLS = func(_ context.Context, _ string, v atls.Validator, _ agent.Payload) (agent.Result, error) {
+		if av, ok := v.(*attest.AttestValidator); ok {
+			av.Result = attest.AttestationResult{Verified: true}
+		}
+		time.Sleep(120 * time.Millisecond) // long enough for several ttl/3 ticks
+		return agent.Result{ExitCode: 0}, nil
+	}
+	t.Cleanup(func() { runOverATLS = prev })
+
+	provider := NewMockProvider(ProviderAWS)
+	deps := sshConfidentialDeps{
+		provider:   provider,
+		sshKeyPath: "/tmp/dispatcher-test-key", // enables renewal (Nitro parent)
+		startAgent: func(context.Context, *VMInfo) (string, error) { return "http://10.0.0.1:8443", nil },
+		waitReady:  func(context.Context, string) error { return nil },
+		validator:  cannedValidator,
+	}
+	plan := sshConfTestPlan(t, "run-renew", []string{"true"})
+	plan.Constraints.WatchdogTTL = 30 * time.Millisecond // ttl/3 = 10ms
+
+	_, err := executeSSHConfidential(context.Background(), deps, plan, "dispatcher-nitro-job")
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, atomic.LoadInt32(&renewals), int32(1), "the watchdog must be renewed during a long synchronous run")
+}
+
 func TestExecuteSSHConfidential_InstallsWatchdog(t *testing.T) {
 	stubATLSRun(t, attest.AttestationResult{Verified: true}, nil, agent.Result{ExitCode: 0}, nil)
 

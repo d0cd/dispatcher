@@ -131,6 +131,18 @@ func TestGCPConfidentialSpaceCreateArgs_NetworkTagWhenFirewalled(t *testing.T) {
 	assert.NotContains(t, joinedNoFw, "--tags=")
 }
 
+// A bounded run must cap the CS instance's lifetime at the source (cost backstop
+// against a CLI crash that skips the deferred teardown); an unbounded run must not.
+func TestGCPConfidentialSpaceCreateArgs_MaxRunDurationBackstop(t *testing.T) {
+	opts := VMOptions{Name: "job", ConfidentialSpaceImage: "ref@sha256:d", MaxLifetimeSeconds: 3600}
+	joined := strings.Join(gcpConfidentialSpaceCreateArgs(opts, "z", ""), " ")
+	assert.Contains(t, joined, "--max-run-duration=3600s")
+	assert.Contains(t, joined, "--instance-termination-action=DELETE")
+
+	joinedNoCap := strings.Join(gcpConfidentialSpaceCreateArgs(VMOptions{Name: "job", ConfidentialSpaceImage: "r@sha256:d"}, "z", ""), " ")
+	assert.NotContains(t, joinedNoCap, "--max-run-duration")
+}
+
 func TestGCPAgentFirewallArgs(t *testing.T) {
 	create := gcpAgentFirewallCreateArgs("dispatcher-cs-fw-job", "dispatcher-cs-fw-job", "203.0.113.4/32", "run-1", "proj")
 	joined := strings.Join(create, " ")

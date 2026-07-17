@@ -45,6 +45,15 @@ func gcpConfidentialSpaceCreateArgs(opts VMOptions, zone, project string) []stri
 	if opts.ConfidentialAllowFrom != "" {
 		args = append(args, "--tags="+agentFirewallName(opts.Name))
 	}
+	// Cost backstop: if a run duration is bounded, cap the instance at the source
+	// too so a SIGKILL/OOM/power-loss of the CLI (which prevents the deferred
+	// teardown) can't leak a billing SEV VM. GCP reaps it after the cap. Unbounded
+	// runs rely on the attached CLI + scheduled gc.
+	if opts.MaxLifetimeSeconds > 0 {
+		args = append(args,
+			fmt.Sprintf("--max-run-duration=%ds", opts.MaxLifetimeSeconds),
+			"--instance-termination-action=DELETE")
+	}
 	if len(opts.Tags) > 0 {
 		keys := make([]string, 0, len(opts.Tags))
 		for k := range opts.Tags {

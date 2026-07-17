@@ -39,6 +39,40 @@ const (
 	maxMessage = 256 << 20
 )
 
+// attestPhaseTimeout bounds the pre-verification exchange (handshake + nonce +
+// evidence) with an as-yet-untrusted peer, so a peer that answers the handshake
+// then stalls cannot hang the process or pin an agent goroutine forever. It is a
+// var only so tests can shorten it; production always uses this value.
+var attestPhaseTimeout = 60 * time.Second
+
+// attestDeadline is the deadline for the attest phase: the sooner of the caller's
+// ctx deadline (if any) and now+attestPhaseTimeout. Applied on the conn regardless
+// of whether ctx carries a deadline, so the untrusted pre-verification exchange is
+// always self-bounding.
+func attestDeadline(ctx context.Context) time.Time {
+	d := time.Now().Add(attestPhaseTimeout)
+	if cd, ok := ctx.Deadline(); ok && cd.Before(d) {
+		return cd
+	}
+	return d
+}
+
+// interruptOnCancel closes conn when ctx is cancelled, so a Read/Write blocked on
+// conn returns instead of hanging past ctx — crypto/tls I/O observes only an
+// explicit deadline, never ctx. The returned stop func ends the watcher; defer it
+// so a normally-completing call neither leaks the goroutine nor closes the conn.
+func interruptOnCancel(ctx context.Context, conn *tls.Conn) func() {
+	done := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+	return func() { close(done) }
+}
+
 // Issuer produces attestation evidence inside the TEE that commits to bindData
 // (this package's session+key binding) and the per-run nonce. In production it is
 // backed by the per-cloud agent producers; tests inject a synthetic issuer.
@@ -107,10 +141,8 @@ func bindData(certSPKI, exporter []byte) []byte {
 // handshake, read the client's nonce, produce evidence committing to
 // bindData(cert, exporter) + nonce, and send it. certSPKI is from NewServerConfig.
 func ServerAttest(ctx context.Context, conn *tls.Conn, certSPKI []byte, issuer Issuer) error {
-	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
-		defer conn.SetDeadline(time.Time{})
-	}
+	_ = conn.SetDeadline(attestDeadline(ctx))
+	defer conn.SetDeadline(time.Time{})
 	exporter, err := handshakeAndExport(ctx, conn)
 	if err != nil {
 		return err
@@ -137,10 +169,9 @@ func ServerAttest(ctx context.Context, conn *tls.Conn, certSPKI []byte, issuer I
 // bindData(serverKeyWeSaw, exporter) + nonce. Returns nil only if the evidence is
 // a genuine measured TEE bound to THIS session.
 func ClientAttest(ctx context.Context, conn *tls.Conn, validator Validator) error {
-	if dl, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(dl)
-		defer conn.SetDeadline(time.Time{})
-	}
+	defer interruptOnCancel(ctx, conn)()
+	_ = conn.SetDeadline(attestDeadline(ctx))
+	defer conn.SetDeadline(time.Time{})
 	exporter, err := handshakeAndExport(ctx, conn)
 	if err != nil {
 		return err
@@ -196,6 +227,11 @@ func ClientRun(ctx context.Context, conn *tls.Conn, validator Validator, request
 	if err := ClientAttest(ctx, conn, validator); err != nil {
 		return nil, err
 	}
+	// The run phase is deliberately deadline-less (a legitimate workload runs
+	// arbitrarily long), but must still abort on ctx cancellation — a MaxDuration
+	// deadline, a budget breach (cancelExec), or Ctrl-C — so the read below can't
+	// block for the whole workload past a cancel.
+	defer interruptOnCancel(ctx, conn)()
 	if err := writeMsg(conn, request); err != nil {
 		return nil, fmt.Errorf("atls write request: %w", err)
 	}
