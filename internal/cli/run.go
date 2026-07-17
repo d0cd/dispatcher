@@ -90,6 +90,9 @@ func perRunFirewallSupported(target string) bool {
 }
 
 func runRun(cmd *cobra.Command, args []string) error {
+	if runFlags.maxCost < 0 {
+		return fmt.Errorf("--max-cost must be >= 0 (0 means no cap); got %v", runFlags.maxCost)
+	}
 	raw := "."
 	if len(args) > 0 {
 		raw = args[0]
@@ -259,9 +262,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// "interactive" approvals).
 	if runFlags.yes {
 		executor.SetApprovalFunc(yesApproval)
-	} else {
+	} else if stdinIsTerminal() {
 		executor.SetApprovalFunc(terminalApproval)
 	}
+	// else: non-TTY without --yes — install no in-process approver, so the gate
+	// waits on an external `dispatcher approve <run-id>` (honoring ctx) instead of
+	// instantly denying the run, which is what the guidance message promises.
 
 	bold.Fprintf(os.Stderr, "\nRun: %s\n", r.ID)
 	fmt.Fprintln(os.Stderr, "Status: running")

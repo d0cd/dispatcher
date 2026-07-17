@@ -16,8 +16,16 @@ import (
 // terminalApproval prompts the operator at the terminal. The decider tag
 // captures the OS username so multi-operator shared terminals can't
 // produce indistinguishable audit records.
+// stdinIsTerminal reports whether stdin is an interactive terminal, so a non-TTY
+// (CI/cron) run can skip installing an in-process approver and wait on an external
+// `dispatcher approve` instead of being instantly denied.
+func stdinIsTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	return err == nil && (fi.Mode()&os.ModeCharDevice) != 0
+}
+
 func terminalApproval(approvals []types.PolicyRequirement) (string, error) {
-	if fi, err := os.Stdin.Stat(); err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
+	if !stdinIsTerminal() {
 		fmt.Fprintln(os.Stderr, "stdin is not a terminal; cannot prompt for approval. "+
 			"Re-run with --yes to auto-approve, or approve out-of-band from another terminal with: dispatcher approve <run-id>")
 		return interactiveDecider(), approval.ErrDenied

@@ -256,6 +256,13 @@ func sortCandidates(candidates []candidate, optimize types.OptimizeGoal) {
 			if iLocal != jLocal {
 				return iLocal
 			}
+			if !iLocal && !jLocal {
+				// Among remote candidates, higher price is a rough proxy for more
+				// compute (faster) — speed must NOT fall through to cheapest, which
+				// picks the slowest VM. (A duration signal from history would be a
+				// better proxy; see docs/ROADMAP.md.)
+				return candidates[i].cost.Value > candidates[j].cost.Value
+			}
 		}
 		return candidates[i].cost.Value < candidates[j].cost.Value
 	})

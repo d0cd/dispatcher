@@ -42,6 +42,9 @@ func init() {
 }
 
 func runPlan(cmd *cobra.Command, args []string) error {
+	if planFlags.maxCost < 0 {
+		return fmt.Errorf("--max-cost must be >= 0 (0 means no cap); got %v", planFlags.maxCost)
+	}
 	raw := "."
 	if len(args) > 0 {
 		raw = args[0]
