@@ -140,6 +140,61 @@ func TestGate_ContextCancelReturnsError(t *testing.T) {
 	assert.Equal(t, Decision(""), rec.Decision, "no decision must be recorded on cancel")
 }
 
+// A denial takes precedence over an approval already recorded on the gate, so a
+// racing approve can't flip an explicit deny to approved (fail closed).
+func TestGate_DenyOverridesRecordedApproval(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_denyprec", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	require.True(t, g.settle(decisionMsg{decision: DecisionApproved, decider: "a"}))
+	// A subsequent denial is accepted (overrides), and the settled result is deny.
+	require.True(t, g.settle(decisionMsg{decision: DecisionDenied, decider: "b"}))
+	g.mu.Lock()
+	got := g.result.decision
+	g.mu.Unlock()
+	assert.Equal(t, DecisionDenied, got)
+	// A further approval can no longer flip it.
+	assert.False(t, g.settle(decisionMsg{decision: DecisionApproved, decider: "c"}))
+}
+
+// After Wait returns on ctx cancellation, a late external decision must be
+// refused rather than acked 'ok' for an abandoned run.
+func TestGate_AbandonedGateRefusesLateDecision(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_abandon", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = g.Wait(ctx, nil)
+	require.Error(t, err)
+
+	// The gate is abandoned; an external decision is rejected.
+	err = SendDecision("run_abandon", DecisionApproved, "late")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already decided")
+}
+
+// A wire decision with no decider is attributed to "external:unknown", never a
+// nameless "external:".
+func TestGate_EmptyDeciderRecordedAsUnknown(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_nodecider", nil)
+	require.NoError(t, err)
+	defer g.Close()
+
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		_ = SendDecision("run_nodecider", DecisionApproved, "")
+	}()
+	rec, err := g.Wait(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "external:unknown", rec.Decider)
+}
+
 // An invalid decision on the wire must be rejected before the single-shot CAS,
 // so it doesn't consume the gate — a subsequent valid decision still wins.
 func TestGate_InvalidDecisionDoesNotConsumeGate(t *testing.T) {
