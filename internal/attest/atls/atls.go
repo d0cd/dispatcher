@@ -45,6 +45,13 @@ const (
 // var only so tests can shorten it; production always uses this value.
 var attestPhaseTimeout = 60 * time.Second
 
+// requestReadTimeout bounds ServerRun's request read: after attestation the
+// dispatcher sends the payload immediately, so a peer that instead stalls must
+// not pin the in-TEE agent goroutine until the VM self-destructs. Generous
+// enough for a large (256 MiB max) source tarball over a slow link. A var so
+// tests can shorten it.
+var requestReadTimeout = 15 * time.Minute
+
 // attestDeadline is the deadline for the attest phase: the sooner of the caller's
 // ctx deadline (if any) and now+attestPhaseTimeout. Applied on the conn regardless
 // of whether ctx carries a deadline, so the untrusted pre-verification exchange is
@@ -206,7 +213,14 @@ func ServerRun(ctx context.Context, conn *tls.Conn, certSPKI []byte, issuer Issu
 	if err := ServerAttest(ctx, conn, certSPKI, issuer); err != nil {
 		return err
 	}
+	// Bound the request read (and honor ctx cancellation) so a peer that finishes
+	// attestation then stalls can't pin this goroutine. The handle() call after it
+	// is deliberately unbounded — the workload runs arbitrarily long.
+	cancelInterrupt := interruptOnCancel(ctx, conn)
+	_ = conn.SetDeadline(time.Now().Add(requestReadTimeout))
 	request, err := readMsg(conn, maxMessage)
+	_ = conn.SetDeadline(time.Time{})
+	cancelInterrupt()
 	if err != nil {
 		return fmt.Errorf("atls read request: %w", err)
 	}

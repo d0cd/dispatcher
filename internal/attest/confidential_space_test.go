@@ -20,6 +20,7 @@ const csDigest = "sha256:1111111111111111111111111111111111111111111111111111111
 func validCSClaims() map[string]any {
 	return map[string]any{
 		"iss":       csIssuer,
+		"aud":       CSTokenAudience,
 		"exp":       time.Now().Add(time.Hour).Unix(),
 		"eat_nonce": []string{hex.EncodeToString(csNonce)},
 		"hwmodel":   "GCP_AMD_SEV",
@@ -53,6 +54,30 @@ func TestVerifyCSToken_AcceptsStringNonce(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// A TDX Confidential Space token is a legitimate confidential platform and must
+// verify (the type gate only rejects a mismatch against an explicit request).
+func TestVerifyCSToken_AcceptsTDX(t *testing.T) {
+	key, keys := jwtSigningKey(t)
+	c := validCSClaims()
+	c["hwmodel"] = "GCP_INTEL_TDX"
+	_, teeType, err := verifyCSToken(mintJWT(t, "maa1", "RS256", key, c), keys, csPolicy())
+	require.NoError(t, err)
+	assert.Equal(t, "tdx", teeType)
+}
+
+// A token minted for a different audience must be rejected when the policy pins
+// an expected audience.
+func TestVerifyCSToken_RejectsWrongAudience(t *testing.T) {
+	key, keys := jwtSigningKey(t)
+	c := validCSClaims()
+	c["aud"] = "some-other-relying-party"
+	p := csPolicy()
+	p.ExpectedAudience = CSTokenAudience
+	_, _, err := verifyCSToken(mintJWT(t, "maa1", "RS256", key, c), keys, p)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "audience")
+}
+
 func TestVerifyCSToken_RejectsBadSignature(t *testing.T) {
 	key, _ := jwtSigningKey(t)
 	_, otherKeys := jwtSigningKey(t)
@@ -73,7 +98,7 @@ func TestVerifyCSToken_Rejects(t *testing.T) {
 		"not yet valid (nbf)":          {mutate: func(c map[string]any) { c["nbf"] = time.Now().Add(time.Hour).Unix() }, want: "not yet valid"},
 		"nonce not echoed":             {mutate: func(c map[string]any) { c["eat_nonce"] = []string{"deadbeef"} }, want: "nonce"},
 		"not confidential-space":       {mutate: func(c map[string]any) { c["swname"] = "SOMETHING_ELSE" }, want: "CONFIDENTIAL_SPACE"},
-		"not sev hardware":             {mutate: func(c map[string]any) { c["hwmodel"] = "GCP_INTEL_TDX" }, want: "SEV"},
+		"unknown hardware platform":    {mutate: func(c map[string]any) { c["hwmodel"] = "GCP_MYSTERY_BOX" }, want: "recognized confidential platform"},
 		"debug enabled":                {mutate: func(c map[string]any) { c["dbgstat"] = "enabled-since-boot" }, want: "debug"},
 		"digest not allowed":           {policy: func(p *CSPolicy) { p.ImageDigests = []string{"sha256:other"} }, want: "allowlist"},
 		"empty allowlist fails closed": {policy: func(p *CSPolicy) { p.ImageDigests = nil }, want: "allowlist"},

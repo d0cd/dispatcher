@@ -10,12 +10,14 @@ import (
 	"log"
 	"os"
 
+	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/attest/agent"
 )
 
 func main() {
 	addr := flag.String("addr", envOr("DISPATCHER_ATTEST_ADDR", ":8443"), "listen address")
-	audience := flag.String("audience", envOr("DISPATCHER_ATTEST_AUDIENCE", "dispatcher"), "attestation token audience")
+	// Default to the shared audience the verifier requires in the token `aud`.
+	audience := flag.String("audience", envOr("DISPATCHER_ATTEST_AUDIENCE", attest.CSTokenAudience), "attestation token audience")
 	flag.Parse()
 
 	log.Printf("dispatcher-attest listening on %s (audience=%s)", *addr, *audience)

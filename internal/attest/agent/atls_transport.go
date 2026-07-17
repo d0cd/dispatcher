@@ -20,14 +20,27 @@ func ServeATLS(l net.Listener, cfg *tls.Config, certSPKI []byte, attest AttestFu
 		runner = defaultRunner
 	}
 	issuer := IssuerFromAttest(attest)
+	// Cap concurrent connections: the only access control is the per-run firewall
+	// (aTLS attests the server, not the client), so bound the goroutines any peer
+	// within that CIDR can spawn rather than accepting unboundedly.
+	sem := make(chan struct{}, maxConcurrentATLSConns)
 	for {
 		raw, err := l.Accept()
 		if err != nil {
 			return err
 		}
-		go serveATLSConn(tls.Server(raw, cfg), certSPKI, issuer, runner)
+		sem <- struct{}{}
+		go func(c net.Conn) {
+			defer func() { <-sem }()
+			serveATLSConn(tls.Server(c, cfg), certSPKI, issuer, runner)
+		}(raw)
 	}
 }
+
+// maxConcurrentATLSConns bounds in-flight aTLS connections the agent serves at
+// once. Dispatcher drives one run per agent, so this is generous headroom while
+// still capping a flood from any peer inside the firewall CIDR.
+const maxConcurrentATLSConns = 16
 
 // serveATLSConn handles one connection: attest, then run one payload and return
 // its result. A failed attestation delivers nothing (atls.ServerRun aborts before

@@ -19,6 +19,11 @@ import (
 // identity is the container image digest, allowlisted like a measurement.
 const csIssuer = "https://confidentialcomputing.googleapis.com"
 
+// CSTokenAudience is the audience dispatcher's measured agent requests its
+// Confidential Space token for, and the value the verifier requires in the
+// token's `aud` claim. Shared so both ends agree.
+const CSTokenAudience = "dispatcher"
+
 // csEATNonce decodes `eat_nonce`, which Confidential Space emits as either a
 // single string or an array of strings.
 type csEATNonce []string
@@ -41,6 +46,7 @@ func (n *csEATNonce) UnmarshalJSON(b []byte) error {
 // enforces.
 type csToken struct {
 	Iss      string     `json:"iss"`
+	Aud      csEATNonce `json:"aud"` // string or array, like eat_nonce
 	Exp      int64      `json:"exp"`
 	Nbf      int64      `json:"nbf"`
 	EatNonce csEATNonce `json:"eat_nonce"`
@@ -69,10 +75,16 @@ type CSPolicy struct {
 	// plain SEV, so a sev-snp/tdx request is rejected here rather than silently
 	// accepted and mislabeled. "" or "any" skips the check.
 	ExpectedType string
+	// ExpectedAudience, when non-empty, must appear in the token's `aud` claim —
+	// standard OIDC/EAT audience validation, so a token minted for a different
+	// relying party is rejected. "" skips the check.
+	ExpectedAudience string
 }
 
 // csTEEType maps a Confidential Space hwmodel (e.g. "GCP_AMD_SEV",
-// "GCP_AMD_SEV_SNP", "GCP_INTEL_TDX") to dispatcher's TEE type name.
+// "GCP_AMD_SEV_SNP", "GCP_INTEL_TDX") to dispatcher's TEE type name. It returns
+// "" for a hwmodel that names no recognized confidential platform, so the
+// verifier can reject an unknown platform rather than mislabel it.
 func csTEEType(hwmodel string) string {
 	up := strings.ToUpper(hwmodel)
 	switch {
@@ -80,8 +92,10 @@ func csTEEType(hwmodel string) string {
 		return "tdx"
 	case strings.Contains(up, "SNP"):
 		return "sev-snp"
-	default:
+	case strings.Contains(up, "SEV"):
 		return "sev"
+	default:
+		return ""
 	}
 }
 
@@ -103,6 +117,9 @@ func verifyCSToken(token string, keys map[string]crypto.PublicKey, p CSPolicy) (
 
 	if t.Iss != csIssuer {
 		return "", "", fmt.Errorf("cs token issuer %q is not the Confidential Space service %q", t.Iss, csIssuer)
+	}
+	if p.ExpectedAudience != "" && !containsFold(t.Aud, p.ExpectedAudience) {
+		return "", "", fmt.Errorf("cs token audience %v does not include the expected %q", []string(t.Aud), p.ExpectedAudience)
 	}
 	now := time.Now().Unix()
 	if t.Exp == 0 || now >= t.Exp {
@@ -134,17 +151,18 @@ func verifyCSToken(token string, keys map[string]crypto.PublicKey, p CSPolicy) (
 	if !strings.EqualFold(t.SwName, "CONFIDENTIAL_SPACE") {
 		return "", "", fmt.Errorf("cs token swname %q is not CONFIDENTIAL_SPACE", t.SwName)
 	}
-	if !strings.Contains(strings.ToUpper(t.HwModel), "SEV") {
-		return "", "", fmt.Errorf("cs token hwmodel %q is not an AMD SEV confidential platform", t.HwModel)
+	// Recognized confidential platform: SEV, SEV-SNP, or TDX. An unknown hwmodel
+	// returns "" and is rejected rather than mislabeled as a default type.
+	teeType := csTEEType(t.HwModel)
+	if teeType == "" {
+		return "", "", fmt.Errorf("cs token hwmodel %q is not a recognized confidential platform (SEV/SEV-SNP/TDX)", t.HwModel)
 	}
 	if !strings.EqualFold(t.DbgStat, "disabled-since-boot") {
 		return "", "", fmt.Errorf("cs token dbgstat %q — debug must be disabled-since-boot", t.DbgStat)
 	}
 
 	// Requested-type gate (R8/G1): the attested platform must be the requested TEE
-	// type. CS attests plain SEV, so a sev-snp/tdx request is rejected — never
-	// silently downgraded and recorded as a stronger type.
-	teeType := csTEEType(t.HwModel)
+	// type — never silently downgraded and recorded as a stronger type.
 	if p.ExpectedType != "" && !strings.EqualFold(p.ExpectedType, "any") && !strings.EqualFold(p.ExpectedType, teeType) {
 		return "", "", fmt.Errorf("cs attested TEE type %q does not match the requested %q", teeType, p.ExpectedType)
 	}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -46,6 +47,57 @@ func TestUnTarGz_RejectsTraversal(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "escapes")
 }
+
+func TestTarGz_RejectsTraversalOutputPath(t *testing.T) {
+	dir := t.TempDir()
+	_, err := TarGz(dir, []string{"../../../../etc/passwd"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes")
+}
+
+func TestTarGz_SkipsMissingPathAndKeepsPresent(t *testing.T) {
+	// A missing optional output must not discard the outputs that do exist.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "present.txt"), []byte("ok"), 0o644))
+	blob, err := TarGz(dir, []string{"present.txt", "absent.log"})
+	require.NoError(t, err)
+
+	out := t.TempDir()
+	require.NoError(t, UnTarGz(blob, out))
+	got, err := os.ReadFile(filepath.Join(out, "present.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "ok", string(got))
+}
+
+func TestUnTarGz_RejectsSymlinkEscape(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	require.NoError(t, tw.WriteHeader(&tar.Header{Name: "link", Linkname: "../../etc/passwd", Typeflag: tar.TypeSymlink}))
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+
+	err := UnTarGz(buf.Bytes(), t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes")
+}
+
+func TestUnTarGz_RejectsTooManyEntries(t *testing.T) {
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for i := 0; i < maxTarEntries+1; i++ {
+		require.NoError(t, tw.WriteHeader(&tar.Header{Name: filepath.Join("d", "f"+itoa(i)), Mode: 0o644, Size: 0, Typeflag: tar.TypeReg}))
+	}
+	require.NoError(t, tw.Close())
+	require.NoError(t, gz.Close())
+
+	err := UnTarGz(buf.Bytes(), t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too many")
+}
+
+func itoa(i int) string { return fmt.Sprintf("%d", i) }
 
 func TestDefaultRunner_RunsCommandWithSourceAndEnv(t *testing.T) {
 	src := t.TempDir()

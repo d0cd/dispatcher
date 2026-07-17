@@ -47,6 +47,7 @@ func CSValidator(keys map[string]crypto.PublicKey, imageDigests []string, expect
 		}
 		digest, teeType, err := verifyCSToken(string(evidence), keys, CSPolicy{
 			Nonce: nonce, ImageDigests: imageDigests, ChannelKey: bindData, ExpectedType: expectedType,
+			ExpectedAudience: CSTokenAudience,
 		})
 		if err != nil {
 			return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil

@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/fxamacker/cbor/v2"
 	cose "github.com/veraison/go-cose"
@@ -50,7 +51,9 @@ func verifyNitroDoc(coseBytes []byte, roots *x509.CertPool, p NitroPolicy) (meas
 	if err := msg.UnmarshalCBOR(coseBytes); err != nil {
 		var untagged cose.UntaggedSign1Message
 		if uerr := untagged.UnmarshalCBOR(coseBytes); uerr != nil {
-			return "", nil, fmt.Errorf("parse COSE_Sign1: %w", err)
+			// Real NSM output is untagged, so the untagged error describes the
+			// actual structural problem; surface it, not the tagged-parse error.
+			return "", nil, fmt.Errorf("parse COSE_Sign1: %w", uerr)
 		}
 		msg = cose.Sign1Message(untagged)
 	}
@@ -106,9 +109,18 @@ func verifyNitroDoc(coseBytes []byte, roots *x509.CertPool, p NitroPolicy) (meas
 		return "", nil, fmt.Errorf("nitro policy pins no PCRs — fail closed (nothing attests the enclave image)")
 	}
 	for idx, want := range p.PCRs {
+		// A pin of all zeros attests nothing, and an all-zero measured PCR is what
+		// a debug-mode enclave (host-readable memory — not confidential) reports.
+		// Reject both so an accidental zero pin or a debug enclave can't verify.
+		if isAllZeroHex(want) {
+			return "", nil, fmt.Errorf("nitro policy pins pcr%d to all zeros — refusing (attests nothing)", idx)
+		}
 		got, ok := doc.PCRs[uint(idx)]
 		if !ok {
 			return "", nil, fmt.Errorf("nitro doc does not attest pcr%d", idx)
+		}
+		if isAllZeroBytes(got) {
+			return "", nil, fmt.Errorf("nitro pcr%d is all zeros (debug-mode enclave) — refusing", idx)
 		}
 		if hex.EncodeToString(got) != want {
 			return "", nil, fmt.Errorf("nitro pcr%d does not match the pinned enclave measurement", idx)
@@ -116,4 +128,25 @@ func verifyNitroDoc(coseBytes []byte, roots *x509.CertPool, p NitroPolicy) (meas
 	}
 
 	return hex.EncodeToString(doc.PCRs[0]), doc.PublicKey, nil
+}
+
+// isAllZeroHex reports whether a non-empty hex string is all zero digits.
+func isAllZeroHex(s string) bool {
+	if s == "" {
+		return false
+	}
+	return strings.Trim(s, "0") == ""
+}
+
+// isAllZeroBytes reports whether a non-empty byte slice is all zero bytes.
+func isAllZeroBytes(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	for _, x := range b {
+		if x != 0 {
+			return false
+		}
+	}
+	return true
 }

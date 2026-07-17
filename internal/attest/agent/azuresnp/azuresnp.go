@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	legacytpm "github.com/google/go-tpm/legacy/tpm2"
 	"github.com/google/go-tpm/tpmutil"
@@ -50,7 +51,9 @@ func attestFunc() agent.AttestFunc {
 		if err != nil {
 			return "", fmt.Errorf("gather snp/runtime evidence: %w", err)
 		}
-		vcekPEM, chainPEM, err := fetchAzureTHIMCertificates(ctx, http.DefaultClient)
+		// Bound the THIM/IMDS fetch: the attest ctx carries no deadline, so a
+		// stalled 169.254.169.254 endpoint would otherwise hang this goroutine.
+		vcekPEM, chainPEM, err := fetchAzureTHIMCertificates(ctx, &http.Client{Timeout: 30 * time.Second})
 		if err != nil {
 			return "", fmt.Errorf("fetch vcek chain: %w", err)
 		}

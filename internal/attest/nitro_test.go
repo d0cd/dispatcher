@@ -163,6 +163,38 @@ func TestVerifyNitroDoc_RejectsPCRMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "pcr0")
 }
 
+// A debug-mode enclave reports all-zero PCRs (its memory is host-readable, so it
+// is not confidential); it must be rejected even if the pin happens to be zeros.
+func TestVerifyNitroDoc_RejectsAllZeroPCR(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	zero := make([]byte, 48)
+
+	doc := signedNitroDoc(t, root, rootKey, func(d *nitroDoc) { d.PCRs[0] = zero })
+	_, _, err := verifyNitroDoc(doc, pool, NitroPolicy{
+		Nonce: []byte("nonce-from-verifier-32-bytes-xxx"),
+		PCRs:  map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "all zeros")
+}
+
+// A policy that pins a PCR to all zeros attests nothing and must be refused.
+func TestVerifyNitroDoc_RejectsAllZeroPin(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+
+	doc := signedNitroDoc(t, root, rootKey, nil)
+	_, _, err := verifyNitroDoc(doc, pool, NitroPolicy{
+		Nonce: []byte("nonce-from-verifier-32-bytes-xxx"),
+		PCRs:  map[int]string{0: hex.EncodeToString(make([]byte, 48))},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "all zeros")
+}
+
 // TestVerifyNitroDoc_RejectsNonceMismatch: a stale/replayed document (nonce not
 // this run's challenge) must fail.
 func TestVerifyNitroDoc_RejectsNonceMismatch(t *testing.T) {
