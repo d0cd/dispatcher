@@ -174,18 +174,24 @@ const staleEnvFileThreshold = time.Hour
 // Only files older than staleEnvFileThreshold are removed so a freshly
 // written sibling file is never deleted out from under another process.
 func SweepStaleEnvFiles() error {
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "dispatcher-env-*.env"))
-	if err != nil {
-		return nil
-	}
 	cutoff := time.Now().Add(-staleEnvFileThreshold)
-	for _, m := range matches {
-		info, err := os.Stat(m)
+	// Sweep both the sealed-env temp files and the shard work-item files: a crash
+	// between creation and the deferred cleanup would otherwise leave either
+	// (potentially sensitive — object keys, .env contents) in the world-traversable
+	// temp dir indefinitely.
+	for _, pattern := range []string{"dispatcher-env-*.env", "dispatcher-shard-items-*.txt"} {
+		matches, err := filepath.Glob(filepath.Join(os.TempDir(), pattern))
 		if err != nil {
 			continue
 		}
-		if info.ModTime().Before(cutoff) {
-			_ = os.Remove(m)
+		for _, m := range matches {
+			info, err := os.Stat(m)
+			if err != nil {
+				continue
+			}
+			if info.ModTime().Before(cutoff) {
+				_ = os.Remove(m)
+			}
 		}
 	}
 	return nil

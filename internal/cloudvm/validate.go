@@ -34,6 +34,13 @@ func validateLabelKV(k, v string) error {
 	if k == "" {
 		return fmt.Errorf("label key is empty")
 	}
+	// Reject a leading '-' on either side: Azure appends each tag as a bare `k=v`
+	// token after `--tags`, so a key like "--admin-password" would reach `az` as a
+	// real flag rather than a tag (flag injection). isSafeArg rejects it the same
+	// way for argv tokens.
+	if k[0] == '-' || (v != "" && v[0] == '-') {
+		return fmt.Errorf("label %q=%q must not begin with '-' (would be read as a CLI flag)", k, v)
+	}
 	if !isSafeLabel(k) {
 		return fmt.Errorf("label key %q contains characters outside [a-zA-Z0-9_.-]", k)
 	}

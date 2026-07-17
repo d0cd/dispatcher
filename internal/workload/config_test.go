@@ -87,6 +87,18 @@ func TestLoadConfig_ExpandsEnvVars(t *testing.T) {
 	assert.Equal(t, "fallback-app", cfg.Name, "an unset var falls back to its :- default")
 }
 
+// A ${VAR} whose value contains a newline must be rejected, not substituted into
+// the raw pre-parse bytes where it would inject an extra top-level YAML key (e.g.
+// silently raising a cost cap).
+func TestLoadConfig_RejectsEnvValueWithNewline(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DISPATCHER_TEST_REGION", "us-east-1\nmaxCost: 100000")
+	writeFile(t, dir, "dispatcher.yaml", "name: app\nregion: ${DISPATCHER_TEST_REGION}\n")
+	_, err := LoadConfig(dir)
+	require.Error(t, err, "an env value with a line break must be refused, not injected")
+	assert.Contains(t, err.Error(), "line break")
+}
+
 func TestLoadConfig_UndefinedEnvVarErrors(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "dispatcher.yaml", "name: ${DISPATCHER_TEST_UNSET_XYZ}\n")

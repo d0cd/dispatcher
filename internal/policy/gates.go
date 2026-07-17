@@ -52,6 +52,15 @@ func Evaluate(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate
 	return reqs
 }
 
+// isExternalProvider reports whether the target ships the workload (and its
+// secrets) off the local machine — any non-local kind. Kubernetes clusters and
+// imported SSH hosts are just as external as a cloud VM, so secrets on them
+// require the same approval.
 func isExternalProvider(t types.TargetConfig) bool {
-	return t.Kind == types.TargetKindCloudVM
+	switch t.Kind {
+	case types.TargetKindCloudVM, types.TargetKindKubernetes, types.TargetKindSSH:
+		return true
+	default:
+		return false
+	}
 }

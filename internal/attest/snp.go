@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math/big"
+	"time"
 )
 
 // AMD SEV-SNP ATTESTATION_REPORT ABI offsets (Table 22, "SEV Secure Nested
@@ -116,6 +117,15 @@ func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) erro
 	}
 	if len(roots) == 0 {
 		return fmt.Errorf("snp: no pinned AMD roots configured")
+	}
+	// Reject expired / not-yet-valid VCEK or ASK. CheckSignatureFrom validates only
+	// the signature link, not validity dates, and nothing else on this path checks
+	// them — an expired AMD cert whose key leaked must not still verify.
+	now := time.Now()
+	for _, c := range []*x509.Certificate{vcek, ask} {
+		if now.Before(c.NotBefore) || now.After(c.NotAfter) {
+			return fmt.Errorf("snp cert %q outside validity window [%s, %s]", c.Subject.CommonName, c.NotBefore, c.NotAfter)
+		}
 	}
 	if err := vcek.CheckSignatureFrom(ask); err != nil {
 		return fmt.Errorf("snp VCEK is not signed by the ASK: %w", err)

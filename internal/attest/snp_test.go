@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,6 +34,8 @@ func newSNPChain(t *testing.T) snpChain {
 		tmpl := &x509.Certificate{
 			SerialNumber:          big.NewInt(1),
 			Subject:               pkix.Name{CommonName: cn},
+			NotBefore:             time.Now().Add(-time.Hour),
+			NotAfter:              time.Now().Add(24 * time.Hour),
 			IsCA:                  true,
 			BasicConstraintsValid: true,
 			KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
@@ -56,7 +59,10 @@ func newSNPChain(t *testing.T) snpChain {
 	// VCEK is a leaf signed by ASK.
 	vcekKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
 	require.NoError(t, err)
-	leaf := &x509.Certificate{SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "VCEK"}}
+	leaf := &x509.Certificate{
+		SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "VCEK"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+	}
 	der, err := x509.CreateCertificate(rand.Reader, leaf, ask, &vcekKey.PublicKey, askKey)
 	require.NoError(t, err)
 	vcek, err := x509.ParseCertificate(der)

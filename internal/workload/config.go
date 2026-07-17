@@ -28,10 +28,29 @@ func expandEnvRefs(raw []byte) ([]byte, error) {
 	out := envRefPattern.ReplaceAllFunc(raw, func(match []byte) []byte {
 		inner := string(match[2 : len(match)-1]) // strip "${" and "}"
 		name, def, hasDefault := strings.Cut(inner, ":-")
+		// Substitution happens on the raw pre-parse bytes, so a value containing a
+		// newline would inject additional top-level YAML keys (e.g. raising a cost
+		// cap). Reject line breaks in a substituted value — a scalar config value
+		// never legitimately spans lines.
+		reject := func(v string) bool {
+			if strings.ContainsAny(v, "\n\r") {
+				if firstErr == nil {
+					firstErr = fmt.Errorf("environment variable ${%s} contains a line break; refusing to inject it into the config", name)
+				}
+				return true
+			}
+			return false
+		}
 		if v, ok := os.LookupEnv(name); ok {
+			if reject(v) {
+				return match
+			}
 			return []byte(v)
 		}
 		if hasDefault {
+			if reject(def) {
+				return match
+			}
 			return []byte(def)
 		}
 		if firstErr == nil {
@@ -384,10 +403,12 @@ func sanitizeOutputs(in []string) []string {
 			fmt.Fprintf(os.Stderr, "warning: ignoring absolute outputs path %q (must be workload-relative)\n", p)
 			continue
 		}
-		// Reject any `..` segment. Use Clean to catch fancy variants like
-		// "foo/../../etc" → "../etc".
-		cleaned := filepath.Clean(p)
-		if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, `..\`) {
+		// Reject any path containing "..", INCLUDING interior segments like
+		// "a/../b": the artifact adapters (Local/SSH) reject the same at retrieval,
+		// so accepting it here would silently drop a declared output. Match their
+		// check exactly rather than normalize (which would also strip a meaningful
+		// trailing slash from an rsync path).
+		if strings.Contains(p, "..") {
 			fmt.Fprintf(os.Stderr, "warning: ignoring outputs path %q (path traversal)\n", p)
 			continue
 		}
