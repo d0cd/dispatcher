@@ -85,9 +85,20 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) (azu
 			continue
 		}
 		out.nicIDs = append(out.nicIDs, ni.ID)
-		nicRaw, err := runCLI(ctx, "az", "network", "nic", "show", "--ids", ni.ID, "--output", "json")
-		if err != nil {
-			continue
+		// The NIC's public-IP and NSG ids are the ONLY handle on those untagged,
+		// still-billing satellites. Retry a transient throttle/503 (like the
+		// top-level enumeration) and abort on a persistent failure rather than
+		// silently skip and leak the static IP — the VM stays tagged for gc.
+		var nicRaw []byte
+		if err := Retry(ctx, DefaultRetry, IsTransient, func() error {
+			o, e := runCLI(ctx, "az", "network", "nic", "show", "--ids", ni.ID, "--output", "json")
+			if e != nil {
+				return e
+			}
+			nicRaw = o
+			return nil
+		}); err != nil {
+			return out, fmt.Errorf("enumerate NIC %q: %w", ni.ID, err)
 		}
 		var nic struct {
 			IPConfigurations []struct {

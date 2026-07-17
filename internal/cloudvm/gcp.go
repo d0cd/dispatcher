@@ -343,6 +343,11 @@ func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
 		args = append(args, "--project", g.project)
 	}
 	if _, err := runCLI(ctx, "gcloud", args...); err != nil {
+		// Already gone — teardown is idempotent (matches OCI + the GetVM contract),
+		// so a retried/racing gc pass doesn't report a spurious cleanup failure.
+		if isVMNotFound(err, vmID) {
+			return nil
+		}
 		return fmt.Errorf("gcloud compute instances delete failed: %w", err)
 	}
 	return nil

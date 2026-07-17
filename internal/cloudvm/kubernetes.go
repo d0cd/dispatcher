@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 )
@@ -143,7 +144,18 @@ func (k *KubernetesProvider) DestroyVM(ctx context.Context, vmID string) error {
 }
 
 func (k *KubernetesProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {
-	selector := "dispatcher=true"
+	// Honor the caller's tag filter (e.g. a run-scoped reap) in addition to the
+	// dispatcher-ownership label; ignoring it would return every dispatcher Job
+	// across all runs, not just the requested one.
+	parts := []string{"dispatcher=true"}
+	for key, val := range tags {
+		if key == "dispatcher" {
+			continue
+		}
+		parts = append(parts, key+"="+val)
+	}
+	sort.Strings(parts) // deterministic argv
+	selector := strings.Join(parts, ",")
 	cmd := exec.CommandContext(ctx, "kubectl", "get", "jobs",
 		"-n", k.namespace, "-l", selector, "-o", "json")
 	output, err := cmd.Output()

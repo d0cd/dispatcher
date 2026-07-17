@@ -250,8 +250,11 @@ func (a *AzureProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error)
 		return nil, err
 	}
 
+	// Any non-running power state (deallocating/deallocated/stopping/stopped) is
+	// terminated-or-terminating; a substring match catches the transitional states
+	// too, so a shutting-down VM isn't reported healthy.
 	state := VMStateRunning
-	if result.PowerState == "VM deallocated" || result.PowerState == "VM stopped" {
+	if ps := strings.ToLower(result.PowerState); strings.Contains(ps, "dealloc") || strings.Contains(ps, "stop") {
 		state = VMStateTerminated
 	}
 
@@ -270,6 +273,10 @@ func (a *AzureProvider) DestroyVM(ctx context.Context, vmID string) error {
 	// dependency order so teardown doesn't leak.
 	assoc, err := a.gatherVMResources(ctx, vmID)
 	if err != nil {
+		// Already gone — teardown is idempotent (matches OCI + the GetVM contract).
+		if isVMNotFound(err, vmID) {
+			return nil
+		}
 		// Deleting the VM now would orphan its untagged OS disk / NIC / public IP
 		// (gc can't reap them). Abort: the VM itself is dispatcher-tagged, so it
 		// survives and a later teardown or `dispatcher gc` reaps it together with

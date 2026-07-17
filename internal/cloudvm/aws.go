@@ -448,6 +448,11 @@ func (a *AWSProvider) DestroyVM(ctx context.Context, vmID string) error {
 		"--region", a.defaultRegion,
 		"--instance-ids", vmID,
 	); err != nil {
+		// Already gone — teardown is idempotent (matches OCI + the GetVM contract),
+		// so a retried/racing gc pass doesn't report a spurious cleanup failure.
+		if isVMNotFound(err, vmID) {
+			return nil
+		}
 		return fmt.Errorf("aws ec2 terminate-instances failed: %w", err)
 	}
 	for _, sg := range sgs {
