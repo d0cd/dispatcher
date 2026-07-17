@@ -23,6 +23,12 @@ func TestRunSaveAndLoad(t *testing.T) {
 	require.NoError(t, err)
 	assert.FileExists(t, path)
 
+	// Run records carry HandleState (SSH key paths) and the approval audit trail,
+	// so the persisted file must be owner-only 0600.
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "run records must be 0600")
+
 	loaded, err := LoadRecord(r.ID)
 	require.NoError(t, err)
 	assert.Equal(t, r.ID, loaded.ID)

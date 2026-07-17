@@ -70,6 +70,14 @@ func TestMCPServer_RejectsRequestsWithoutSessionToken(t *testing.T) {
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	// A present-but-wrong token must be rejected too — a missing-token-only check
+	// would pass even if the constant-time compare (the real auth boundary) broke.
+	u.RawQuery = "token=" + strings.Repeat("A", 43)
+	wrong, err := http.Post(u.String(), "application/json", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	require.NoError(t, err)
+	defer wrong.Body.Close()
+	assert.Equal(t, http.StatusUnauthorized, wrong.StatusCode, "a wrong token must be rejected")
 }
 
 func TestMCPServer_RejectsOversizedBody(t *testing.T) {

@@ -721,10 +721,10 @@ func (e *Executor) startCostSampler(ctx context.Context, r *Run, terminate func(
 //
 // Re-tickering on each call would churn; instead we only Reset when the
 // current rate is out of sync with the desired tier.
-func adjustSamplerRate(ticker *time.Ticker, live, budget float64, base time.Duration) {
-	if budget <= 0 {
-		return
-	}
+// samplerRateFor is the pure tier logic: how often to sample the budget given the
+// live spend, the cap, and the baseline. It tightens as spend approaches the cap so
+// the trip is precise, floored at 100ms.
+func samplerRateFor(live, budget float64, base time.Duration) time.Duration {
 	ratio := live / budget
 	var want time.Duration
 	switch {
@@ -735,11 +735,17 @@ func adjustSamplerRate(ticker *time.Ticker, live, budget float64, base time.Dura
 	default:
 		want = base
 	}
-	// Floor so we don't sample faster than 100ms regardless of base.
 	if want < 100*time.Millisecond {
 		want = 100 * time.Millisecond
 	}
-	ticker.Reset(want)
+	return want
+}
+
+func adjustSamplerRate(ticker *time.Ticker, live, budget float64, base time.Duration) {
+	if budget <= 0 {
+		return
+	}
+	ticker.Reset(samplerRateFor(live, budget, base))
 }
 
 func (e *Executor) attemptCleanup(ctx context.Context, r *Run) {
