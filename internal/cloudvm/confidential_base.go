@@ -21,7 +21,7 @@ import (
 // the SSH-VM confidential adapters (Azure measured-SNP, AWS Nitro). Each embeds
 // it and adds its own Execute plus provisioning fields,
 // so a change to the shared post-run lifecycle (Status/Logs/Artifacts/Cleanup)
-// lands in one place instead of four. EstimateCost's only per-adapter variation
+// lands in one place instead of both. EstimateCost's only per-adapter variation
 // is the TEE-type assumption line, carried in costAssumption.
 //
 // The GCP Confidential Space adapter is intentionally NOT built on this: it

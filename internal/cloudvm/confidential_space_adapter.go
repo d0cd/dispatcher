@@ -21,10 +21,10 @@ import (
 
 // ConfidentialSpaceAdapter runs a workload on GCP Confidential Space: the
 // workload is a measured container, attested by image digest, reached over an
-// untrusted TCP channel that is made safe by verify-before-seal and HPKE sealing
-// (docs/confidential-space-execution.md). It is a distinct execution path from
-// the SSH-VM CloudVMAdapter — no SSH, no rsync, no PID; the run is synchronous
-// (the sealed exchange blocks until the workload finishes).
+// untrusted TCP channel made safe by an attested TLS session (verify-before-
+// deliver; docs/confidential-space-execution.md). It is a distinct execution path
+// from the SSH-VM CloudVMAdapter — no SSH, no rsync, no PID; the run is synchronous
+// (the aTLS exchange blocks until the workload finishes).
 type ConfidentialSpaceAdapter struct {
 	targetID string
 	deps     csDeps

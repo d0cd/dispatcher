@@ -134,8 +134,8 @@ Hard-won provisioning facts (all validated live):
 
 ## Operating a confidential GCP run
 
-`dispatcher run` on a workload with `confidential.required: true` (and attestation
-not `off`) on GCP automatically takes the container path. Configure via env:
+`dispatcher run` on a workload with a `confidential:` block (attestation not `off`)
+on GCP automatically takes the container path. Configure via env:
 
 - `DISPATCHER_GCP_PROJECT` (or the active `gcloud` project) and
   `DISPATCHER_GCP_ZONE` (pick one with n2d SEV capacity).

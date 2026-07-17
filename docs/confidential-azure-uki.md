@@ -32,7 +32,7 @@ attested TLS session (aTLS).
   Confirmed on a real CVM booted from this image: the full pipeline (attest over
   aTLS → verify PCR11 → deliver → run inside the CVM → result over the session)
   passed (`TestGolden_AzureSNPLiveExchange`). A changed agent → different roothash →
-  different PCR11 → rejected before any secret is sealed.
+  different PCR11 → rejected before any secret is delivered.
 
 Build flow: `deploy/azure-uki/mkosi/` (mkosi 27 from git; verity partitions in
 `mkosi.repart/`) → VHD blob → ConfidentialVm gallery image → CVM via ARM template.

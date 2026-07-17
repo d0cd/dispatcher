@@ -59,7 +59,7 @@ COSE doc) differ.
 
 5. **Run via dispatcher** — the adapter automates provisioning the parent, the
    nitro-cli install, shipping the EIF + proxy, running the enclave, and the
-   attest → seal → run exchange. Select it with `confidential.profile: nitro` in the
+   attested aTLS run. Select it with `confidential.profile: nitro` in the
    workload and pin the pre-built enclave image:
 
    ```

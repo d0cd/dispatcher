@@ -2,7 +2,7 @@
 
 Builds a custom Azure Confidential VM image with `dispatcher-attest-azuresnp`
 baked into a **UKI + dm-verity root**, so PCR11 attests the agent (consumed by
-`attest.NewAzureSNPAttester`, which is done + live-validated).
+`attest.AzureSNPValidatorPinned`, done + live-validated).
 
 ## Status: validated end-to-end with mkosi from git (not the distro's 20.2)
 

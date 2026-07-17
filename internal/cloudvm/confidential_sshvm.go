@@ -14,7 +14,7 @@ import (
 // sshConfidentialDeps are the collaborators for an SSH-VM confidential run
 // (azure-snp, AWS Nitro). The provider-specific verification is a closure so the
 // same orchestration serves both; the live ops (provision, start-agent, endpoint
-// reachability) are seams so the verify-before-seal ordering is unit-testable.
+// reachability) are seams so the verify-before-deliver ordering is unit-testable.
 type sshConfidentialDeps struct {
 	provider Provider
 	image    string // optional VM image override (AWS pins a SEV-SNP 24.04 AMI)
@@ -65,9 +65,9 @@ func renewWatchdogUntil(ctx context.Context, st *CloudVMState, ttl time.Duration
 }
 
 // executeSSHConfidential is the shared SSH-VM confidential orchestration:
-// provision the VM, start the in-TEE agent, verify attestation over the untrusted
-// endpoint, and only then seal source/.env and run the sealed exchange. Any
-// failure before a verified verdict tears the VM down and never ships a secret.
+// provision the VM, start the in-TEE agent, then attest and deliver source/.env +
+// run the workload over one attested TLS session. Any failure before a verified
+// verdict tears the VM down and never ships a secret.
 func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types.Plan, vmName string) (*confidentialRunState, error) {
 	w := p.Workload
 

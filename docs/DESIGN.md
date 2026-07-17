@@ -69,9 +69,9 @@ dispatcher confidential pins        # Show/pin/capture/build/check measured-imag
 | firecracker-vm | local-vm | CloudVMAdapter + FirecrackerProvider | Working (needs a KVM host; live-validated) |
 | kubernetes | kubernetes | K8sAdapter | Working (needs kubectl) |
 | hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated: provisioning + gc reap/safety (needs hcloud CLI) |
-| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = SEV-SNP (VLEK→ASVK→ARK) verifier + measured agent, plus a Nitro Enclaves path (PCR0), both implemented and run-reachable; residual: the scp'd SEV-SNP agent isn't folded into the launch measurement (see confidential_aws.go SECURITY NOTE). |
-| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = Confidential Space (measured agent image digest) with live evidence fetch; SEV-SNP verifier golden-validated on real hardware. |
-| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Live-validated: provisioning + gc reap/teardown-cascade, and a ConfidentialVM (SEV-SNP, vTPM, secure boot) create+reap. Confidential = MAA path (JWKS pinned) and a measured direct-SNP path (`confidential.profile: azure-snp`, agent in PCR11), both implemented and run-reachable. |
+| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = AWS Nitro Enclaves (`confidential.profile: nitro`, measured enclave image → PCR0), attested over aTLS and hardware-validated. |
+| gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = Confidential Space (measured agent image digest, Google JWS), attested over aTLS and hardware-validated. |
+| azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Live-validated: provisioning + gc reap/teardown-cascade, and a ConfidentialVM (SEV-SNP, vTPM, secure boot) create+reap. Confidential = measured direct SNP+vTPM path (`confidential.profile: azure-snp`, agent in PCR11), attested over aTLS and hardware-validated. |
 
 ### Key Features
 
@@ -82,7 +82,7 @@ dispatcher confidential pins        # Show/pin/capture/build/check measured-imag
 - **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [USAGE.md](USAGE.md#bring-your-own-hosts).
 - **Policy gates**: Per-run Unix-socket approval gate. In-process approver (terminal / `--yes`) races an external `dispatcher approve <id>`; filesystem perms (0700 dir, 0600 socket) are the auth boundary.
 - **GPU workloads**: detection → feasibility → catalog/pricing → provisioning. GCP/AWS provision GPU instances from an operator driver-baked image (`DISPATCHER_{GCP,AWS}_GPU_IMAGE`); validated end-to-end (nvidia-smi in-VM on L4/T4). k8s uses `nvidia.com/gpu` limits.
-- **Confidential computing**: typed `confidential:` requirement → TEE-capable machine selection + provisioning (GCP SEV-SNP/AMD Milan, AWS `AmdSevSnp`, Azure ConfidentialVM) → SEV-SNP/MAA attestation verifiers with pinned AMD ARK roots. GCP SEV-SNP golden-validated on real hardware. See [confidential-computing.md](confidential-computing.md).
+- **Confidential computing**: typed `confidential:` requirement → TEE-capable machine selection + provisioning (GCP SEV-SNP/AMD Milan, AWS Nitro Enclaves, Azure ConfidentialVM) → per-cloud attestation verifiers (SEV-SNP with pinned AMD ARK roots, Nitro COSE with the pinned AWS root, Confidential Space JWS) delivered over an attested TLS session. All three measured backends hardware-validated. See [confidential-computing.md](confidential-computing.md).
 - **Sharding / fan-out**: `shard:`/`aggregate:` config fans a workload across N shards (fixed `count` or a `discover` command), each a full dispatcher run; bounded-parallel engine with fail/retry/continue; artifact aggregation. See [low-latency-execution.md](low-latency-execution.md).
 - **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer.
 - **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits.
@@ -94,7 +94,7 @@ dispatcher confidential pins        # Show/pin/capture/build/check measured-imag
 ```
 cmd/
   dispatcher/            # CLI entry point
-  dispatcher-attest*/    # in-TEE measured attestation agents (generic + aws/azure/azuresnp/nitro)
+  dispatcher-attest*/    # in-TEE measured attestation agents (generic CS + azuresnp/nitro)
   dispatcher-nitro-proxy/ # parent-side vsock<->TCP proxy for Nitro enclaves
 internal/
   cli/                # Cobra command definitions
