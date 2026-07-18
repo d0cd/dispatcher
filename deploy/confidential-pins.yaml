@@ -1,4 +1,11 @@
 pins:
+    aws-nitro:
+        image: dispatcher-attest-nitro.eif
+        measurement: de2078ed70c6bef631a75cb8f791631f4465fdf6e8835c8dd42e640cb57031a694ebdd3bc3489d3741f56b54711c3d6b
+        extra:
+            proxy: dispatcher-nitro-proxy
+        captured_at: "2026-07-18T01:06:51Z"
+        inputs_hash: fc815d275c9a982759b8313bd8a5114914a31d96b5513d9e87587ec28948dfd0
     azure-snp:
         measurement: 4b6ab97f6ac2a3e24cbab9f4c4a7813c29b9fd62d7958939f07cfc59acd490f6
         captured_at: "2026-07-17T23:35:50Z"
