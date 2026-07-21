@@ -28,9 +28,9 @@ func (s *lambdaStub) do(req *http.Request) (*http.Response, error) {
 		body, _ = io.ReadAll(req.Body)
 	}
 	s.requests = append(s.requests, req.Method+" "+req.URL.Path)
-	// The stub relies on Basic auth being set so a regression that drops it fails.
-	if _, _, ok := req.BasicAuth(); !ok {
-		s.t.Fatalf("request %s %s missing basic auth", req.Method, req.URL.Path)
+	// Assert the Bearer auth header so a regression that drops it fails.
+	if req.Header.Get("Authorization") != "Bearer test-key" {
+		s.t.Fatalf("request %s %s missing Bearer auth (got %q)", req.Method, req.URL.Path, req.Header.Get("Authorization"))
 	}
 	status, payload := s.handler(req.Method, req.URL.Path, body)
 	return &http.Response{

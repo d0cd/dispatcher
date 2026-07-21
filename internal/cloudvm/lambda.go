@@ -19,7 +19,8 @@ import (
 // (p.do) that tests stub without a live account.
 //
 // Lambda's model shapes a few decisions:
-//   - Auth is HTTP Basic with the API key as the username, empty password.
+//   - Auth is an Authorization: Bearer <api-key> header (the API's recommended
+//     scheme; it also accepts HTTP Basic for backward compatibility).
 //   - Instances carry no arbitrary tags, only a name. dispatcher encodes the run
 //     id into the name ("dispatcher-<run-id>") and recovers it for tag-based
 //     lookups (gc, adopt), synthesising the tag map GetVM/ListVMs return.
@@ -49,7 +50,7 @@ func NewLambdaProvider(region string) *LambdaProvider {
 	return &LambdaProvider{
 		apiKey:        os.Getenv("DISPATCHER_LAMBDA_API_KEY"),
 		defaultRegion: region,
-		baseURL:       "https://cloud.lambdalabs.com/api/v1",
+		baseURL:       "https://cloud.lambda.ai/api/v1",
 		do:            http.DefaultClient.Do,
 	}
 }
@@ -83,7 +84,7 @@ func (l *LambdaProvider) lambdaDo(ctx context.Context, method, path string, body
 	if err != nil {
 		return err
 	}
-	req.SetBasicAuth(l.apiKey, "")
+	req.Header.Set("Authorization", "Bearer "+l.apiKey)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
