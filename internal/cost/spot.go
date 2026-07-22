@@ -23,6 +23,15 @@ var spotDiscount = map[string]float64{
 // has no known spot factor (non-cloud, or a provider without spot support) is
 // returned unchanged.
 func ApplySpot(est types.CostEstimate, t types.TargetConfig) types.CostEstimate {
+	// Prefer a live spot ratio the catalog sourced for the priced instance
+	// (GCP preemptible SKUs, AWS spot-price-history) over the rough factor.
+	if est.SpotRatio > 0 {
+		est.Value = roundCents(est.Value * est.SpotRatio)
+		est.Assumptions = append(est.Assumptions,
+			fmt.Sprintf("based on live spot pricing at ~%.0f%% of on-demand (fluctuates and the instance can be reclaimed anytime)", est.SpotRatio*100))
+		return est
+	}
+
 	f, ok := spotDiscount[t.Capabilities.Accounting.RateCard]
 	if !ok {
 		return est

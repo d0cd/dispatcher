@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -228,6 +229,9 @@ func TestAWSFetcher_Fetch_PaginatesQueryAPI(t *testing.T) {
 
 	var tokens []string
 	calls := captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "describe-spot-price-history") {
+			return []byte(`{"SpotPriceHistory":[]}`), nil
+		}
 		tok := ""
 		for i, a := range args {
 			if a == "--next-token" && i+1 < len(args) {
@@ -253,6 +257,33 @@ func TestAWSFetcher_Fetch_PaginatesQueryAPI(t *testing.T) {
 		}
 	}
 	assert.True(t, sawRegionFilter, "region must be passed as a regionCode filter, not the endpoint")
+}
+
+// Fetch overlays each instance's cheapest recent spot price from
+// describe-spot-price-history onto the on-demand catalog.
+func TestAWSFetcher_Fetch_MergesSpotPrices(t *testing.T) {
+	product := `{"product":{"productFamily":"Compute Instance","attributes":{` +
+		`"instanceType":"m5.large","vcpu":"2","memory":"8 GiB",` +
+		`"operatingSystem":"Linux","tenancy":"Shared","preInstalledSw":"NA",` +
+		`"capacitystatus":"Used","physicalProcessor":"Intel"}},` +
+		`"terms":{"OnDemand":{"O":{"priceDimensions":{"D":{"unit":"Hrs","pricePerUnit":{"USD":"0.096"}}}}}}}`
+	getProducts, _ := json.Marshal(map[string]any{"PriceList": []string{product}, "NextToken": ""})
+	spotHist := `{"SpotPriceHistory":[
+		{"InstanceType":"m5.large","SpotPrice":"0.045","AvailabilityZone":"us-east-1a"},
+		{"InstanceType":"m5.large","SpotPrice":"0.038","AvailabilityZone":"us-east-1b"}
+	]}`
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "describe-spot-price-history") {
+			return []byte(spotHist), nil
+		}
+		return getProducts, nil
+	})
+
+	insts, err := NewAWSFetcher("us-east-1").Fetch(context.Background())
+	require.NoError(t, err)
+	require.Len(t, insts, 1)
+	assert.Equal(t, 0.096, insts[0].PricePerHour)
+	assert.Equal(t, 0.038, insts[0].SpotPricePerHour, "cheapest AZ spot price wins")
 }
 
 // Missing creds / the pricing:GetProducts permission / a missing aws CLI classify
@@ -284,6 +315,39 @@ func TestAWSFetcher_Fetch_TransientErrorStaysTransient(t *testing.T) {
 }
 
 // --- GCP: join logic with stub specs + SKUs ---------------------------------
+
+// mkGCPSKU builds a gcpSKU via JSON so tests don't have to spell out its nested
+// anonymous structs.
+func mkGCPSKU(desc, region, usage string, hourly float64) gcpSKU {
+	units := int(hourly)
+	nanos := int64((hourly - float64(units)) * 1e9)
+	j := fmt.Sprintf(`{"description":%q,"serviceRegions":[%q],`+
+		`"category":{"resourceFamily":"Compute","usageType":%q},`+
+		`"pricingInfo":[{"pricingExpression":{"tieredRates":[{"unitPrice":{"units":"%d","nanos":%d}}]}}]}`,
+		desc, region, usage, units, nanos)
+	var s gcpSKU
+	_ = json.Unmarshal([]byte(j), &s)
+	return s
+}
+
+// Preemptible SKUs (usageType=Preemptible) populate the live spot price; on-demand
+// stays the PricePerHour. A family without preemptible SKUs leaves spot unset.
+func TestGCPFetcher_JoinSpotPrices(t *testing.T) {
+	specs := []gcpMachineType{{Name: "e2-standard-2", GuestCpus: 2, MemoryMb: 8192}}
+	skus := []gcpSKU{
+		mkGCPSKU("E2 Instance Core running in Americas", "us-central1", "OnDemand", 0.021),
+		mkGCPSKU("E2 Instance Ram running in Americas", "us-central1", "OnDemand", 0.003),
+		mkGCPSKU("Spot Preemptible E2 Instance Core running in Americas", "us-central1", "Preemptible", 0.006),
+		mkGCPSKU("Spot Preemptible E2 Instance Ram running in Americas", "us-central1", "Preemptible", 0.001),
+	}
+
+	got := joinGCPSpecsAndPrices(specs, skus, "us-central1")
+	require.Len(t, got, 1)
+	inst := got[0]
+	assert.InDelta(t, 0.021*2+0.003*8, inst.PricePerHour, 0.0001, "on-demand = cpu*2 + ram*8")
+	assert.InDelta(t, 0.006*2+0.001*8, inst.SpotPricePerHour, 0.0001, "spot from preemptible SKUs")
+	assert.Less(t, inst.SpotPricePerHour, inst.PricePerHour)
+}
 
 func TestGCPFetcher_JoinSpecsAndPrices(t *testing.T) {
 	specs := []gcpMachineType{

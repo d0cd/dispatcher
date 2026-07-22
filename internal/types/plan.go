@@ -32,6 +32,11 @@ type CostEstimate struct {
 	// launch the instance that was actually priced. Empty for non-catalog
 	// estimates (local/docker/rate-card).
 	InstanceType string `yaml:"instanceType,omitempty" json:"instanceType,omitempty"`
+	// SpotRatio is the priced instance's live spot price as a fraction of its
+	// on-demand price, when the catalog sourced a spot price (GCP/AWS). ApplySpot
+	// uses it for an accurate spot estimate; 0 means fall back to a per-provider
+	// discount factor.
+	SpotRatio float64 `yaml:"spotRatio,omitempty" json:"spotRatio,omitempty"`
 }
 
 // PlanMetadata contains identification and audit info.

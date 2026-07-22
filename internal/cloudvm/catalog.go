@@ -13,8 +13,12 @@ type InstanceType struct {
 	MemoryGB     float64    `json:"memoryGb"`
 	GPUCount     int        `json:"gpuCount,omitempty"`
 	GPUModel     string     `json:"gpuModel,omitempty"`
-	PricePerHour float64    `json:"pricePerHour"` // USD
-	Arch         string     `json:"arch"`         // x86_64 or arm64
+	PricePerHour float64    `json:"pricePerHour"` // USD, on-demand
+	// SpotPricePerHour is the live spot/preemptible hourly price when the fetcher
+	// can source it (GCP preemptible SKUs, AWS spot-price-history). 0 = unknown,
+	// in which case the estimator falls back to a per-provider discount factor.
+	SpotPricePerHour float64 `json:"spotPricePerHour,omitempty"`
+	Arch             string  `json:"arch"` // x86_64 or arm64
 	// Confidential marks a memory-encrypted (SEV-SNP / TDX) SKU. These are a
 	// separate, pricier bucket: a confidential workload must be priced on one,
 	// and a plain workload must never be.

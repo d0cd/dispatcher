@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // awsPricingEndpointRegion is where the AWS Price List Query API is served.
@@ -95,7 +96,52 @@ func (a *AWSFetcher) Fetch(ctx context.Context) ([]InstanceType, error) {
 		}
 		token = resp.NextToken
 	}
+
+	// Overlay live spot prices (best-effort — spot pricing is optional).
+	if spot := a.fetchSpotPrices(ctx); len(spot) > 0 {
+		for i := range instances {
+			if p, ok := spot[instances[i].Name]; ok && p > 0 && p < instances[i].PricePerHour {
+				instances[i].SpotPricePerHour = p
+			}
+		}
+	}
 	return instances, nil
+}
+
+// fetchSpotPrices returns each instance type's cheapest recent spot price in the
+// region. Best-effort: spot pricing is optional, so any failure yields nil and
+// the estimator falls back to the discount factor. The aws CLI auto-paginates
+// describe-spot-price-history, so this is a single call; start-time=now returns
+// the latest price per type/AZ.
+func (a *AWSFetcher) fetchSpotPrices(ctx context.Context) map[string]float64 {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-spot-price-history",
+		"--region", a.Region,
+		"--product-descriptions", "Linux/UNIX",
+		"--start-time", time.Now().UTC().Format(time.RFC3339),
+		"--output", "json")
+	if err != nil {
+		return nil
+	}
+	var resp struct {
+		SpotPriceHistory []struct {
+			InstanceType string `json:"InstanceType"`
+			SpotPrice    string `json:"SpotPrice"`
+		} `json:"SpotPriceHistory"`
+	}
+	if json.Unmarshal(out, &resp) != nil {
+		return nil
+	}
+	prices := make(map[string]float64, len(resp.SpotPriceHistory))
+	for _, e := range resp.SpotPriceHistory {
+		p, err := strconv.ParseFloat(e.SpotPrice, 64)
+		if err != nil || !isPlausibleHourlyPrice(p) {
+			continue
+		}
+		if cur, ok := prices[e.InstanceType]; !ok || p < cur {
+			prices[e.InstanceType] = p // cheapest AZ
+		}
+	}
+	return prices
 }
 
 // awsQueryProduct is one PriceList entry from the Query API (each is itself a

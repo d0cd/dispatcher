@@ -120,6 +120,11 @@ func estimateFromCatalog(spec types.WorkloadSpec, t types.TargetConfig, catalog 
 		confidence = types.ConfidenceLow
 	}
 
+	spotRatio := 0.0
+	if cheapest.SpotPricePerHour > 0 && cheapest.PricePerHour > 0 {
+		spotRatio = cheapest.SpotPricePerHour / cheapest.PricePerHour
+	}
+
 	return types.CostEstimate{
 		Value:        roundCents(total),
 		Currency:     "USD",
@@ -127,6 +132,7 @@ func estimateFromCatalog(spec types.WorkloadSpec, t types.TargetConfig, catalog 
 		Assumptions:  assumptions,
 		Exclusions:   []string{"excludes network egress", "excludes storage after run"},
 		InstanceType: cheapest.Name,
+		SpotRatio:    spotRatio,
 	}, true
 }
 
