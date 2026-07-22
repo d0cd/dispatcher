@@ -2,9 +2,19 @@ package risk
 
 import "github.com/d0cd/dispatcher/internal/types"
 
-// Analyze enumerates risks for a workload on a target.
-func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate) []types.Risk {
+// Analyze enumerates risks for a workload on a target. spot indicates the run
+// requested an interruptible instance, which carries its own reclaim risk.
+func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate, spot bool) []types.Risk {
 	var risks []types.Risk
+
+	// Spot/preemptible interruption: the provider can reclaim the instance at any
+	// time, killing the run mid-flight. Only safe for restartable work.
+	if spot {
+		risks = append(risks, types.Risk{
+			Category:    "spot-interruption",
+			Description: "spot/preemptible instance can be reclaimed by the provider at any time; the run may be interrupted mid-execution — only for restartable work, and pair with --retry-transient to auto re-provision (typical GPU reclaim: A100 ~15-20%, H100 <5%)",
+		})
+	}
 
 	// Cost uncertainty
 	if est.Confidence == types.ConfidenceLow || est.Confidence == types.ConfidenceUnknown {

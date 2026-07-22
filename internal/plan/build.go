@@ -27,6 +27,16 @@ type candidate struct {
 // catalog supplies live cloud pricing; pass nil when no catalog is available
 // (offline, tests). Cloud-vm targets without catalog data are surfaced with
 // ConfidenceUnknown rather than a misleading static estimate.
+// estimateCost prices a target, applying the spot discount when the run requested
+// an interruptible instance (a spot-incapable provider is unaffected).
+func estimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudvm.Catalog, spot bool) types.CostEstimate {
+	est := cost.EstimateCost(spec, t, catalog)
+	if spot {
+		est = cost.ApplySpot(est, t)
+	}
+	return est
+}
+
 func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Catalog) (*types.Plan, error) {
 	// Inspect workload (includes dispatcher.yaml overrides)
 	spec, err := workload.InspectCodebase(path)
@@ -101,7 +111,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		if !result.Feasible {
 			return nil, fmt.Errorf("target %q is not feasible: %s", constraints.TargetName, result.Reasons[0])
 		}
-		est := cost.EstimateCost(spec, t, catalog)
+		est := estimateCost(spec, t, catalog, constraints.Spot)
 		feasible = append(feasible, candidate{target: t, cost: est})
 
 		// Evaluate rest as alternatives
@@ -111,7 +121,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 			}
 			result := target.CheckFeasibility(other, spec)
 			if result.Feasible {
-				est := cost.EstimateCost(spec, other, catalog)
+				est := estimateCost(spec, other, catalog, constraints.Spot)
 				feasible = append(feasible, candidate{target: other, cost: est})
 			} else {
 				rejected = append(rejected, types.RejectedTarget{
@@ -124,7 +134,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		for _, t := range targets {
 			result := target.CheckFeasibility(t, spec)
 			if result.Feasible {
-				est := cost.EstimateCost(spec, t, catalog)
+				est := estimateCost(spec, t, catalog, constraints.Spot)
 				feasible = append(feasible, candidate{target: t, cost: est})
 			} else {
 				rejected = append(rejected, types.RejectedTarget{
@@ -167,7 +177,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 	}
 
 	// Risk analysis
-	risks := risk.Analyze(spec, best.target, best.cost)
+	risks := risk.Analyze(spec, best.target, best.cost, constraints.Spot)
 
 	// Policy evaluation
 	approvals := policy.Evaluate(spec, best.target, best.cost)

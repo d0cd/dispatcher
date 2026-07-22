@@ -298,7 +298,7 @@ func (tr *ToolRegistry) execEvaluateAll(spec *types.WorkloadSpec) ToolResult {
 		if fr.Feasible {
 			est := cost.EstimateCostWithHistory(*spec, t, tr.history, tr.catalog)
 			eval.Cost = &est
-			eval.Risks = risk.Analyze(*spec, t, est)
+			eval.Risks = risk.Analyze(*spec, t, est, false)
 			if tr.history != nil {
 				if s := tr.history.Flakiness(spec.Name, t.ID); s.Flaky {
 					eval.Risks = append(eval.Risks, types.Risk{
