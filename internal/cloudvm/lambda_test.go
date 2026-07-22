@@ -43,7 +43,7 @@ func (s *lambdaStub) do(req *http.Request) (*http.Response, error) {
 func newLambdaTestProvider(t *testing.T, handler func(method, path string, body []byte) (int, string)) (*LambdaProvider, *lambdaStub) {
 	stub := &lambdaStub{t: t, handler: handler}
 	p := &LambdaProvider{
-		apiKey:        "test-key",
+		apiKey:        secret("test-key"),
 		defaultRegion: "us-east-1",
 		baseURL:       "https://cloud.lambdalabs.com/api/v1",
 		do:            stub.do,
@@ -164,7 +164,7 @@ func TestLambdaDestroyVM_TerminatesAndDeletesKey(t *testing.T) {
 }
 
 func TestLambdaCheckCLI_RequiresAPIKey(t *testing.T) {
-	p := &LambdaProvider{apiKey: "", baseURL: "x", do: http.DefaultClient.Do}
+	p := &LambdaProvider{apiKey: secret(""), baseURL: "x", do: http.DefaultClient.Do}
 	err := p.CheckCLI(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "DISPATCHER_LAMBDA_API_KEY")

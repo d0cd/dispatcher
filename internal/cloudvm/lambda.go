@@ -35,7 +35,7 @@ import (
 //     can't be injected; a dead dispatcher relies on `dispatcher gc` to reap by
 //     name rather than an in-VM TTL backstop.
 type LambdaProvider struct {
-	apiKey        string
+	apiKey        secret
 	defaultRegion string
 	baseURL       string
 	do            func(*http.Request) (*http.Response, error)
@@ -48,7 +48,7 @@ func NewLambdaProvider(region string) *LambdaProvider {
 		region = "us-east-1"
 	}
 	return &LambdaProvider{
-		apiKey:        os.Getenv("DISPATCHER_LAMBDA_API_KEY"),
+		apiKey:        secret(os.Getenv("DISPATCHER_LAMBDA_API_KEY")),
 		defaultRegion: region,
 		baseURL:       "https://cloud.lambda.ai/api/v1",
 		do:            http.DefaultClient.Do,
@@ -84,7 +84,9 @@ func (l *LambdaProvider) lambdaDo(ctx context.Context, method, path string, body
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+l.apiKey)
+	// The one place the raw key crosses the boundary — into the TLS-encrypted
+	// Authorization header to cloud.lambda.ai. Every other path sees "[REDACTED]".
+	req.Header.Set("Authorization", "Bearer "+l.apiKey.reveal())
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
@@ -135,7 +137,7 @@ func (e *lambdaAPIError) Error() string {
 }
 
 func (l *LambdaProvider) CheckCLI(ctx context.Context) error {
-	if l.apiKey == "" {
+	if l.apiKey.empty() {
 		return fmt.Errorf("lambda: DISPATCHER_LAMBDA_API_KEY is not set")
 	}
 	// A cheap authenticated GET confirms the key works before we try to launch.
