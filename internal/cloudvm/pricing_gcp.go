@@ -113,7 +113,9 @@ func (g *GCPFetcher) fetchBillingSKUs(ctx context.Context, token string) ([]gcpS
 	endpoint := fmt.Sprintf("%s/services/%s/skus", base, GCPComputeServiceID)
 	q := url.Values{}
 	q.Set("currencyCode", "USD")
-	q.Set("pageSize", "1000")
+	// The Compute Engine catalog is ~30k SKUs; 5000 (the API max page size)
+	// keeps it to ~7 sequential pages instead of ~30.
+	q.Set("pageSize", "5000")
 
 	var (
 		all       []gcpSKU
