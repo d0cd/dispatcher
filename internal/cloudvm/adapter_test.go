@@ -152,6 +152,41 @@ func TestCloudVMAdapter_Reconnect(t *testing.T) {
 	assert.Equal(t, ProviderHetzner, reconState.Provider)
 }
 
+// A spot VM that the provider reclaims mid-run surfaces as VMStateTerminated.
+// Status must mark the state Reclaimed, and FailureDetails must report it as a
+// reclaim so ClassifyFailure returns transient and --retry-transient re-provisions.
+func TestCloudVMAdapter_SpotReclaim(t *testing.T) {
+	mock := NewMockProvider(ProviderGCP)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderGCP})
+
+	// VMID unknown to the mock → GetVM returns VMStateTerminated (the reclaim).
+	state := &CloudVMState{Provider: ProviderGCP, VMID: "reclaimed-vm", Spot: true}
+	handle := &adapter.RunHandle{ID: "reclaimed-vm", TargetID: "gcp-vm", State: state}
+
+	st, err := a.Status(context.Background(), handle)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateExecutionFailed, st)
+	assert.True(t, state.Reclaimed, "a terminated spot VM must be marked reclaimed")
+
+	fd := a.FailureDetails(handle)
+	assert.True(t, fd.Reclaimed, "FailureDetails must report the reclaim")
+	assert.Equal(t, adapter.FailureTransient, adapter.ClassifyFailure(fd))
+}
+
+// A non-spot VM found terminated is not attributed to a reclaim.
+func TestCloudVMAdapter_NonSpotTerminatedNotReclaimed(t *testing.T) {
+	mock := NewMockProvider(ProviderGCP)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderGCP})
+
+	state := &CloudVMState{Provider: ProviderGCP, VMID: "gone-vm", Spot: false}
+	handle := &adapter.RunHandle{ID: "gone-vm", TargetID: "gcp-vm", State: state}
+
+	st, err := a.Status(context.Background(), handle)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateExecutionFailed, st)
+	assert.False(t, state.Reclaimed, "non-spot termination must not be marked a reclaim")
+}
+
 func TestCloudVMAdapter_Cleanup(t *testing.T) {
 	mock := NewMockProvider(ProviderHetzner)
 	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})

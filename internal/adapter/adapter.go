@@ -152,6 +152,7 @@ type FailureDetails struct {
 	ExitCode  int    // process exit code
 	Signal    string // "SIGKILL", "SIGSEGV", etc.; empty for normal exit
 	OOMKilled bool   // runtime-confirmed OOM (docker/k8s); local can only infer from SIGKILL
+	Reclaimed bool   // the spot/preemptible instance was reclaimed by the provider mid-run
 	Message   string // one-line human explanation
 }
 

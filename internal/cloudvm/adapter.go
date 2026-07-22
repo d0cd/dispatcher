@@ -281,6 +281,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 		LogPath:       remoteDir + "/dispatcher.log",
 		CreatedAt:     time.Now().UTC(),
 		Outputs:       w.Outputs,
+		Spot:          opts.Spot,
 	}
 
 	// Pin host key now so subsequent SSH/rsync use StrictHostKeyChecking=yes,
@@ -410,6 +411,12 @@ func (a *CloudVMAdapter) Status(ctx context.Context, h *adapter.RunHandle) (type
 	}
 
 	if vmInfo.State == VMStateTerminated {
+		// A spot/preemptible VM that vanishes mid-run was reclaimed by the
+		// provider, not by dispatcher. Record it so FailureDetails classifies the
+		// failure as transient and --retry-transient re-provisions.
+		if state.Spot {
+			state.Reclaimed = true
+		}
 		return types.RunStateExecutionFailed, nil
 	}
 
@@ -460,6 +467,14 @@ func (a *CloudVMAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDet
 	state, ok := h.State.(*CloudVMState)
 	if !ok {
 		return adapter.FailureDetails{Message: "no cloud vm state"}
+	}
+	// A reclaimed spot VM is gone — SSH evidence capture would only time out.
+	// Report the reclaim directly; it classifies transient.
+	if state.Reclaimed {
+		return adapter.FailureDetails{
+			Reclaimed: true,
+			Message:   fmt.Sprintf("spot instance reclaimed by the provider (%s VM %s)", state.Provider, state.VMID),
+		}
 	}
 	// Capture kernel/cgroup OOM evidence from the still-alive VM before teardown,
 	// so diagnose can state OOM as a fact rather than a guess.
