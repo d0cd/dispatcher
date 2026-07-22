@@ -9,6 +9,60 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestAWSInstanceArch(t *testing.T) {
+	cases := map[string]string{
+		"t3.micro":    "x86_64",
+		"m5.large":    "x86_64",
+		"g4dn.xlarge": "x86_64",
+		"g5.xlarge":   "x86_64",
+		"inf1.xlarge": "x86_64",
+		"t4g.nano":    "arm64",
+		"c7g.large":   "arm64",
+		"m6gd.xlarge": "arm64",
+		"im4gn.large": "arm64",
+		"g5g.xlarge":  "arm64",
+		"a1.medium":   "arm64",
+		"x2gd.large":  "arm64",
+	}
+	for it, want := range cases {
+		assert.Equal(t, want, awsInstanceArch(it), it)
+	}
+}
+
+// A Graviton (arm64) instance the planner selects as cheapest must resolve the
+// arm64 Ubuntu AMI, or run-instances fails with an architecture mismatch.
+func TestAWSCreateVM_ARM64ResolvesArmAMI(t *testing.T) {
+	var ssmName string
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "get-parameter"):
+			for i, a := range args {
+				if a == "--name" && i+1 < len(args) {
+					ssmName = args[i+1]
+				}
+			}
+			return []byte("ami-arm64example"), nil
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-1"), nil
+		case slices.Contains(args, "create-security-group"):
+			return []byte("sg-1"), nil
+		default:
+			return []byte(""), nil
+		}
+	})
+	prev := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		return nil, assert.AnError // stop after image resolution; args already captured
+	}
+	t.Cleanup(func() { retryCLIOutput = prev })
+
+	_, _ = NewAWSProvider("us-east-1").CreateVM(context.Background(), VMOptions{
+		Region: "us-east-1", InstanceType: "t4g.nano",
+		Tags: map[string]string{"dispatcher-run-id": "r"},
+	})
+	assert.Contains(t, ssmName, "arm64", "arm64 instance must resolve the arm64 AMI param")
+}
+
 // cliCall records one invocation of the runCLI seam.
 type cliCall struct {
 	name string

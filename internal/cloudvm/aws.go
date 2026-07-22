@@ -41,15 +41,52 @@ func (a *AWSProvider) SetRegion(region string) {
 // hardcode a region-pinned AMI.
 const ubuntuAMISSMParam = "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"
 
+// ubuntuAMISSMParamARM64 is the arm64 (Graviton) counterpart, used when the
+// selected instance is a Graviton family.
+const ubuntuAMISSMParamARM64 = "/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id"
+
 // resolveUbuntuAMI looks up the region-correct Ubuntu AMI via SSM. AMI ids are
 // region-scoped, so a fixed id only works in one region; this makes any region
 // launchable without a hand-maintained region→AMI map.
-func resolveUbuntuAMI(ctx context.Context, region string) (string, error) {
+// awsInstanceArch derives x86_64 vs arm64 from an instance type name. AWS
+// Graviton families carry a 'g' immediately after the generation digits (t4g,
+// c7g, m6gd, im4gn, g5g); a1 is the one Graviton family without it. Needed so
+// resolveUbuntuAMI picks an architecture-matching AMI — otherwise an arm64
+// instance (which live pricing often selects as cheapest) fails to launch on an
+// x86_64 image.
+func awsInstanceArch(instanceType string) string {
+	fam := instanceType
+	if i := strings.IndexByte(fam, '.'); i >= 0 {
+		fam = fam[:i]
+	}
+	if fam == "a1" {
+		return "arm64"
+	}
+	for i := 0; i < len(fam); i++ {
+		if fam[i] >= '0' && fam[i] <= '9' {
+			j := i
+			for j < len(fam) && fam[j] >= '0' && fam[j] <= '9' {
+				j++
+			}
+			if j < len(fam) && fam[j] == 'g' {
+				return "arm64"
+			}
+			break
+		}
+	}
+	return "x86_64"
+}
+
+func resolveUbuntuAMI(ctx context.Context, region, arch string) (string, error) {
+	param := ubuntuAMISSMParam
+	if arch == "arm64" {
+		param = ubuntuAMISSMParamARM64
+	}
 	var out []byte
 	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
 		o, e := runCLI(ctx, "aws", "ssm", "get-parameter",
 			"--region", region,
-			"--name", ubuntuAMISSMParam,
+			"--name", param,
 			"--query", "Parameter.Value",
 			"--output", "text",
 		)
@@ -118,7 +155,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 			// supplies a driver-baked AMI.
 			image = awsGPUImage()
 		} else {
-			resolved, err := resolveUbuntuAMI(ctx, region)
+			resolved, err := resolveUbuntuAMI(ctx, region, awsInstanceArch(instanceType))
 			if err != nil {
 				return nil, fmt.Errorf("aws: %w", err)
 			}
