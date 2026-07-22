@@ -266,6 +266,8 @@ func rateCardToProvider(card string) (cloudvm.ProviderID, bool) {
 		return cloudvm.ProviderHetzner, true
 	case "oci":
 		return cloudvm.ProviderOCI, true
+	case "lambda":
+		return cloudvm.ProviderLambda, true
 	}
 	return "", false
 }

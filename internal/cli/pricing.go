@@ -43,6 +43,7 @@ func loadLiveCatalogScoped(stderr io.Writer, targetID, region string) *cloudvm.C
 		cloudvm.NewAzureFetcher(""),
 		cloudvm.NewAWSFetcher(""),
 		cloudvm.NewGCPFetcher(""),
+		scopedLambdaFetcher(targetID, region),
 	}
 
 	cat, skipped, err := cloudvm.NewLiveCatalog(ctx, fetchers...)
@@ -81,6 +82,17 @@ func scopedHetznerFetcher(targetID, region string) *cloudvm.HetznerFetcher {
 		fetcher.Location = region
 	}
 	return fetcher
+}
+
+// scopedLambdaFetcher pins the Lambda capacity filter to the run's region only
+// when lambda-vm is the target; otherwise it prices every type with capacity
+// anywhere (so it can appear as an alternative). Self-skips without an API key.
+func scopedLambdaFetcher(targetID, region string) *cloudvm.LambdaFetcher {
+	r := ""
+	if targetID == "lambda-vm" {
+		r = region
+	}
+	return cloudvm.NewLambdaFetcher(r)
 }
 
 func usableLiveCatalog(cat *cloudvm.Catalog, timedOut bool) *cloudvm.Catalog {
