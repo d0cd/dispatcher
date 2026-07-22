@@ -7,6 +7,8 @@ pins:
         captured_at: "2026-07-18T01:06:51Z"
         inputs_hash: fc815d275c9a982759b8313bd8a5114914a31d96b5513d9e87587ec28948dfd0
     azure-snp:
+        # image is deployer-specific (your gallery image / subscription) — supply it
+        # at run time via DISPATCHER_AZURE_SNP_IMAGE, not in this shared CI pin file.
         measurement: 4b6ab97f6ac2a3e24cbab9f4c4a7813c29b9fd62d7958939f07cfc59acd490f6
         captured_at: "2026-07-17T23:35:50Z"
         inputs_hash: 84909b29c50a76ec79fd593f8d6ede5ce1d3017867d2afbf28df7c104a7b89b0
