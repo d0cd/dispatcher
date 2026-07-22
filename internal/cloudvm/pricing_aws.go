@@ -282,8 +282,10 @@ func normalizeAWSArch(processor, family string) string {
 func normalizeAWSGPUModel(_ string, instanceName string) string {
 	n := strings.ToLower(instanceName)
 	switch {
-	case strings.HasPrefix(n, "g4dn"), strings.HasPrefix(n, "g4ad"):
-		return "t4"
+	case strings.HasPrefix(n, "g4dn"):
+		return "t4" // NVIDIA T4
+	case strings.HasPrefix(n, "g4ad"):
+		return "v520" // AMD Radeon Pro V520 — not a T4
 	case strings.HasPrefix(n, "g5"):
 		return "a10g"
 	case strings.HasPrefix(n, "p3"):

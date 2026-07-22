@@ -182,7 +182,12 @@ func TestAWSFetcher_ParseQueryEntry(t *testing.T) {
 	g4, ok := parseAWSPriceListEntry(entry("g4dn.xlarge", "4", "16 GiB", "Intel Xeon", "1", "0.526"))
 	require.True(t, ok)
 	assert.Equal(t, 1, g4.GPUCount)
-	assert.Equal(t, "t4", g4.GPUModel)
+	assert.Equal(t, "t4", g4.GPUModel, "g4dn is NVIDIA T4")
+
+	// g4ad is AMD Radeon (V520), not a T4 — must not masquerade as one.
+	g4ad, ok := parseAWSPriceListEntry(entry("g4ad.xlarge", "4", "16 GiB", "AMD EPYC", "1", "0.379"))
+	require.True(t, ok)
+	assert.Equal(t, "v520", g4ad.GPUModel)
 
 	// A non-compute product (e.g. Storage) is rejected.
 	_, ok = parseAWSPriceListEntry(`{"product":{"productFamily":"Storage","attributes":{"volumeType":"gp3"}}}`)
