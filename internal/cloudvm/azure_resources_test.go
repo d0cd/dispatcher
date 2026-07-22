@@ -101,6 +101,34 @@ func TestAzureSKUAvailable(t *testing.T) {
 	assert.True(t, ok)
 }
 
+// When the requested size is restricted, the fallback picks the smallest
+// available general-purpose size that meets the requested vCPU/memory, and
+// excludes GPU/HPC families.
+func TestFirstAvailableAzureSKU(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) {
+		return []byte(`[
+		  {"name":"Standard_B2s","capabilities":[{"name":"vCPUs","value":"2"},{"name":"MemoryGB","value":"4"}],"restrictions":[{"reasonCode":"NotAvailableForSubscription"}]},
+		  {"name":"Standard_D4als_v7","capabilities":[{"name":"vCPUs","value":"4"},{"name":"MemoryGB","value":"16"}],"restrictions":[]},
+		  {"name":"Standard_D2als_v7","capabilities":[{"name":"vCPUs","value":"2"},{"name":"MemoryGB","value":"8"}],"restrictions":[]},
+		  {"name":"Standard_NC4as_T4_v3","capabilities":[{"name":"vCPUs","value":"4"},{"name":"MemoryGB","value":"28"}],"restrictions":[]}
+		]`), nil
+	})
+	alt, err := firstAvailableAzureSKU(context.Background(), "eastus", "Standard_B2s")
+	require.NoError(t, err)
+	assert.Equal(t, "Standard_D2als_v7", alt)
+}
+
+func TestFirstAvailableAzureSKU_NoneAvailable(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) {
+		return []byte(`[
+		  {"name":"Standard_B2s","capabilities":[{"name":"vCPUs","value":"2"},{"name":"MemoryGB","value":"4"}],"restrictions":[{"reasonCode":"NotAvailableForSubscription"}]},
+		  {"name":"Standard_NC4as_T4_v3","capabilities":[{"name":"vCPUs","value":"4"},{"name":"MemoryGB","value":"28"}],"restrictions":[]}
+		]`), nil
+	})
+	_, err := firstAvailableAzureSKU(context.Background(), "eastus", "Standard_B2s")
+	require.Error(t, err)
+}
+
 func TestAzureProvider_ListResources_Argv(t *testing.T) {
 	calls := captureRunCLIWith(t, azResponses(func([]string) ([]byte, bool) { return nil, false }))
 	p := NewAzureProvider("rg", "eastus")

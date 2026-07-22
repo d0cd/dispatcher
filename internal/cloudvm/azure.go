@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/dlog"
 )
 
 // AzureProvider implements Provider using the az CLI.
@@ -170,15 +172,32 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 			return vm, nil
 		}
 		// az masks a NotAvailableForSubscription error as a "content already
-		// consumed" CLI crash. Only in that case, probe the SKU to surface the
-		// real, actionable reason instead of the opaque crash.
+		// consumed" CLI crash. Only in that case, probe the SKU: if it's
+		// unavailable for this subscription (an offer/region restriction, not a
+		// quota), substitute the smallest available general-purpose size and
+		// retry the create once rather than failing the run outright.
 		if strings.Contains(err.Error(), "already consumed") {
 			if ok, reason := azureSKUAvailable(ctx, location, instanceType); !ok {
-				return nil, fmt.Errorf("azure: VM size %s is %s in %s — choose a different --size or region: %w",
-					instanceType, reason, location, err)
+				alt, altErr := firstAvailableAzureSKU(ctx, location, instanceType)
+				if altErr != nil {
+					return nil, fmt.Errorf("azure: VM size %s is %s in %s and no available substitute was found (%v): %w",
+						instanceType, reason, location, altErr, err)
+				}
+				dlog.L().Warn("azure.sku.substituted",
+					"requested", instanceType, "using", alt, "location", location, "reason", reason)
+				output, err = retryCLIOutput(ctx, "az", "az vm create", withAzureSize(args, alt)...)
+				if err != nil {
+					if vm := adoptCreatedVM(ctx, a, opts.Tags["dispatcher-run-id"]); vm != nil {
+						return vm, nil
+					}
+					return nil, fmt.Errorf("azure: substitute size %s for unavailable %s also failed: %w", alt, instanceType, err)
+				}
+			} else {
+				return nil, err
 			}
+		} else {
+			return nil, err
 		}
-		return nil, err
 	}
 
 	var result struct {
@@ -233,6 +252,120 @@ func azureSKUAvailable(ctx context.Context, location, size string) (bool, string
 		return true, ""
 	}
 	return true, "" // size not in the filtered list; don't block
+}
+
+// azureListedSKU is one entry of `az vm list-skus` output.
+type azureListedSKU struct {
+	Name         string `json:"name"`
+	Capabilities []struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	} `json:"capabilities"`
+	Restrictions []struct {
+		ReasonCode string `json:"reasonCode"`
+	} `json:"restrictions"`
+}
+
+func (s azureListedSKU) capability(key string) string {
+	for _, c := range s.Capabilities {
+		if c.Name == key {
+			return c.Value
+		}
+	}
+	return ""
+}
+
+func (s azureListedSKU) available() bool {
+	for _, r := range s.Restrictions {
+		if r.ReasonCode != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// azureGeneralPurpose reports whether a VM size is in a general-purpose or
+// compute family (A/B/D/E/F), excluding GPU (N), HPC (H), large-memory (M),
+// storage (L), and confidential (DC/EC) families — those carry special images,
+// cost, or quota that make them poor automatic substitutes.
+func azureGeneralPurpose(name string) bool {
+	fam := strings.TrimPrefix(name, "Standard_")
+	i := 0
+	for i < len(fam) && (fam[i] < '0' || fam[i] > '9') {
+		i++
+	}
+	prefix := fam[:i]
+	if prefix == "" || strings.HasPrefix(prefix, "DC") || strings.HasPrefix(prefix, "EC") {
+		return false
+	}
+	switch prefix[0] {
+	case 'A', 'B', 'D', 'E', 'F':
+		return true
+	}
+	return false
+}
+
+// firstAvailableAzureSKU finds an available general-purpose VM size in the
+// location that meets or exceeds the requested size's vCPU/memory. It is the
+// substitute used when the requested size is NotAvailableForSubscription — a
+// region/offer restriction (not a quota) that `az vm create` masks as a crash.
+func firstAvailableAzureSKU(ctx context.Context, location, requested string) (string, error) {
+	out, err := runCLI(ctx, "az", "vm", "list-skus",
+		"--location", location, "--resource-type", "virtualMachines", "--all", "--output", "json")
+	if err != nil {
+		return "", err
+	}
+	var skus []azureListedSKU
+	if err := json.Unmarshal(out, &skus); err != nil {
+		return "", fmt.Errorf("parse az vm list-skus: %w", err)
+	}
+
+	minVCPU, minMem := 1, 0.0
+	for _, s := range skus {
+		if s.Name == requested {
+			if v, e := strconv.Atoi(s.capability("vCPUs")); e == nil && v > 0 {
+				minVCPU = v
+			}
+			if m, e := strconv.ParseFloat(s.capability("MemoryGB"), 64); e == nil {
+				minMem = m
+			}
+		}
+	}
+
+	best := ""
+	bestVCPU, bestMem := 0, 0.0
+	for _, s := range skus {
+		if !s.available() || !azureGeneralPurpose(s.Name) {
+			continue
+		}
+		v, _ := strconv.Atoi(s.capability("vCPUs"))
+		m, _ := strconv.ParseFloat(s.capability("MemoryGB"), 64)
+		if v < minVCPU || m < minMem {
+			continue
+		}
+		// Smallest adequate size wins; ties broken by memory then name for determinism.
+		if best == "" || v < bestVCPU ||
+			(v == bestVCPU && m < bestMem) ||
+			(v == bestVCPU && m == bestMem && s.Name < best) {
+			best, bestVCPU, bestMem = s.Name, v, m
+		}
+	}
+	if best == "" {
+		return "", fmt.Errorf("no available general-purpose VM size in %s meets %d vCPU / %.0f GB", location, minVCPU, minMem)
+	}
+	return best, nil
+}
+
+// withAzureSize returns a copy of args with the --size value replaced.
+func withAzureSize(args []string, size string) []string {
+	out := append([]string(nil), args...)
+	for i := 0; i+1 < len(out); i++ {
+		if out[i] == "--size" {
+			out[i+1] = size
+			return out
+		}
+	}
+	return out
 }
 
 func (a *AzureProvider) WaitReady(ctx context.Context, _ string, ip string, _ string) error {
