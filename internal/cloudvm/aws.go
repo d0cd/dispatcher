@@ -158,7 +158,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	// instance is created would make the retry provision a SECOND instance. A
 	// stable per-run client token makes the create idempotent — a retry returns
 	// the already-created instance instead of duplicating it.
-	if token := awsClientToken(opts); token != "" {
+	if token := awsClientToken(opts, sgID); token != "" {
 		args = append(args, "--client-token", token)
 	}
 
@@ -311,15 +311,25 @@ func awsTagSpec(resourceType string, tags map[string]string) string {
 	return fmt.Sprintf("ResourceType=%s,Tags=[%s]", resourceType, strings.Join(pairs, ","))
 }
 
-// awsClientToken returns a stable idempotency token for run-instances, derived
-// from the per-run tag (the plan id) or the VM name. Stable across a create's
-// retries and unique per run, so AWS dedupes a retried create to one instance.
-// AWS caps client tokens at 64 ASCII chars; the plan id / name are well under.
-func awsClientToken(opts VMOptions) string {
-	if id := opts.Tags["dispatcher-run-id"]; id != "" {
-		return id
+// awsClientToken returns an idempotency token for run-instances, scoped to the
+// run AND this provisioning attempt's security group. Within one CreateVM call
+// the token is stable, so the CLI's internal retries dedupe to one instance;
+// across attempts it differs, because a spot-reclaim re-provision creates a
+// fresh security group — reusing the terminated instance's token with the new
+// group's args would fail as IdempotentParameterMismatch. AWS caps client
+// tokens at 64 ASCII chars; the run id + group id suffix stay well under.
+func awsClientToken(opts VMOptions, sgID string) string {
+	base := opts.Tags["dispatcher-run-id"]
+	if base == "" {
+		base = opts.Name
 	}
-	return opts.Name
+	if base == "" {
+		return ""
+	}
+	if sgID != "" {
+		return base + "-" + strings.TrimPrefix(sgID, "sg-")
+	}
+	return base
 }
 
 // awsCreateSSHSecurityGroup creates a security group in the region's default VPC

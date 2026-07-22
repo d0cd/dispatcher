@@ -97,8 +97,24 @@ func TestAWSCreateVM_PassesIdempotencyClientToken(t *testing.T) {
 
 	i := slices.Index(runArgs, "--client-token")
 	if assert.GreaterOrEqual(t, i, 0, "run-instances must carry a --client-token for idempotent retries") {
-		assert.Equal(t, "plan_x", runArgs[i+1], "the client token must be the stable per-run id")
+		// Scoped to the run id AND this attempt's security group (sg-123), so a
+		// spot-reclaim re-provision gets a distinct token instead of colliding.
+		assert.Equal(t, "plan_x-123", runArgs[i+1])
 	}
+}
+
+// The client token must be stable within one provisioning attempt (so the CLI's
+// internal retries dedupe to one instance) but distinct across attempts (so a
+// spot-reclaim re-provision, which creates a fresh security group, doesn't reuse
+// the terminated instance's token and hit IdempotentParameterMismatch).
+func TestAWSClientToken_DistinctPerAttempt(t *testing.T) {
+	opts := VMOptions{Tags: map[string]string{"dispatcher-run-id": "run_abc"}}
+	first := awsClientToken(opts, "sg-0aaa")
+	second := awsClientToken(opts, "sg-0bbb")
+	assert.NotEqual(t, first, second, "a fresh security group (new attempt) must yield a distinct token")
+	assert.Equal(t, first, awsClientToken(opts, "sg-0aaa"), "same attempt must be stable for CLI-retry idempotency")
+	assert.Contains(t, first, "run_abc")
+	assert.LessOrEqual(t, len(first), 64, "AWS caps client tokens at 64 chars")
 }
 
 func TestAWSProvider_Argv(t *testing.T) {
