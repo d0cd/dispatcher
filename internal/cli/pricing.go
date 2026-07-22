@@ -37,13 +37,20 @@ func loadLiveCatalogScoped(stderr io.Writer, targetID, region string) *cloudvm.C
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	hetzner := scopedHetznerFetcher(targetID, region)
 	fetchers := []cloudvm.Fetcher{
-		hetzner,
+		scopedHetznerFetcher(targetID, region),
 		cloudvm.NewAzureFetcher(""),
-		cloudvm.NewAWSFetcher(""),
 		cloudvm.NewGCPFetcher(""),
 		scopedLambdaFetcher(targetID, region),
+	}
+	// AWS live pricing (the Price List Query API) is ~8 sequential CLI calls.
+	// Fetch it when AWS is the target or when comparing all clouds (targetID
+	// empty); skip it for a specific non-AWS target, which keeps the fast
+	// rate-card AWS estimate it always used. (AWS bulk pricing never resolved in
+	// time, so this is no regression — and the fetch runs concurrently with the
+	// other providers, so it adds little wall time.)
+	if targetID == "aws-vm" || targetID == "" {
+		fetchers = append(fetchers, cloudvm.NewAWSFetcher(region))
 	}
 
 	cat, skipped, err := cloudvm.NewLiveCatalog(ctx, fetchers...)

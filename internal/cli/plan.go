@@ -80,7 +80,7 @@ func runPlan(cmd *cobra.Command, args []string) error {
 		return runAIPlan(path, constraints)
 	}
 
-	catalog := loadLiveCatalog(os.Stderr)
+	catalog := loadLiveCatalogScoped(os.Stderr, planFlags.target, "")
 
 	result, err := plan.Build(path, constraints, catalog)
 	if err != nil {

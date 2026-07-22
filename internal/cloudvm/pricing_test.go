@@ -2,11 +2,11 @@ package cloudvm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -152,131 +152,40 @@ func TestAzureFetcher_Fetch(t *testing.T) {
 
 // --- AWS: parser-level tests ------------------------------------------------
 
-func TestAWSFetcher_ParseBulkPriceList(t *testing.T) {
-	// Realistic-shape Bulk Price List doc: products keyed by SKU, terms.OnDemand
-	// keyed by the same SKU pointing at offers → priceDimensions → USD/Hrs.
-	doc := `{
-		"formatVersion": "v1.0",
-		"products": {
-			"SKU_T3MICRO": {
-				"sku": "SKU_T3MICRO",
-				"productFamily": "Compute Instance",
-				"attributes": {
-					"instanceType": "t3.micro",
-					"vcpu": "2",
-					"memory": "1 GiB",
-					"operatingSystem": "Linux",
-					"tenancy": "Shared",
-					"preInstalledSw": "NA",
-					"capacityStatus": "Used",
-					"physicalProcessor": "Intel Skylake"
-				}
-			},
-			"SKU_T4GSMALL": {
-				"sku": "SKU_T4GSMALL",
-				"productFamily": "Compute Instance",
-				"attributes": {
-					"instanceType": "t4g.small",
-					"vcpu": "2",
-					"memory": "2 GiB",
-					"operatingSystem": "Linux",
-					"tenancy": "Shared",
-					"preInstalledSw": "NA",
-					"capacityStatus": "Used",
-					"physicalProcessor": "AWS Graviton2 Processor"
-				}
-			},
-			"SKU_G4DN": {
-				"sku": "SKU_G4DN",
-				"productFamily": "Compute Instance",
-				"attributes": {
-					"instanceType": "g4dn.xlarge",
-					"vcpu": "4",
-					"memory": "16 GiB",
-					"operatingSystem": "Linux",
-					"tenancy": "Shared",
-					"preInstalledSw": "NA",
-					"capacityStatus": "Used",
-					"gpu": "1",
-					"physicalProcessor": "Intel Xeon"
-				}
-			},
-			"SKU_WINDOWS": {
-				"sku": "SKU_WINDOWS",
-				"productFamily": "Compute Instance",
-				"attributes": {
-					"instanceType": "m5.large",
-					"operatingSystem": "Windows",
-					"tenancy": "Shared",
-					"preInstalledSw": "NA",
-					"capacityStatus": "Used"
-				}
-			},
-			"SKU_STORAGE": {
-				"sku": "SKU_STORAGE",
-				"productFamily": "Storage",
-				"attributes": {"volumeType": "gp3"}
-			}
-		},
-		"terms": {
-			"OnDemand": {
-				"SKU_T3MICRO": {
-					"SKU_T3MICRO.JRTCKXETXF": {
-						"priceDimensions": {
-							"SKU_T3MICRO.JRTCKXETXF.6YS6EN2CT7": {
-								"unit": "Hrs",
-								"pricePerUnit": {"USD": "0.0104"}
-							}
-						}
-					}
-				},
-				"SKU_T4GSMALL": {
-					"SKU_T4GSMALL.JRTCKXETXF": {
-						"priceDimensions": {
-							"SKU_T4GSMALL.JRTCKXETXF.6YS6EN2CT7": {
-								"unit": "Hrs",
-								"pricePerUnit": {"USD": "0.0168"}
-							}
-						}
-					}
-				},
-				"SKU_G4DN": {
-					"SKU_G4DN.JRTCKXETXF": {
-						"priceDimensions": {
-							"SKU_G4DN.JRTCKXETXF.6YS6EN2CT7": {
-								"unit": "Hrs",
-								"pricePerUnit": {"USD": "0.526"}
-							}
-						}
-					}
-				}
-			}
-		}
-	}`
-
-	instances, err := parseAWSBulkPriceList(strings.NewReader(doc))
-	require.NoError(t, err)
-	// Expect 3: Windows + Storage should be filtered out.
-	require.Len(t, instances, 3, "Windows and Storage SKUs should be filtered out")
-
-	byName := map[string]InstanceType{}
-	for _, inst := range instances {
-		byName[inst.Name] = inst
+func TestAWSFetcher_ParseQueryEntry(t *testing.T) {
+	// One PriceList entry from `aws pricing get-products`: product+terms, with
+	// terms.OnDemand keyed by offer term code (one level shallower than the Bulk
+	// Price List). Attribute key is "capacitystatus" (lowercase), as AWS returns.
+	entry := func(name, vcpu, mem, proc, gpu, usd string) string {
+		return `{"product":{"productFamily":"Compute Instance","attributes":{` +
+			`"instanceType":"` + name + `","vcpu":"` + vcpu + `","memory":"` + mem + `",` +
+			`"operatingSystem":"Linux","tenancy":"Shared","preInstalledSw":"NA",` +
+			`"capacitystatus":"Used","physicalProcessor":"` + proc + `","gpu":"` + gpu + `"}},` +
+			`"terms":{"OnDemand":{"OFFER":{"priceDimensions":{"DIM":{"unit":"Hrs",` +
+			`"pricePerUnit":{"USD":"` + usd + `"}}}}}}}`
 	}
 
-	t3 := byName["t3.micro"]
+	t3, ok := parseAWSPriceListEntry(entry("t3.micro", "2", "1 GiB", "Intel Skylake", "", "0.0104000000"))
+	require.True(t, ok)
 	assert.Equal(t, ProviderAWS, t3.Provider)
+	assert.Equal(t, "t3.micro", t3.Name)
 	assert.Equal(t, 2, t3.VCPUs)
 	assert.Equal(t, 1.0, t3.MemoryGB)
 	assert.Equal(t, 0.0104, t3.PricePerHour)
 	assert.Equal(t, "x86_64", t3.Arch)
 
-	t4g := byName["t4g.small"]
-	assert.Equal(t, "arm64", t4g.Arch, "Graviton physicalProcessor should normalize to arm64")
+	t4g, ok := parseAWSPriceListEntry(entry("t4g.small", "2", "2 GiB", "AWS Graviton2 Processor", "", "0.0168"))
+	require.True(t, ok)
+	assert.Equal(t, "arm64", t4g.Arch, "Graviton physicalProcessor normalizes to arm64")
 
-	g4dn := byName["g4dn.xlarge"]
-	assert.Equal(t, 1, g4dn.GPUCount)
-	assert.Equal(t, "t4", g4dn.GPUModel)
+	g4, ok := parseAWSPriceListEntry(entry("g4dn.xlarge", "4", "16 GiB", "Intel Xeon", "1", "0.526"))
+	require.True(t, ok)
+	assert.Equal(t, 1, g4.GPUCount)
+	assert.Equal(t, "t4", g4.GPUModel)
+
+	// A non-compute product (e.g. Storage) is rejected.
+	_, ok = parseAWSPriceListEntry(`{"product":{"productFamily":"Storage","attributes":{"volumeType":"gp3"}}}`)
+	assert.False(t, ok)
 }
 
 func TestIsPlausibleHourlyPrice(t *testing.T) {
@@ -300,21 +209,50 @@ func TestIsPlausibleHourlyPrice(t *testing.T) {
 	}
 }
 
-func TestAWSFetcher_Fetch_HitsRegionURL(t *testing.T) {
-	// httptest server stands in for the AWS bulk endpoint. Verifies the
-	// fetcher constructs the right per-region URL.
-	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"products":{},"terms":{"OnDemand":{}}}`)
-	}))
-	defer srv.Close()
+func TestAWSFetcher_Fetch_PaginatesQueryAPI(t *testing.T) {
+	// Two-page get-products response over the runCLI seam: page 1 returns a
+	// NextToken, page 2 doesn't. The fetcher must pass the priced region as a
+	// filter and follow the token, aggregating both pages.
+	entry := func(name, usd string) string {
+		return `{"product":{"productFamily":"Compute Instance","attributes":{` +
+			`"instanceType":"` + name + `","vcpu":"2","memory":"4 GiB",` +
+			`"operatingSystem":"Linux","tenancy":"Shared","preInstalledSw":"NA",` +
+			`"capacitystatus":"Used","physicalProcessor":"Intel"}},` +
+			`"terms":{"OnDemand":{"O":{"priceDimensions":{"D":{"unit":"Hrs",` +
+			`"pricePerUnit":{"USD":"` + usd + `"}}}}}}}`
+	}
+	resp := func(entries []string, next string) []byte {
+		b, _ := json.Marshal(map[string]any{"PriceList": entries, "NextToken": next})
+		return b
+	}
 
-	f := &AWSFetcher{Region: "us-west-2", BaseURL: srv.URL, Client: srv.Client()}
-	_, err := f.Fetch(context.Background())
+	var tokens []string
+	calls := captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		tok := ""
+		for i, a := range args {
+			if a == "--next-token" && i+1 < len(args) {
+				tok = args[i+1]
+			}
+		}
+		tokens = append(tokens, tok)
+		if tok == "" {
+			return resp([]string{entry("m5.large", "0.096")}, "TOK2"), nil
+		}
+		return resp([]string{entry("c6g.large", "0.068")}, ""), nil
+	})
+
+	insts, err := NewAWSFetcher("us-west-2").Fetch(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, "/us-west-2/index.json", gotPath)
+	require.Len(t, insts, 2)
+	assert.Equal(t, []string{"", "TOK2"}, tokens, "page 1 has no token; page 2 follows NextToken")
+
+	sawRegionFilter := false
+	for _, c := range *calls {
+		if slices.Contains(c.args, "Type=TERM_MATCH,Field=regionCode,Value=us-west-2") {
+			sawRegionFilter = true
+		}
+	}
+	assert.True(t, sawRegionFilter, "region must be passed as a regionCode filter, not the endpoint")
 }
 
 // --- GCP: join logic with stub specs + SKUs ---------------------------------
