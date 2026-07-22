@@ -15,6 +15,7 @@ var spotDiscount = map[string]float64{
 	"gcp":   0.30,
 	"aws":   0.35,
 	"azure": 0.40,
+	"oci":   0.50,
 }
 
 // ApplySpot rescales an on-demand estimate to an approximate spot price for a

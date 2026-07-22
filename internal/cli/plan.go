@@ -40,7 +40,7 @@ func init() {
 	planCmd.Flags().Float64Var(&planFlags.maxCost, "max-cost", 0, "maximum estimated cost in USD")
 	planCmd.Flags().StringVar(&planFlags.gpu, "gpu", "", "GPU requirement (e.g. 1, a100:1)")
 	planCmd.Flags().BoolVar(&planFlags.ai, "ai", false, "use AI planner (requires LLM backend)")
-	planCmd.Flags().BoolVar(&planFlags.spot, "spot", false, "price interruptible spot/preemptible instances (aws/gcp/azure)")
+	planCmd.Flags().BoolVar(&planFlags.spot, "spot", false, "price interruptible spot/preemptible instances (aws/gcp/azure/oci)")
 }
 
 func runPlan(cmd *cobra.Command, args []string) error {

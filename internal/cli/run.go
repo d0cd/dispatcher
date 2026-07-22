@@ -62,7 +62,7 @@ func init() {
 	runCmd.Flags().StringVar(&runFlags.allowSSHFrom, "allow-ssh-from", "",
 		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); hetzner-vm and aws-vm")
 	runCmd.Flags().BoolVar(&runFlags.spot, "spot", false,
-		"provision an interruptible spot/preemptible instance (much cheaper, can be reclaimed anytime); aws/gcp/azure. Pair with --retry-transient")
+		"provision an interruptible spot/preemptible instance (much cheaper, can be reclaimed anytime); aws/gcp/azure/oci. Pair with --retry-transient")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -96,7 +96,7 @@ func perRunFirewallSupported(target string) bool {
 // silently ignore --spot, so the CLI rejects it there instead.
 func spotSupported(target string) bool {
 	switch target {
-	case "aws-vm", "gcp-vm", "azure-vm":
+	case "aws-vm", "gcp-vm", "azure-vm", "oci-vm":
 		return true
 	default:
 		return false
@@ -197,7 +197,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// Spot is only meaningful on the hyperscalers; fail closed rather than
 	// silently provision a full-price instance the user asked to be spot.
 	if p.Constraints.Spot && !spotSupported(p.Recommendation.Target) {
-		return fmt.Errorf("--spot is not supported on %s (only aws-vm, gcp-vm, azure-vm provision spot/preemptible instances)", p.Recommendation.Target)
+		return fmt.Errorf("--spot is not supported on %s (only aws-vm, gcp-vm, azure-vm, oci-vm provision spot/preemptible instances)", p.Recommendation.Target)
 	}
 
 	// Show summary

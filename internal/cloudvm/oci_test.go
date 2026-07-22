@@ -81,6 +81,64 @@ func TestOCICreateVM_Argv(t *testing.T) {
 	assert.NotContains(t, a, "--platform-config")
 }
 
+// A spot run launches an OCI preemptible instance that terminates (not just
+// stops) on reclaim, so an ephemeral run leaves nothing billable behind.
+func TestOCICreateVM_Spot_PassesPreemptibleConfig(t *testing.T) {
+	withOCIEnv(t)
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+
+	var launchArgs []string
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "instance launch"):
+			launchArgs = args
+			return []byte(`{"data":{"id":"ocid1.instance.oc1..vvvv"}}`), nil
+		case strings.Contains(joined, "list-vnics"):
+			return []byte(`{"data":[{"public-ip":"203.0.113.7"}]}`), nil
+		default:
+			return []byte(`{"data":{}}`), nil
+		}
+	}
+
+	o := NewOCIProvider("us-phoenix-1")
+	_, err := o.CreateVM(context.Background(), VMOptions{
+		Name: "dispatcher-job", Spot: true,
+		Tags: map[string]string{"dispatcher-run-id": "run_1", "dispatcher": "true"},
+	})
+	require.NoError(t, err)
+
+	a := strings.Join(launchArgs, " ")
+	assert.Contains(t, a, "--preemptible-instance-config")
+	assert.Contains(t, a, "TERMINATE")
+}
+
+func TestOCICreateVM_NonSpot_NoPreemptibleConfig(t *testing.T) {
+	withOCIEnv(t)
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+
+	var launchArgs []string
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "instance launch") {
+			launchArgs = args
+			return []byte(`{"data":{"id":"ocid1.instance.oc1..vvvv"}}`), nil
+		}
+		if strings.Contains(strings.Join(args, " "), "list-vnics") {
+			return []byte(`{"data":[{"public-ip":"203.0.113.7"}]}`), nil
+		}
+		return []byte(`{"data":{}}`), nil
+	}
+
+	_, err := NewOCIProvider("us-phoenix-1").CreateVM(context.Background(), VMOptions{
+		Name: "dispatcher-job",
+		Tags: map[string]string{"dispatcher-run-id": "run_1", "dispatcher": "true"},
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, strings.Join(launchArgs, " "), "--preemptible-instance-config")
+}
+
 func TestOCICreateVM_RequiresOCIDs(t *testing.T) {
 	// No env set → the required OCIDs are missing → fail closed before any CLI call.
 	o := NewOCIProvider("us-phoenix-1")

@@ -22,6 +22,9 @@ func TestApplySpot_DiscountsAndLowersConfidence(t *testing.T) {
 
 	aws := ApplySpot(base, cloudTarget("aws"))
 	assert.InDelta(t, 0.70, aws.Value, 0.001, "aws spot ~35%")
+
+	oci := ApplySpot(base, cloudTarget("oci"))
+	assert.InDelta(t, 1.00, oci.Value, 0.001, "oci preemptible ~50%")
 }
 
 func TestApplySpot_NonSpotProviderUnchanged(t *testing.T) {
