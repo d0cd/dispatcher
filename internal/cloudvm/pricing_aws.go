@@ -67,6 +67,14 @@ func (a *AWSFetcher) Fetch(ctx context.Context) ([]InstanceType, error) {
 
 		out, err := runCLI(ctx, "aws", args...)
 		if err != nil {
+			// Missing creds, a missing aws CLI, or a denied pricing:GetProducts
+			// permission are all "AWS pricing isn't available here" — classify them
+			// as ErrCredentialsMissing so the catalog skips AWS cleanly and falls
+			// back to the rate-card estimate, rather than calling a permanent auth
+			// failure "transient".
+			if isAWSCredentialError(err) {
+				return nil, fmt.Errorf("%w: aws pricing: %v", ErrCredentialsMissing, err)
+			}
 			return nil, fmt.Errorf("aws pricing get-products: %w", err)
 		}
 
@@ -168,6 +176,30 @@ func extractAWSOnDemandPrice(p awsQueryProduct) (float64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// isAWSCredentialError reports whether an `aws pricing` failure is due to
+// missing/invalid credentials, a denied pricing:GetProducts permission, or a
+// missing aws CLI — as opposed to a genuine transient failure (network blip,
+// throttling) that a retry could clear.
+func isAWSCredentialError(err error) bool {
+	s := strings.ToLower(err.Error())
+	for _, m := range []string{
+		"unable to locate credentials",
+		"unrecognizedclientexception",
+		"invalidclienttokenid",
+		"signaturedoesnotmatch",
+		"expiredtoken",
+		"accessdenied",
+		"not authorized to perform: pricing",
+		"could not be found",        // config profile () could not be found
+		"executable file not found", // aws CLI absent
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // isPlausibleHourlyPrice rejects on-demand hourly prices outside the band any

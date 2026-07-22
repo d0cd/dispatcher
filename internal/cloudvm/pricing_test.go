@@ -255,6 +255,34 @@ func TestAWSFetcher_Fetch_PaginatesQueryAPI(t *testing.T) {
 	assert.True(t, sawRegionFilter, "region must be passed as a regionCode filter, not the endpoint")
 }
 
+// Missing creds / the pricing:GetProducts permission / a missing aws CLI classify
+// as ErrCredentialsMissing, so the catalog skips AWS cleanly ("no credentials
+// configured") and degrades to the rate-card estimate — rather than mislabeling
+// a permanent auth failure as a transient error.
+func TestAWSFetcher_Fetch_CredentialErrorsSkipCleanly(t *testing.T) {
+	for _, stderr := range []string{
+		"Unable to locate credentials. You can configure credentials by running \"aws configure\".",
+		"An error occurred (UnrecognizedClientException) when calling the GetProducts operation: The security token included in the request is invalid.",
+		"An error occurred (AccessDeniedException) when calling the GetProducts operation: User is not authorized to perform: pricing:GetProducts",
+		"aws: executable file not found in $PATH",
+	} {
+		captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) {
+			return nil, errors.New(stderr)
+		})
+		_, err := NewAWSFetcher("us-east-1").Fetch(context.Background())
+		assert.ErrorIs(t, err, ErrCredentialsMissing, "stderr=%q should classify as missing creds", stderr)
+	}
+}
+
+func TestAWSFetcher_Fetch_TransientErrorStaysTransient(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("Could not connect to the endpoint URL: https://api.pricing.us-east-1.amazonaws.com/")
+	})
+	_, err := NewAWSFetcher("us-east-1").Fetch(context.Background())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrCredentialsMissing, "a network error must not be mislabeled as missing creds")
+}
+
 // --- GCP: join logic with stub specs + SKUs ---------------------------------
 
 func TestGCPFetcher_JoinSpecsAndPrices(t *testing.T) {
