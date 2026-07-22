@@ -130,6 +130,7 @@ func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) 
 		SSHKeyPath:   pubKeyPath,
 		UserData:     userData,
 		AllowSSHFrom: p.Constraints.AllowSSHFrom,
+		Spot:         p.Constraints.Spot,
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",

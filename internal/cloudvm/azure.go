@@ -128,6 +128,13 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 	}
 	args = append(args, confArgs...)
 
+	// Spot: interruptible Spot priority. --max-price -1 caps at the on-demand
+	// price (evicted on capacity, never on price); --eviction-policy Delete leaves
+	// nothing behind when reclaimed.
+	if opts.Spot {
+		args = append(args, "--priority", "Spot", "--eviction-policy", "Delete", "--max-price", "-1")
+	}
+
 	if opts.UserData != "" {
 		// Azure CLI's `--custom-data @<path>` reads from a file. Keeps the
 		// (potentially large, potentially shell-special) blob entirely off

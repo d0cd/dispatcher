@@ -36,6 +36,7 @@ var runFlags struct {
 	retryTransient bool
 	watchdogTTL    string
 	allowSSHFrom   string
+	spot           bool
 }
 
 var runCmd = &cobra.Command{
@@ -60,6 +61,8 @@ func init() {
 		"cloud VM self-destruct timer if dispatcher dies (e.g. 15m, 2h); default 30m")
 	runCmd.Flags().StringVar(&runFlags.allowSSHFrom, "allow-ssh-from", "",
 		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); hetzner-vm and aws-vm")
+	runCmd.Flags().BoolVar(&runFlags.spot, "spot", false,
+		"provision an interruptible spot/preemptible instance (much cheaper, can be reclaimed anytime); aws/gcp/azure. Pair with --retry-transient")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -82,6 +85,18 @@ func parseOptimize(s string) (types.OptimizeGoal, error) {
 func perRunFirewallSupported(target string) bool {
 	switch target {
 	case "hetzner-vm", "aws-vm":
+		return true
+	default:
+		return false
+	}
+}
+
+// spotSupported reports whether a target's provider implements interruptible
+// spot/preemptible provisioning. Only the hyperscalers do; other targets would
+// silently ignore --spot, so the CLI rejects it there instead.
+func spotSupported(target string) bool {
+	switch target {
+	case "aws-vm", "gcp-vm", "azure-vm":
 		return true
 	default:
 		return false
@@ -149,6 +164,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		WatchdogTTL:            watchdogTTL,
 		RetryTransientFailures: runFlags.retryTransient,
 		AllowSSHFrom:           runFlags.allowSSHFrom,
+		Spot:                   runFlags.spot,
 	}
 
 	// Generate plan
@@ -176,6 +192,12 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// provisioning (or silently ignoring the requested restriction).
 	if runFlags.allowSSHFrom != "" && !perRunFirewallSupported(p.Recommendation.Target) {
 		return fmt.Errorf("--allow-ssh-from is not supported on %s (only hetzner-vm and aws-vm implement a per-run SSH firewall) — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
+	}
+
+	// Spot is only meaningful on the hyperscalers; fail closed rather than
+	// silently provision a full-price instance the user asked to be spot.
+	if p.Constraints.Spot && !spotSupported(p.Recommendation.Target) {
+		return fmt.Errorf("--spot is not supported on %s (only aws-vm, gcp-vm, azure-vm provision spot/preemptible instances)", p.Recommendation.Target)
 	}
 
 	// Show summary

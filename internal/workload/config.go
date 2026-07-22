@@ -78,9 +78,13 @@ type DispatcherConfig struct {
 	// Confidential requests a TEE-backed (memory-encrypted) VM. Presence means
 	// "required"; the block selects the TEE type and attestation policy.
 	Confidential *DispatchConfidentialConfig `yaml:"confidential,omitempty"`
-	MaxCost      float64                     `yaml:"maxCost,omitempty"`
-	MaxTime      string                      `yaml:"maxTime,omitempty"`
-	Target       string                      `yaml:"target,omitempty"`
+	// Spot requests an interruptible spot/preemptible instance (much cheaper, can
+	// be reclaimed anytime). Only for interruption-tolerant work; the --spot flag
+	// also sets it.
+	Spot    bool    `yaml:"spot,omitempty"`
+	MaxCost float64 `yaml:"maxCost,omitempty"`
+	MaxTime string  `yaml:"maxTime,omitempty"`
+	Target  string  `yaml:"target,omitempty"`
 	// Region pins the cloud region/zone (overridden by the --region flag).
 	Region string `yaml:"region,omitempty"`
 	// Outputs lists workload-relative paths that should be retrieved before
@@ -160,7 +164,7 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		dec.KnownFields(true)
 		var cfg DispatcherConfig
 		if err := dec.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, cpu, memory, arch, gpu, service, sandbox, confidential, shard, aggregate, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
+			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, cpu, memory, arch, gpu, service, sandbox, confidential, spot, shard, aggregate, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
 		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate %s: %w", path, err)

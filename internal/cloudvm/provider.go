@@ -65,6 +65,11 @@ type VMOptions struct {
 	// direct SNP+vTPM measured path uses an unsigned custom UKI image, which needs
 	// Secure Boot off; attestation there rests on PCR11, not Secure Boot.
 	SecureBootDisabled bool
+	// Spot requests an interruptible spot/preemptible instance (AWS spot, GCP SPOT
+	// provisioning, Azure Spot priority). Far cheaper but the provider can reclaim
+	// it at any time — only for interruption-tolerant work. The provider maps it to
+	// its market/priority flags; a provider without spot support ignores it.
+	Spot bool
 }
 
 // VMInfo describes a provisioned VM.

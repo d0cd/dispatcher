@@ -65,6 +65,9 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		if !constraints.RetryTransientFailures && cfg.RetryTransientFailures != nil {
 			constraints.RetryTransientFailures = *cfg.RetryTransientFailures
 		}
+		if !constraints.Spot && cfg.Spot {
+			constraints.Spot = true
+		}
 	}
 
 	// Apply GPU override from constraints

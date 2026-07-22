@@ -67,6 +67,11 @@ type PlanConstraints struct {
 	// CLI accepts --allow-ssh-from for both; GCP, Azure, Lima, and Kubernetes
 	// reject a non-empty value.
 	AllowSSHFrom string `yaml:"allowSshFrom,omitempty" json:"allowSshFrom,omitempty"`
+	// Spot requests an interruptible spot/preemptible instance (AWS spot, GCP SPOT,
+	// Azure Spot). Much cheaper but the provider can reclaim it at any time, so it
+	// is only for interruption-tolerant work; pair with retryTransient to
+	// re-provision on reclaim. Ignored by targets without spot support.
+	Spot bool `yaml:"spot,omitempty" json:"spot,omitempty"`
 }
 
 // Recommendation is the primary target recommendation.

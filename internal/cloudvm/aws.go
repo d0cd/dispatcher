@@ -164,6 +164,13 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	args = append(args, confArgs...)
 
+	// Spot: request an interruptible instance at the spot price (defaults to a
+	// one-time request capped at the on-demand price, so it's evicted on capacity,
+	// not on price spikes). MarketType=spot is the documented shorthand structure.
+	if opts.Spot {
+		args = append(args, "--instance-market-options", "MarketType=spot")
+	}
+
 	// A Nitro Enclaves parent needs enclave support enabled at launch; the parent
 	// is a normal instance (no memory encryption) — the measured enclave is the TEE.
 	if opts.EnclaveEnabled {

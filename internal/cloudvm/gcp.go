@@ -101,11 +101,17 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	args = append(args, gcpConfidentialArgs(opts)...)
 
-	// GPU VMs can't live-migrate, so GCP requires TERMINATE on host maintenance
-	// or rejects the create. Confidential already sets it (above); apply it here
-	// for GPU machine families when it hasn't been set.
-	if opts.ConfidentialType == "" && gcpIsGPUMachine(instanceType) {
+	// GPU VMs and SPOT instances can't live-migrate, so GCP requires TERMINATE on
+	// host maintenance or rejects the create. Confidential already sets it (above);
+	// apply it here for GPU families or spot when it hasn't been set.
+	if opts.ConfidentialType == "" && (gcpIsGPUMachine(instanceType) || opts.Spot) {
 		args = append(args, "--maintenance-policy=TERMINATE")
+	}
+
+	// Spot: interruptible provisioning at the spot price. The VM is deleted (not
+	// stopped) on preemption, so an ephemeral run leaves nothing behind.
+	if opts.Spot {
+		args = append(args, "--provisioning-model=SPOT", "--instance-termination-action=DELETE")
 	}
 
 	if g.project != "" {
