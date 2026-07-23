@@ -22,11 +22,6 @@ type candidate struct {
 	cost   types.CostEstimate
 }
 
-// Build generates a complete plan for the workload at the given path.
-//
-// catalog supplies live cloud pricing; pass nil when no catalog is available
-// (offline, tests). Cloud-vm targets without catalog data are surfaced with
-// ConfidenceUnknown rather than a misleading static estimate.
 // estimateCost prices a target, applying the spot discount when the run requested
 // an interruptible instance (a spot-incapable provider is unaffected).
 func estimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudvm.Catalog, spot bool) types.CostEstimate {
@@ -37,6 +32,11 @@ func estimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudv
 	return est
 }
 
+// Build generates a complete plan for the workload at the given path.
+//
+// catalog supplies live cloud pricing; pass nil when no catalog is available
+// (offline, tests). Cloud-vm targets without catalog data are surfaced with
+// ConfidenceUnknown rather than a misleading static estimate.
 func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Catalog) (*types.Plan, error) {
 	// Inspect workload (includes dispatcher.yaml overrides)
 	spec, err := workload.InspectCodebase(path)

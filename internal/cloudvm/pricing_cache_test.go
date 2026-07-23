@@ -86,6 +86,25 @@ func TestCachedFetcher_ServesStaleOnFetchError(t *testing.T) {
 	assert.Equal(t, 1, failing.calls)
 }
 
+// A permanent creds/permission failure must surface (so the provider shows as
+// skipped) even when a stale cache exists — stale-on-failure is for transient
+// outages, not for masking a removed credential.
+func TestCachedFetcher_MissingCredsNotMaskedByStaleCache(t *testing.T) {
+	dir := t.TempDir()
+	base := time.Unix(3_000_000, 0).UTC()
+	clock := base
+	seed := &stubFetcher{provider: ProviderAWS, instances: sampleInstances()}
+	c := &cachedFetcher{inner: seed, region: "r", dir: dir, ttl: time.Hour, now: func() time.Time { return clock }}
+	_, err := c.Fetch(context.Background())
+	require.NoError(t, err)
+
+	clock = base.Add(48 * time.Hour) // stale
+	creds := &stubFetcher{provider: ProviderAWS, err: ErrCredentialsMissing}
+	c2 := &cachedFetcher{inner: creds, region: "r", dir: dir, ttl: time.Hour, now: func() time.Time { return clock }}
+	_, err = c2.Fetch(context.Background())
+	assert.ErrorIs(t, err, ErrCredentialsMissing, "missing creds must not be masked by a stale cache")
+}
+
 func TestCachedFetcher_FetchErrorNoCachePropagates(t *testing.T) {
 	inner := &stubFetcher{provider: ProviderAWS, err: ErrCredentialsMissing}
 	c := &cachedFetcher{inner: inner, region: "r", dir: t.TempDir(), ttl: time.Hour, now: time.Now}

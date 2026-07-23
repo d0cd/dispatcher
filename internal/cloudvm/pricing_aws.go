@@ -264,6 +264,7 @@ func parseAWSMemoryGB(s string) float64 {
 	if i := strings.IndexAny(s, " "); i > 0 {
 		s = s[:i]
 	}
+	s = strings.ReplaceAll(s, ",", "") // high-memory instances: "1,952 GiB"
 	v, _ := strconv.ParseFloat(s, 64)
 	return v
 }

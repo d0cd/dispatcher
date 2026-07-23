@@ -3,6 +3,7 @@ package cloudvm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,10 +63,11 @@ func (c *cachedFetcher) Fetch(ctx context.Context) ([]InstanceType, error) {
 
 	live, err := c.inner.Fetch(ctx)
 	if err != nil {
-		// Live fetch failed. A stale cache is better than dropping the provider,
-		// so serve it if we have one; otherwise surface the error (so a genuine
-		// creds/permission problem still shows up as skipped).
-		if ok {
+		// A missing/invalid credential or denied permission is permanent, not a
+		// blip — surface it (so the provider shows as skipped) rather than masking
+		// it behind stale prices forever. For any other (transient) failure, a
+		// stale cache beats dropping the provider.
+		if ok && !errors.Is(err, ErrCredentialsMissing) {
 			return cached, nil
 		}
 		return nil, err
@@ -102,10 +104,23 @@ func (c *cachedFetcher) writeCache(instances []InstanceType) {
 	if err != nil {
 		return
 	}
-	// Best-effort, atomic via rename; a cache write failure must never break pricing.
-	tmp := c.path() + ".tmp"
-	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, c.path())
+	// Best-effort, atomic via rename. A unique temp name (not a fixed <path>.tmp)
+	// keeps two concurrent writers for the same provider/region from corrupting
+	// each other's partial write. A cache write failure must never break pricing.
+	f, err := os.CreateTemp(c.dir, string(c.inner.Provider())+"-*.tmp")
+	if err != nil {
+		return
+	}
+	tmp := f.Name()
+	_, werr := f.Write(b)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp)
+		return
+	}
+	_ = os.Chmod(tmp, 0o600)
+	if os.Rename(tmp, c.path()) != nil {
+		_ = os.Remove(tmp)
 	}
 }
 

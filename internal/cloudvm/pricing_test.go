@@ -192,6 +192,11 @@ func TestAWSFetcher_ParseQueryEntry(t *testing.T) {
 	// A non-compute product (e.g. Storage) is rejected.
 	_, ok = parseAWSPriceListEntry(`{"product":{"productFamily":"Storage","attributes":{"volumeType":"gp3"}}}`)
 	assert.False(t, ok)
+
+	// High-memory instances report memory with a thousands comma ("1,952 GiB").
+	u, ok := parseAWSPriceListEntry(entry("u-6tb1.56xlarge", "224", "1,952 GiB", "Intel Xeon", "", "54.6"))
+	require.True(t, ok)
+	assert.Equal(t, 1952.0, u.MemoryGB)
 }
 
 func TestIsPlausibleHourlyPrice(t *testing.T) {

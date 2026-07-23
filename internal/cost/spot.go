@@ -18,10 +18,12 @@ var spotDiscount = map[string]float64{
 	"oci":   0.50,
 }
 
-// ApplySpot rescales an on-demand estimate to an approximate spot price for a
-// spot-capable cloud target and drops confidence to Low. A target whose provider
-// has no known spot factor (non-cloud, or a provider without spot support) is
-// returned unchanged.
+// ApplySpot rescales an on-demand estimate to a spot price for a spot-capable
+// cloud target. It prefers the priced instance's live spot ratio (from the
+// catalog) and keeps the estimate's confidence, since that's grounded in a real
+// recent price; otherwise it applies the rough per-provider discount factor and
+// drops confidence to Low. A target whose provider has no known spot factor
+// (non-cloud, or a provider without spot support) is returned unchanged.
 func ApplySpot(est types.CostEstimate, t types.TargetConfig) types.CostEstimate {
 	// Prefer a live spot ratio the catalog sourced for the priced instance
 	// (GCP preemptible SKUs, AWS spot-price-history) over the rough factor.
