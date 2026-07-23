@@ -14,6 +14,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// maxShardCount bounds a fixed fan-out so a huge shard.count can't OOM-allocate
+// the assignment slice before any run starts. Far above any real fan-out.
+const maxShardCount = 10000
+
 // envRefPattern matches ${VAR} and ${VAR:-default}. Only the braced form is
 // expanded — a bare $VAR (e.g. inside a shell command meant to expand on the
 // remote host) is left untouched.
@@ -154,7 +158,13 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			// A config that exists but can't be read (permissions, a directory, a
+			// broken symlink) must NOT be treated as "no config" — that would
+			// silently void cost caps and the confidential requirement. Fail loudly.
+			return nil, fmt.Errorf("read %s: %w", path, err)
 		}
 		data, err = expandEnvRefs(data)
 		if err != nil {
@@ -264,6 +274,12 @@ func (c *DispatcherConfig) Validate() error {
 	if c.Shard != nil {
 		if c.Shard.Count < 0 {
 			return fmt.Errorf("shard.count must be non-negative (got %d)", c.Shard.Count)
+		}
+		// Bound the fan-out: shard.Plan allocates a slice of this size, so an
+		// absurd value (e.g. math.MaxInt) would OOM before any run starts. No real
+		// fan-out needs thousands of full runs.
+		if c.Shard.Count > maxShardCount {
+			return fmt.Errorf("shard.count %d exceeds the maximum of %d", c.Shard.Count, maxShardCount)
 		}
 		if c.Shard.MaxParallel < 0 {
 			return fmt.Errorf("shard.maxParallel must be non-negative (got %d)", c.Shard.MaxParallel)

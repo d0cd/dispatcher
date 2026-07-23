@@ -28,6 +28,9 @@ type azureSNPDeps struct {
 // SSH-VM flow, provisioning a CVM from the pinned measured image (Secure Boot off,
 // unsigned UKI) and verifying the direct SNP+vTPM evidence, pinning PCR11.
 func executeAzureSNPConfidential(ctx context.Context, d azureSNPDeps, p *types.Plan) (*confidentialRunState, error) {
+	if err := enforceWorkloadMeasurements(p.Workload.Requirements.Confidential, d.pcrs[11]); err != nil {
+		return nil, err
+	}
 	deps := sshConfidentialDeps{
 		provider: d.provider, image: d.image, confidential: "sev-snp", secureBootOff: true,
 		sshPubKey: d.sshPubKey, sshUser: d.sshUser,

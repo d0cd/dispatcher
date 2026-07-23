@@ -43,6 +43,9 @@ type nitroDeps struct {
 // verification is the Nitro attestation document (COSE → pinned Root-G1 + PCR0)
 // over the parent's vsock proxy.
 func executeNitroConfidential(ctx context.Context, d nitroDeps, p *types.Plan) (*confidentialRunState, error) {
+	if err := enforceWorkloadMeasurements(p.Workload.Requirements.Confidential, d.pcr0); err != nil {
+		return nil, err
+	}
 	deps := sshConfidentialDeps{
 		provider: d.provider, image: d.image, enclave: true, instanceType: d.instanceType,
 		sshPubKey: d.sshPubKey, sshKeyPath: d.sshKeyPath, sshUser: d.sshUser,

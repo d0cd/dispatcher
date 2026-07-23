@@ -124,6 +124,11 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 	if err != nil {
 		return nil, fmt.Errorf("build confidential image: %w", err)
 	}
+	// Enforce the workload's measurement allowlist (if any) against the digest we
+	// will attest, before provisioning — a documented control, not a no-op.
+	if err := enforceWorkloadMeasurements(w.Requirements.Confidential, imageDigest); err != nil {
+		return nil, err
+	}
 
 	region := p.Constraints.Region
 	opts := VMOptions{
@@ -131,9 +136,10 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 		Region:                 region,
 		ConfidentialType:       "sev-snp",
 		ConfidentialSpaceImage: imageRef,
-		// A bounded run caps the instance lifetime at the source too, so a CLI
-		// crash that skips the deferred teardown can't leak a billing SEV VM.
-		MaxLifetimeSeconds: int(p.Constraints.MaxDuration.Seconds()),
+		// Always cap the instance lifetime so a CLI crash that skips the deferred
+		// teardown can't leak a billing SEV VM. Use the run's MaxDuration when set,
+		// else the watchdog TTL / a default — never 0 (uncapped).
+		MaxLifetimeSeconds: int(confidentialLifetime(p.Constraints).Seconds()),
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",
@@ -298,4 +304,17 @@ func (a *ConfidentialSpaceAdapter) Cleanup(ctx context.Context, h *adapter.RunHa
 		}
 	}
 	return &adapter.CleanupResult{Success: true, ResourcesCleaned: cleaned}, nil
+}
+
+// confidentialLifetime is the hard instance-lifetime cap for a confidential run:
+// the explicit MaxDuration when set, else the watchdog TTL, else the default —
+// never 0, which would leave a billing SEV VM uncapped.
+func confidentialLifetime(c types.PlanConstraints) time.Duration {
+	if c.MaxDuration > 0 {
+		return c.MaxDuration
+	}
+	if c.WatchdogTTL > 0 {
+		return c.WatchdogTTL
+	}
+	return DefaultWatchdogTTL
 }

@@ -17,6 +17,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// After Wait consumes an approval and the run proceeds, a late `approve --deny`
+// can't stop it, so the gate must refuse the decision ("already decided") rather
+// than accept it, ack "ok", and silently discard it.
+func TestGate_LateDenyRefusedAfterApproval(t *testing.T) {
+	newTestState(t)
+	g, err := NewGate("run_late", []types.PolicyRequirement{{Name: "x"}})
+	require.NoError(t, err)
+	defer g.Close()
+
+	rec, err := g.Wait(context.Background(), func([]types.PolicyRequirement) (string, error) { return "me", nil })
+	require.NoError(t, err)
+	require.Equal(t, DecisionApproved, rec.Decision)
+
+	accepted := g.settle(decisionMsg{decision: DecisionDenied, decider: "late"})
+	assert.False(t, accepted, "a late deny after the run was approved must be refused, not accepted-and-discarded")
+}
+
 func newTestState(t *testing.T) {
 	t.Helper()
 	t.Setenv("DISPATCHER_HOME", t.TempDir())

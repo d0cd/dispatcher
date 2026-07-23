@@ -72,9 +72,12 @@ type ConfidentialRequirement struct {
 	// Attestation is "required" (default — the run only proceeds after the TEE
 	// report verifies) or "off" (provision the TEE but skip verification).
 	Attestation string `yaml:"attestation,omitempty" json:"attestation,omitempty"`
-	// Measurements is the EXACT allowlist of acceptable launch measurements (hex)
-	// the verifier enforces (R7). An empty allowlist fails closed under
-	// attestation: required — there is no genuine measurement to trust.
+	// Measurements is the workload author's allowlist of acceptable launch
+	// measurements (hex; a CS image digest may include a "sha256:" prefix). When
+	// set, it is enforced as an ADDITIONAL constraint on top of the operator's
+	// pins: a confidential run fails closed before provisioning unless the
+	// operator-pinned measurement it will attest is in this list. Empty means the
+	// operator pins are authoritative (no extra constraint).
 	Measurements []string `yaml:"measurements,omitempty" json:"measurements,omitempty"`
 	// MinTCB is the minimum acceptable reported TCB/firmware version. Reports
 	// below it are rejected as running known-vulnerable platform firmware.
