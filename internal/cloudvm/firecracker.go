@@ -305,11 +305,14 @@ func (f *FirecrackerProvider) CreateVM(ctx context.Context, opts VMOptions) (ret
 		}
 	}
 
-	// 3. Host networking: tap on a per-run /30 + NAT for guest egress.
+	// 3. Host networking: tap on a per-run /30 + NAT for guest egress. Arm the
+	// teardown BEFORE setup so a failure PARTWAY through (tap created, a NAT rule
+	// not) still tears down the privileged host state it left behind; teardown is
+	// idempotent/best-effort, so arming it early is safe even if nothing was made.
+	netUp = true
 	if err := fcSetupNetwork(ctx, tap, hostIP, cidr, dir); err != nil {
 		return nil, err
 	}
-	netUp = true
 
 	// 4. Write the machine config (kernel ip= gives the guest its address).
 	spec := firecrackerVMSpec{

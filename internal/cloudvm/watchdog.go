@@ -27,14 +27,16 @@ const watchdogDeadlinePath = "/var/lib/dispatcher/watchdog-deadline"
 // re-launched after a reboot and re-reads the persisted deadline — shutting
 // down immediately if the deadline already passed.
 //
-// AZURE CAVEAT: the self-destruct is a guest-side `shutdown -h now`, which on
-// Hetzner/AWS/GCP stops compute billing. On Azure a guest halt leaves the VM
-// "Stopped (allocated)" — still fully compute-billing; only a control-plane
-// `az vm deallocate` stops charges, which a credential-less guest cannot call.
-// So on Azure this caps the OS but NOT compute cost; the deallocating backstop
-// is `dispatcher gc` (which reaps stopped-but-allocated Azure VMs). Making the
-// Azure watchdog auto-deallocate (managed identity + IMDS token → REST) is
-// tracked in ROADMAP.
+// BILLING CAVEAT: the self-destruct is a guest-side `shutdown -h now`, which on
+// AWS/GCP stops compute billing. On Azure a guest halt leaves the VM "Stopped
+// (allocated)" — still fully compute-billing; only a control-plane `az vm
+// deallocate` stops charges, which a credential-less guest cannot call. Hetzner
+// Cloud bills a server for as long as it EXISTS, running or off, so a guest halt
+// does NOT stop Hetzner billing either. On both Azure and Hetzner the guest halt
+// caps the OS but NOT compute cost; the deleting/deallocating backstop is
+// `dispatcher gc` (it reaps stopped-but-allocated Azure VMs and powered-off
+// Hetzner servers by their dispatcher label). Auto-stop from the guest (managed
+// identity / API token → REST) is tracked in ROADMAP.
 func WatchdogCloudInit(initialTTL time.Duration, loginUser string) string {
 	ttlSeconds := int(initialTTL.Seconds())
 	// cloud-init runs as root, so the deadline file it writes is root-owned.

@@ -487,6 +487,12 @@ func (e *Executor) startEphemeralWatchdog(ctx context.Context, r *Run,
 			case <-heartbeatCtx.Done():
 				return
 			case <-ticker.C:
+				// Once the budget tripped, stop renewing so the VM self-destructs at
+				// its watchdog TTL even if the immediate terminate failed — never
+				// keep renewing the deadline of an over-budget VM.
+				if r.GetState() == types.RunStateBudgetExceeded {
+					return
+				}
 				renew()
 			}
 		}
