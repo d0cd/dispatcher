@@ -93,9 +93,9 @@ only if control-plane starvation is ever actually observed).
 
 | Item | Effort | Impact |
 |---|---|---|
-| **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. At minimum, warn when `outputs:` is set but unretrievable. | M | Medium |
+| **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. (The warning when `outputs:` is set on an unretrievable target is implemented as the `outputs-unretrievable` risk; actual collection remains.) | M | Medium |
 | **Per-run SSH firewall beyond Hetzner + AWS** — `--allow-ssh-from` is honored end-to-end on hetzner-vm and aws-vm (per-run firewall / security group); GCP/Azure/Lima/Kubernetes still reject it — no per-run firewall (Azure `az vm create` opens tcp/22 by default; a scoped NSG rule is unimplemented; GCP's additive default-allow-ssh can't be subtracted). Add the GCP/Azure NSG/firewall rules. | S | Low |
-| **Spot/preemptible support** — lowest-cost-success is the headline and the planner advises spot, but there's no spot provisioning. Surface as "variable/evictable, not estimable" rather than a wrong precise price. | L | Medium |
+| **Spot/preemptible support** — delivered end-to-end: a `--spot` flag on plan/run, real provisioning on AWS/GCP/Azure/OCI, live spot pricing via `SpotRatio`/`ApplySpot`, and reclaim detection in the adapter. | — | Done |
 
 ## Confidential computing (secure jobs)
 
@@ -230,8 +230,8 @@ recoverable artifact collection, control-plane CPU headroom, kernel OOM evidence
 signal-exit retry classification, and the URI+digest bounded source preflight, plus
 the opt-in live stress lane. Remaining priorities:
 
-1. **Candidate backends** — **Oracle (OCI)** is built but gated experimental
-   (`DISPATCHER_OCI_EXPERIMENTAL`) pending a live-tenancy validation; then **Lambda
+1. **Candidate backends** — **Oracle (OCI)** ships enabled as a plain provisioning
+   target (no confidential capability); then **Lambda
    Cloud**, which establishes the reusable REST `Provider` pattern (every current
    backend shells out to a CLI) and adds cheap on-demand H100/A100.
 2. **Low-latency** — cloud-native fast backend (prebaked images / warm pools) +

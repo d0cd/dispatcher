@@ -273,7 +273,8 @@ warned.
   (`atls_validators.go`): the SEV-SNP hardware report (hand-rolled stdlib on the
   azure-snp path, `snp.go`), a COSE chain to the pinned Nitro root on the nitro path,
   and token JWS for GCP Confidential Space (`go-jose/v4`, see `internal/attest/jws.go`);
-  shared nonce/measurement/policy/binding checks via `applyPolicy`. Each validator
+  shared nonce/measurement/policy/binding checks via `AttestValidator.Validate`
+  (`atls_validators.go`). Each validator
   verifies evidence supplied by the attested TLS exchange.
 - **Disk-at-rest — allow both, warn (R10/N1).** Confidential disk where the provider
   offers it; elsewhere run but warn + record that disk-at-rest isn't host-opaque.

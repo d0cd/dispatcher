@@ -113,6 +113,7 @@ Manage the measured-image pins that back attested confidential runs (see
 | `gcp-vm` | builtin | `gcloud` |
 | `azure-vm` | builtin | `az` |
 | `hetzner-vm` | builtin | `hcloud` |
+| `oci-vm` | builtin | `oci` CLI |
 | `lambda-vm` | builtin | `DISPATCHER_LAMBDA_API_KEY` (Lambda Cloud REST API; GPU) |
 
 `lambda-vm` is dispatcher's first REST-based provider — it talks to the Lambda
