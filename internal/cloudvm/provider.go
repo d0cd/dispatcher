@@ -91,10 +91,15 @@ type VMInfo struct {
 	// VM. Lima uses the host user's name; cloud VMs use a provider-
 	// specific default ("ubuntu", "ec2-user", "dispatcher", etc.) and let
 	// the adapter Config supply it.
-	SSHUser   string
-	State     VMState
-	CreatedAt time.Time
-	Tags      map[string]string
+	SSHUser string
+	State   VMState
+	// InstanceType, when non-empty, is the size/shape the provider ACTUALLY
+	// launched — which can differ from the requested one (e.g. Azure substitutes
+	// an available size for an offer-restricted one). The adapter records it in
+	// run state so status/diagnose/gc reflect the real VM. Empty = same as requested.
+	InstanceType string
+	CreatedAt    time.Time
+	Tags         map[string]string
 }
 
 // VMState represents the VM lifecycle state.

@@ -114,6 +114,16 @@ func (a *CloudVMAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	return nil // VM creation happens in Execute
 }
 
+// effectiveInstanceType records the size the provider actually launched. It
+// prefers the provider-reported type (Azure reports a substituted size when the
+// requested one was offer-restricted) and falls back to what was requested.
+func effectiveInstanceType(vmInfo *VMInfo, opts VMOptions) string {
+	if vmInfo != nil && vmInfo.InstanceType != "" {
+		return vmInfo.InstanceType
+	}
+	return opts.InstanceType
+}
+
 // buildVMOptions assembles the provisioning request for a plan. InstanceType
 // comes from the recommended target's priced estimate, so the VM that launches
 // matches the one that was costed; an empty value (non-catalog estimate) lets
@@ -276,7 +286,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 		SSHUser:       effectiveUser,
 		SSHPort:       sshPort,
 		Region:        a.config.Region,
-		InstanceType:  opts.InstanceType,
+		InstanceType:  effectiveInstanceType(vmInfo, opts),
 		RemoteDir:     remoteDir,
 		LogPath:       remoteDir + "/dispatcher.log",
 		CreatedAt:     time.Now().UTC(),

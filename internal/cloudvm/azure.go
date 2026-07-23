@@ -201,6 +201,7 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 					}
 					return nil, fmt.Errorf("azure: substitute size %s for unavailable %s also failed: %w", alt, instanceType, err)
 				}
+				instanceType = alt // the VM that actually launched, for the run state
 			} else {
 				return nil, err
 			}
@@ -218,12 +219,13 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 	}
 
 	return &VMInfo{
-		ID:        opts.Name, // Azure uses name for most operations
-		Name:      opts.Name,
-		IP:        result.PublicIpAddress,
-		State:     VMStateRunning,
-		CreatedAt: time.Now().UTC(),
-		Tags:      opts.Tags,
+		ID:           opts.Name, // Azure uses name for most operations
+		Name:         opts.Name,
+		IP:           result.PublicIpAddress,
+		State:        VMStateRunning,
+		InstanceType: instanceType, // the size actually launched (may be a substitute)
+		CreatedAt:    time.Now().UTC(),
+		Tags:         opts.Tags,
 	}, nil
 }
 

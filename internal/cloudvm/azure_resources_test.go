@@ -169,6 +169,7 @@ func TestAzureCreateVM_SubstitutesRestrictedGeneralPurpose(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "203.0.113.9", vm.IP)
+	assert.Equal(t, "Standard_D2als_v7", vm.InstanceType, "VMInfo reports the size actually launched")
 	require.Len(t, createSizes, 2)
 	assert.Equal(t, "Standard_B2s", createSizes[0])
 	assert.Equal(t, "Standard_D2als_v7", createSizes[1], "retry uses the available general-purpose substitute")
