@@ -19,18 +19,20 @@ var spotDiscount = map[string]float64{
 }
 
 // ApplySpot rescales an on-demand estimate to a spot price for a spot-capable
-// cloud target. It prefers the priced instance's live spot ratio (from the
-// catalog) and keeps the estimate's confidence, since that's grounded in a real
-// recent price; otherwise it applies the rough per-provider discount factor and
-// drops confidence to Low. A target whose provider has no known spot factor
+// cloud target and drops confidence to Low. It prefers the priced instance's
+// spot ratio sourced from the catalog (more accurate than the rough per-provider
+// factor) but confidence stays Low either way: spot prices fluctuate and the
+// catalog price may itself be up to a cache-TTL stale, so the figure is an
+// estimate, not a quote. A target whose provider has no known spot factor
 // (non-cloud, or a provider without spot support) is returned unchanged.
 func ApplySpot(est types.CostEstimate, t types.TargetConfig) types.CostEstimate {
-	// Prefer a live spot ratio the catalog sourced for the priced instance
-	// (GCP preemptible SKUs, AWS spot-price-history) over the rough factor.
+	// Prefer a spot ratio the catalog sourced for the priced instance (GCP
+	// preemptible SKUs, AWS spot-price-history) over the rough factor.
 	if est.SpotRatio > 0 {
 		est.Value = roundCents(est.Value * est.SpotRatio)
+		est.Confidence = types.ConfidenceLow
 		est.Assumptions = append(est.Assumptions,
-			fmt.Sprintf("based on live spot pricing at ~%.0f%% of on-demand (fluctuates and the instance can be reclaimed anytime)", est.SpotRatio*100))
+			fmt.Sprintf("based on recent spot pricing at ~%.0f%% of on-demand (fluctuates, may be cache-stale, and the instance can be reclaimed anytime)", est.SpotRatio*100))
 		return est
 	}
 

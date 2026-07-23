@@ -32,9 +32,9 @@ func TestApplySpot_LiveRatioOverridesFactor(t *testing.T) {
 	base := types.CostEstimate{Value: 2.00, Currency: "USD", Confidence: types.ConfidenceMedium, SpotRatio: 0.22}
 	got := ApplySpot(base, cloudTarget("gcp"))
 	assert.InDelta(t, 0.44, got.Value, 0.001, "live ratio 0.22 used, not the 0.30 gcp factor")
-	assert.Equal(t, types.ConfidenceMedium, got.Confidence, "live-ratio path keeps the estimate's confidence")
+	assert.Equal(t, types.ConfidenceLow, got.Confidence, "spot is volatile/possibly-stale, so confidence is Low")
 	if assert.NotEmpty(t, got.Assumptions) {
-		assert.Contains(t, got.Assumptions[len(got.Assumptions)-1], "live spot")
+		assert.Contains(t, got.Assumptions[len(got.Assumptions)-1], "spot pricing")
 	}
 }
 

@@ -10,6 +10,12 @@ package cloudvm
 // This matters because REST providers (unlike the CLI-delegated ones) hold the
 // credential in dispatcher's own process; the type makes the safe path the
 // default and the exposing path explicit.
+//
+// Caveat: fmt CANNOT invoke this redaction when the secret is an UNEXPORTED field
+// of another struct (reflection can't call methods on unexported fields), so a
+// struct holding a secret must redact itself via its own String/GoString (see
+// LambdaProvider/LambdaFetcher). JSON marshaling is unaffected — MarshalJSON is
+// honored through struct fields.
 type secret string
 
 func (secret) String() string   { return redacted }

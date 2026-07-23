@@ -77,6 +77,7 @@ type ToolRegistry struct {
 	registry *target.Registry
 	history  *cost.HistoryStore
 	catalog  *cloudvm.Catalog
+	spot     bool // price interruptible instances + surface the reclaim risk
 
 	// rootMu guards workloadRoot. Concurrent Plan/Audit/Diagnose calls on
 	// a shared registry would otherwise race: one caller's SetWorkloadRoot
@@ -108,6 +109,11 @@ func NewToolRegistry(reg *target.Registry, hist *cost.HistoryStore, cat *cloudvm
 		catalog:  cat,
 	}
 }
+
+// SetSpot makes the evaluate tool price interruptible instances and surface the
+// spot-interruption risk. Called once before planning, mirroring the
+// deterministic plan/run paths' --spot handling.
+func (tr *ToolRegistry) SetSpot(spot bool) { tr.spot = spot }
 
 // SetWorkloadRoot establishes the directory that path-taking tools are
 // allowed to read. Called once per planner invocation, before any tools
@@ -297,8 +303,11 @@ func (tr *ToolRegistry) execEvaluateAll(spec *types.WorkloadSpec) ToolResult {
 
 		if fr.Feasible {
 			est := cost.EstimateCostWithHistory(*spec, t, tr.history, tr.catalog)
+			if tr.spot {
+				est = cost.ApplySpot(est, t)
+			}
 			eval.Cost = &est
-			eval.Risks = risk.Analyze(*spec, t, est, false)
+			eval.Risks = risk.Analyze(*spec, t, est, tr.spot)
 			if tr.history != nil {
 				if s := tr.history.Flakiness(spec.Name, t.ID); s.Flaky {
 					eval.Risks = append(eval.Risks, types.Risk{

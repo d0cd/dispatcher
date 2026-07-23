@@ -47,3 +47,21 @@ func TestSecret_RedactsEverywhereButReveal(t *testing.T) {
 	assert.False(t, s.empty())
 	assert.True(t, secret("").empty())
 }
+
+// fmt cannot invoke a secret field's redaction when it's an UNEXPORTED field of a
+// struct (reflection can't call methods on unexported fields), so the structs
+// that hold a secret must redact themselves. Every fmt verb on the Lambda
+// provider/fetcher must stay clear of the raw key.
+func TestLambdaStructs_RedactKeyOnFormat(t *testing.T) {
+	const raw = "sk-lambda-do-not-leak-999"
+	prov := &LambdaProvider{apiKey: secret(raw), defaultRegion: "us-east-1", baseURL: "https://x"}
+	fetch := &LambdaFetcher{apiKey: secret(raw), Region: "us-east-1", baseURL: "https://x"}
+
+	for _, got := range []string{
+		fmt.Sprintf("%v", prov), fmt.Sprintf("%+v", prov), fmt.Sprintf("%#v", prov), fmt.Sprintf("%v", *prov),
+		fmt.Sprintf("%v", fetch), fmt.Sprintf("%+v", fetch), fmt.Sprintf("%#v", fetch), fmt.Sprintf("%v", *fetch),
+	} {
+		assert.NotContains(t, got, raw, "struct formatting must not leak the API key")
+		assert.Contains(t, got, redacted)
+	}
+}

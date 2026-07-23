@@ -41,6 +41,15 @@ type LambdaProvider struct {
 	do            func(*http.Request) (*http.Response, error)
 }
 
+// String/GoString redact the API key. fmt cannot invoke the secret field's own
+// redaction on an unexported field, so the containing struct must redact itself
+// (a value receiver covers both value and pointer formatting).
+func (l LambdaProvider) String() string   { return l.redactedString() }
+func (l LambdaProvider) GoString() string { return l.redactedString() }
+func (l LambdaProvider) redactedString() string {
+	return fmt.Sprintf("LambdaProvider{region:%q, baseURL:%q, apiKey:%s}", l.defaultRegion, l.baseURL, l.apiKey)
+}
+
 // NewLambdaProvider builds a Lambda Cloud provider. The API key comes from
 // DISPATCHER_LAMBDA_API_KEY; region defaults to us-east-1 when unset.
 func NewLambdaProvider(region string) *LambdaProvider {

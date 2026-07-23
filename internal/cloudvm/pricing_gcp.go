@@ -416,7 +416,9 @@ func joinGCPSpecsAndPrices(specs []gcpMachineType, skus []gcpSKU, region string)
 		// the whole family (CPU+RAM, plus GPU for accelerator families).
 		if sp := spotPrices[fam.prefix]; sp.cpu > 0 && sp.ram > 0 && (fam.gpuSKU == "" || sp.gpu > 0) {
 			spot := sp.cpu*float64(s.GuestCpus) + sp.ram*memGB + sp.gpu*float64(gpuCount)
-			if isPlausibleHourlyPrice(spot) {
+			// A spot price at/above on-demand is nonsensical (SpotRatio >= 1); drop
+			// it so the estimator falls back to the discount factor, matching AWS.
+			if isPlausibleHourlyPrice(spot) && spot < price {
 				inst.SpotPricePerHour = spot
 			}
 		}

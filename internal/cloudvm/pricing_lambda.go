@@ -26,6 +26,14 @@ type LambdaFetcher struct {
 	baseURL string // test override
 }
 
+// String/GoString redact the API key held in the unexported apiKey field, which
+// fmt would otherwise print raw (it can't call the field's redaction).
+func (l LambdaFetcher) String() string   { return l.redactedString() }
+func (l LambdaFetcher) GoString() string { return l.redactedString() }
+func (l LambdaFetcher) redactedString() string {
+	return fmt.Sprintf("LambdaFetcher{region:%q, baseURL:%q, apiKey:%s}", l.Region, l.baseURL, l.apiKey)
+}
+
 func NewLambdaFetcher(region string) *LambdaFetcher {
 	return &LambdaFetcher{
 		Region:  region,

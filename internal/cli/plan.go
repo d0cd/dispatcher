@@ -121,6 +121,7 @@ func runAIPlan(path string, constraints types.PlanConstraints) error {
 	cat := loadLiveCatalog(os.Stderr)
 
 	tools := planner.NewToolRegistry(reg, hist, cat)
+	tools.SetSpot(constraints.Spot)
 
 	bold := color.New(color.Bold)
 	dim := color.New(color.Faint)
