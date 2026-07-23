@@ -60,7 +60,8 @@ func TestGolden_SNPReport(t *testing.T) {
 	ask := loadPEMCert(t, filepath.Join(dir, "ask.pem"))
 	ark := loadPEMCert(t, filepath.Join(dir, "ark.pem"))
 
-	require.NoError(t, verifySNPChain(vcek, ask, []*x509.Certificate{ark}), "real VCEK<-ASK<-ARK must chain")
+	_, snpChainErr := verifySNPChain(vcek, ask, []*x509.Certificate{ark})
+	require.NoError(t, snpChainErr, "real VCEK<-ASK<-ARK must chain")
 	require.NoError(t, verifySNPSignature(report, vcek), "real firmware signature must verify (confirms signed-region length + r/s layout)")
 
 	claims := report.claims()

@@ -365,44 +365,43 @@ func TestVerifyAzureSNP_RejectsForgedQuote(t *testing.T) {
 // missing, unreachable, or not chained to a pinned root.
 func TestAzureSNPCheckRevocation(t *testing.T) {
 	ch := newSNPChain(t)
-	roots := []*x509.Certificate{ch.ark}
 
 	t.Run("passes when nothing is revoked", func(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, ch))
-		require.NoError(t, azureSNPCheckRevocation(ch.vcek, ch.ask, roots))
+		require.NoError(t, azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark))
 	})
 
 	t.Run("rejects a revoked VCEK", func(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, ch, ch.vcek.SerialNumber))
-		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "VCEK has been revoked")
 	})
 
 	t.Run("rejects a revoked ASK", func(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, ch, ch.ask.SerialNumber))
-		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "ASK has been revoked")
 	})
 
-	t.Run("rejects a CRL not signed by a pinned root", func(t *testing.T) {
+	t.Run("rejects a CRL signed by a different ARK than the ASK.s issuer (cross-family)", func(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, newSNPChain(t))) // signed by a foreign ARK
-		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not signed by a pinned")
+		assert.Contains(t, err.Error(), "issuing ARK")
 	})
 
 	t.Run("fails closed when the CRL can't be fetched", func(t *testing.T) {
 		prev := azureSNPCRLGetter
 		azureSNPCRLGetter = func(string) ([]byte, error) { return nil, assert.AnError }
 		t.Cleanup(func() { azureSNPCRLGetter = prev })
-		require.Error(t, azureSNPCheckRevocation(ch.vcek, ch.ask, roots))
+		require.Error(t, azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark))
 	})
 
 	t.Run("rejects a stale (expired) CRL — replay defense", func(t *testing.T) {
 		installCRL(t, arkSignedCRLUntil(t, ch, time.Now().Add(-time.Minute))) // NextUpdate in the past
-		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "stale")
 	})
@@ -411,6 +410,6 @@ func TestAzureSNPCheckRevocation(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, ch))
 		askNoDP := *ch.ask
 		askNoDP.CRLDistributionPoints = nil
-		require.Error(t, azureSNPCheckRevocation(ch.vcek, &askNoDP, roots))
+		require.Error(t, azureSNPCheckRevocation(ch.vcek, &askNoDP, ch.ark))
 	})
 }

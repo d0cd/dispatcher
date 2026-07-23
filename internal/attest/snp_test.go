@@ -199,15 +199,24 @@ func rsaLeafCert(t *testing.T) *x509.Certificate {
 func TestVerifySNPChain(t *testing.T) {
 	ch := newSNPChain(t)
 	roots := []*x509.Certificate{ch.ark}
-	require.NoError(t, verifySNPChain(ch.vcek, ch.ask, roots))
+	ark, err := verifySNPChain(ch.vcek, ch.ask, roots)
+	require.NoError(t, err)
+	assert.Equal(t, ch.ark, ark, "returns the specific ARK that signed the ASK (for CRL binding)")
 
 	// A foreign ARK must not validate this ASK.
 	other := []*x509.Certificate{newSNPChain(t).ark}
-	assert.Error(t, verifySNPChain(ch.vcek, ch.ask, other), "ASK chains to no pinned ARK")
-	assert.Error(t, verifySNPChain(ch.vcek, newSNPChain(t).ask, roots), "VCEK not signed by the presented ASK")
-	assert.Error(t, verifySNPChain(nil, ch.ask, roots), "an incomplete chain fails closed")
-	assert.Error(t, verifySNPChain(ch.vcek, ch.ask, nil), "no pinned roots fails closed")
+	_, err = verifySNPChain(ch.vcek, ch.ask, other)
+	assert.Error(t, err, "ASK chains to no pinned ARK")
+	_, err = verifySNPChain(ch.vcek, newSNPChain(t).ask, roots)
+	assert.Error(t, err, "VCEK not signed by the presented ASK")
+	_, err = verifySNPChain(nil, ch.ask, roots)
+	assert.Error(t, err, "an incomplete chain fails closed")
+	_, err = verifySNPChain(ch.vcek, ch.ask, nil)
+	assert.Error(t, err, "no pinned roots fails closed")
 
-	// Multiple pinned roots: the ASK is accepted if ANY pinned root signed it.
-	assert.NoError(t, verifySNPChain(ch.vcek, ch.ask, []*x509.Certificate{newSNPChain(t).ark, ch.ark}))
+	// Multiple pinned roots: accepted if ANY pinned root signed it; the matched
+	// one is returned so revocation can bind the CRL to it.
+	got, err := verifySNPChain(ch.vcek, ch.ask, []*x509.Certificate{newSNPChain(t).ark, ch.ark})
+	require.NoError(t, err)
+	assert.Equal(t, ch.ark, got)
 }

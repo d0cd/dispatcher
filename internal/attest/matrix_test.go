@@ -3,7 +3,6 @@ package attest
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
 	"encoding/hex"
 	"os"
 	"strings"
@@ -87,7 +86,7 @@ func TestMatrix_GroundedInCode(t *testing.T) {
 	}
 	snpChain := newSNPChain(t)
 	installCRL(t, arkSignedCRL(t, snpChain, snpChain.ask.SerialNumber)) // ASK revoked
-	assert.Error(t, azureSNPCheckRevocation(snpChain.vcek, snpChain.ask, []*x509.Certificate{snpChain.ark}),
+	assert.Error(t, azureSNPCheckRevocation(snpChain.vcek, snpChain.ask, snpChain.ark),
 		"a revoked ASK must be rejected, matching the azure-snp revocation cell")
 }
 

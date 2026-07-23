@@ -104,13 +104,14 @@ func verifyAzureSNPEvidence(ev agent.AzureSNPEvidence, roots []*x509.Certificate
 	if err != nil {
 		return nil, nil, nil, "", fmt.Errorf("parse ask: %w", err)
 	}
-	if err := verifySNPChain(vcek, ask, roots); err != nil {
+	ark, err := verifySNPChain(vcek, ask, roots)
+	if err != nil {
 		return nil, nil, nil, "", fmt.Errorf("snp cert chain: %w", err)
 	}
 	if err := verifySNPSignature(rep, vcek); err != nil {
 		return nil, nil, nil, "", fmt.Errorf("snp report signature: %w", err)
 	}
-	if err := azureSNPCheckRevocation(vcek, ask, roots); err != nil {
+	if err := azureSNPCheckRevocation(vcek, ask, ark); err != nil {
 		return nil, nil, nil, "", err
 	}
 
@@ -253,7 +254,7 @@ var azureSNPCRLGetter = func(url string) ([]byte, error) {
 // itself be signed by a pinned ARK. A missing distribution point or an
 // unreachable/invalid CRL is a rejection, not a pass — an attacker who can block
 // KDS must not be able to bypass revocation.
-func azureSNPCheckRevocation(vcek, ask *x509.Certificate, roots []*x509.Certificate) error {
+func azureSNPCheckRevocation(vcek, ask, ark *x509.Certificate) error {
 	if len(ask.CRLDistributionPoints) == 0 {
 		return fmt.Errorf("snp revocation: ASK has no CRL distribution point")
 	}
@@ -265,15 +266,14 @@ func azureSNPCheckRevocation(vcek, ask *x509.Certificate, roots []*x509.Certific
 	if err != nil {
 		return fmt.Errorf("snp revocation: parse ASK CRL: %w", err)
 	}
-	signed := false
-	for _, root := range roots {
-		if crl.CheckSignatureFrom(root) == nil {
-			signed = true
-			break
-		}
-	}
-	if !signed {
-		return fmt.Errorf("snp revocation: ASK CRL is not signed by a pinned AMD root")
+	// The CRL must be signed by the SAME ARK that issued this ASK, not merely one
+	// of the pinned roots. AMD's per-product-family CRLs (Milan/Genoa/Turin) are
+	// each ARK-signed with disjoint serial spaces, so accepting any pinned root
+	// would let an attacker with a revoked chain from one family serve a genuine,
+	// fresh CRL from ANOTHER family (which omits the revoked serial) and bypass
+	// revocation entirely.
+	if crl.CheckSignatureFrom(ark) != nil {
+		return fmt.Errorf("snp revocation: ASK CRL is not signed by the ASK's own issuing ARK")
 	}
 	// Freshness: the KDS transport is untrusted, so an attacker who can serve the
 	// CRL can also replay an older, still-validly-signed pre-revocation list. A

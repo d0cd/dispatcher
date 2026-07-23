@@ -110,16 +110,17 @@ func verifySNPSignature(r *snpReport, vcek *x509.Certificate) error {
 }
 
 // verifySNPChain checks VCEK <- ASK and that the ASK chains to one of the pinned
-// AMD ARK roots (R4). Trying each root avoids mapping the report's product line
-// (Milan/Genoa/Turin) to a specific ARK up front. It validates only the
-// signature links: time validity and revocation are the live-fetch layer's
-// concern.
-func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) error {
+// AMD ARK roots (R4), returning the specific ARK that signed the ASK. Trying each
+// root avoids mapping the report's product line (Milan/Genoa/Turin) up front; the
+// matched ARK is returned so the revocation check can bind the CRL to the SAME
+// issuer rather than any pinned root. It validates only the signature links; time
+// validity is checked here and revocation is the live-fetch layer's concern.
+func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) (*x509.Certificate, error) {
 	if vcek == nil || ask == nil {
-		return fmt.Errorf("snp cert chain incomplete")
+		return nil, fmt.Errorf("snp cert chain incomplete")
 	}
 	if len(roots) == 0 {
-		return fmt.Errorf("snp: no pinned AMD roots configured")
+		return nil, fmt.Errorf("snp: no pinned AMD roots configured")
 	}
 	// Reject expired / not-yet-valid VCEK or ASK. CheckSignatureFrom validates only
 	// the signature link, not validity dates, and nothing else on this path checks
@@ -127,16 +128,16 @@ func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) erro
 	now := time.Now()
 	for _, c := range []*x509.Certificate{vcek, ask} {
 		if now.Before(c.NotBefore) || now.After(c.NotAfter) {
-			return fmt.Errorf("snp cert %q outside validity window [%s, %s]", c.Subject.CommonName, c.NotBefore, c.NotAfter)
+			return nil, fmt.Errorf("snp cert %q outside validity window [%s, %s]", c.Subject.CommonName, c.NotBefore, c.NotAfter)
 		}
 	}
 	if err := vcek.CheckSignatureFrom(ask); err != nil {
-		return fmt.Errorf("snp VCEK is not signed by the ASK: %w", err)
+		return nil, fmt.Errorf("snp VCEK is not signed by the ASK: %w", err)
 	}
 	for _, ark := range roots {
 		if ask.CheckSignatureFrom(ark) == nil {
-			return nil
+			return ark, nil
 		}
 	}
-	return fmt.Errorf("snp ASK chains to none of the %d pinned AMD roots", len(roots))
+	return nil, fmt.Errorf("snp ASK chains to none of the %d pinned AMD roots", len(roots))
 }
