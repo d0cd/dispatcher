@@ -234,19 +234,23 @@ func TestBuildJobManifestSafeImage(t *testing.T) {
 	assert.Contains(t, m, "image: ghcr.io/org/img@sha256:abc")
 }
 
-// TestCatalogKeepsSpeclessInstances covers C2: an instance with unknown specs
-// (VCPUs/MemoryGB == 0, as live Azure rows arrive) must not be filtered out by
-// the vCPU/memory minimums.
-func TestCatalogKeepsSpeclessInstances(t *testing.T) {
-	cat := &Catalog{instances: []InstanceType{{
+// TestCatalogEnrichesSpeclessInstances covers a live Azure row that arrives
+// spec-less (VCPUs/MemoryGB == 0): enrichSpecsFromStatic backfills its specs from
+// the built-in table by SKU name (at the live price) so it matches a sized request
+// legitimately, rather than being accepted blindly (which would let an
+// under-sized SKU pass) or discarded (falling back to the stale rate card).
+func TestCatalogEnrichesSpeclessInstances(t *testing.T) {
+	live := []InstanceType{{
 		Name:         "Standard_B2s",
 		Provider:     ProviderAzure,
-		PricePerHour: 0.096,
+		PricePerHour: 0.096, // live price, no specs
 		Arch:         "x86_64",
-	}}}
+	}}
+	cat := &Catalog{instances: enrichSpecsFromStatic(live)}
 	matches := cat.FindCheapestForProvider(ProviderAzure, InstanceRequirements{MinVCPUs: 2, MinMemoryGB: 4})
 	require.Len(t, matches, 1)
 	assert.Equal(t, "Standard_B2s", matches[0].Name)
+	assert.Equal(t, 0.096, matches[0].PricePerHour, "live price preserved through enrichment")
 }
 
 // TestCatalogStillFiltersKnownSpecs ensures the C2 guard does not disable

@@ -51,11 +51,19 @@ func NewCatalog() *Catalog {
 func (c *Catalog) FindCheapest(req InstanceRequirements) []InstanceType {
 	var matches []InstanceType
 	for _, inst := range c.instances {
-		// Some live price feeds (e.g. Azure's Retail Prices API) return a
-		// price with no per-SKU specs. Skip the vCPU/memory filters when the
-		// spec is unknown rather than rejecting the row — otherwise every
-		// spec-less instance is silently discarded and the stale rate card is
-		// used while we claim to be pricing live.
+		// Some live price feeds (e.g. Azure's Retail Prices API) return a price
+		// with no per-SKU specs; enrichSpecsFromStatic backfills specs for SKUs in
+		// the built-in table. A row still spec-less here cannot satisfy a request
+		// that pins a size: matching it would let the globally cheapest spec-less
+		// SKU under-provision the VM and under-report cost (silently passing a
+		// budget gate a right-sized VM would trip). When no size is required an
+		// unknown-spec row is still eligible, so the live rate card is not discarded.
+		if req.MinVCPUs > 0 && inst.VCPUs == 0 {
+			continue
+		}
+		if req.MinMemoryGB > 0 && inst.MemoryGB == 0 {
+			continue
+		}
 		if inst.VCPUs > 0 && inst.VCPUs < req.MinVCPUs {
 			continue
 		}
