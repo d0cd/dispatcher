@@ -236,6 +236,13 @@ func (h *HetznerProvider) DestroyVM(ctx context.Context, vmID string) error {
 	runID := h.runIDForServer(ctx, vmID)
 
 	if _, err := runCLI(ctx, "hcloud", "server", "delete", vmID); err != nil {
+		// Already gone — teardown is idempotent (matches the other providers + the
+		// GetVM contract), so a retried/racing gc doesn't report a spurious failure.
+		// The server's labels are unreadable once it's gone, so runID is already ""
+		// and the firewall/ssh-key cleanup below wouldn't run regardless.
+		if isVMNotFound(err, vmID) {
+			return nil
+		}
 		return fmt.Errorf("hcloud server delete failed: %w", err)
 	}
 	if runID != "" {

@@ -67,6 +67,21 @@ func TestIsVMNotFound_RequiresTheVMID(t *testing.T) {
 	assert.False(t, isVMNotFound(errors.New("ServiceUnavailable: rate limited"), "vm-1"))
 }
 
+// DestroyVM must be idempotent: deleting an already-gone server (a racing/retried
+// gc, or an out-of-band delete) is success, not a spurious teardown failure. Every
+// cloud provider maps a not-found delete to nil.
+func TestDestroyVM_NotFoundIsIdempotent(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	runCLI = func(context.Context, string, ...string) ([]byte, error) {
+		return nil, errors.New("server 'vm-1' not found")
+	}
+	for _, p := range allProviders() {
+		assert.NoError(t, p.DestroyVM(context.Background(), "vm-1"),
+			"%T DestroyVM must be idempotent on an already-gone server", p)
+	}
+}
+
 // A transient/auth error is NOT proof the VM is gone; every provider must
 // propagate it rather than silently reporting Terminated.
 func TestGetVM_TransientErrorPropagates(t *testing.T) {
