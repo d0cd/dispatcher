@@ -84,7 +84,10 @@ func bigIntToLE(n *big.Int, width int) []byte {
 
 // buildSNPReport assembles a 0x4A0-byte report and signs its 0x2A0-byte prefix
 // with the VCEK key, matching the AMD SEV-SNP ABI fields the parser reads.
-func buildSNPReport(t *testing.T, measurement, reportData []byte, reportedTCB, policy uint64, key *ecdsa.PrivateKey) []byte {
+// The optional vmpl (default 0) sets the VMPL field at offset 0x30, inside the
+// signed region, so a VMPL>0 report is still validly signed and exercises the
+// paravisor-level check rather than failing on signature.
+func buildSNPReport(t *testing.T, measurement, reportData []byte, reportedTCB, policy uint64, key *ecdsa.PrivateKey, vmpl ...uint32) []byte {
 	t.Helper()
 	require.Len(t, measurement, 48)
 	require.Len(t, reportData, 64)
@@ -93,6 +96,9 @@ func buildSNPReport(t *testing.T, measurement, reportData []byte, reportedTCB, p
 	binary.LittleEndian.PutUint64(buf[0x08:], policy) // policy
 	binary.LittleEndian.PutUint32(buf[0x34:], 1)      // signature algo: ECDSA P-384 / SHA-384
 	binary.LittleEndian.PutUint64(buf[0x180:], reportedTCB)
+	if len(vmpl) > 0 {
+		binary.LittleEndian.PutUint32(buf[0x30:], vmpl[0]) // VMPL
+	}
 	copy(buf[0x50:], reportData)
 	copy(buf[0x90:], measurement)
 

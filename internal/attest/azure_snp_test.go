@@ -49,8 +49,14 @@ func runtimeDataWithAK(t *testing.T, ak *rsa.PublicKey) []byte {
 
 // signedQuote builds a TPM quote (TPMS_ATTEST) over the given PCRs with extraData
 // (the run+channel binding) and signs it with the AK — what the vTPM produces.
-func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, extraData []byte) (quote, sig []byte) {
+// The optional bank (default SHA-256) sets the quote's PCRSelection hash alg, so
+// a non-SHA-256-bank quote can exercise the bank-enforcement check.
+func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, extraData []byte, bank ...legacytpm.Algorithm) (quote, sig []byte) {
 	t.Helper()
+	pcrBank := legacytpm.AlgSHA256
+	if len(bank) > 0 {
+		pcrBank = bank[0]
+	}
 	// The quote commits to SHA-256(concatenated selected PCR values), PCRs ordered
 	// ascending — the digest the TPM computes over the selection.
 	h := sha256.New()
@@ -63,7 +69,7 @@ func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, e
 		QualifiedSigner: legacytpm.Name{},
 		ExtraData:       tpmutil.U16Bytes(extraData),
 		AttestedQuoteInfo: &legacytpm.QuoteInfo{
-			PCRSelection: legacytpm.PCRSelection{Hash: legacytpm.AlgSHA256, PCRs: []int{11}},
+			PCRSelection: legacytpm.PCRSelection{Hash: pcrBank, PCRs: []int{11}},
 			PCRDigest:    tpmutil.U16Bytes(digest),
 		},
 	}
@@ -111,6 +117,18 @@ func installCRL(t *testing.T, crl []byte) {
 // azureEvidence assembles a full, valid Azure SNP+vTPM evidence bundle bound to
 // nonce+channelKey, returning it plus the AMD roots to trust. mutate can tamper.
 func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate func(*agent.AzureSNPEvidence)) (agent.AzureSNPEvidence, []*x509.Certificate) {
+	return azureEvidenceOpts(t, nonce, channelKey, pcr11, mutate, azureEvidenceOptions{})
+}
+
+// azureEvidenceOptions tweaks the otherwise-valid bundle for a specific negative
+// test: a nonzero vmpl (a report requested below the paravisor) or a non-SHA-256
+// quote bank. The zero value reproduces the accepted-path bundle.
+type azureEvidenceOptions struct {
+	vmpl      uint32
+	quoteBank legacytpm.Algorithm
+}
+
+func azureEvidenceOpts(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate func(*agent.AzureSNPEvidence), opts azureEvidenceOptions) (agent.AzureSNPEvidence, []*x509.Certificate) {
 	t.Helper()
 	ch := newSNPChain(t)
 	installCRL(t, arkSignedCRL(t, ch)) // default: an empty (nothing-revoked) CRL
@@ -124,10 +142,14 @@ func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate 
 	rdHash := sha256.Sum256(runtimeData)
 	copy(reportData[:], rdHash[:])
 
-	report := buildSNPReport(t, make48(0x11), reportData[:], 9, 0, ch.vcekKey)
+	report := buildSNPReport(t, make48(0x11), reportData[:], 9, 0, ch.vcekKey, opts.vmpl)
 
 	pcrs := map[uint32][]byte{11: pcr11}
-	quote, sig := signedQuote(t, akPriv, pcrs, agent.MAABindingNonce(nonce, channelKey))
+	quoteBank := legacytpm.AlgSHA256
+	if opts.quoteBank != 0 {
+		quoteBank = opts.quoteBank
+	}
+	quote, sig := signedQuote(t, akPriv, pcrs, agent.MAABindingNonce(nonce, channelKey), quoteBank)
 
 	ev := agent.AzureSNPEvidence{
 		SNPReport:   report,
@@ -197,6 +219,41 @@ func TestVerifyAzureSNP_RejectsBelowMinTCB(t *testing.T) {
 	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}, MinTCB: 9})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TCB")
+}
+
+// TestVerifyAzureSNP_RejectsNonZeroVMPL: only the Azure paravisor at VMPL0
+// generates the vTPM AK, so a report requested at a lower privilege level (VMPL>0)
+// may carry an attacker-substituted AK and must be rejected. The report is validly
+// signed with VMPL set inside the signed region, so this exercises the VMPL check
+// rather than the signature path.
+func TestVerifyAzureSNP_RejectsNonZeroVMPL(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+
+	ev, roots := azureEvidenceOpts(t, nonce, channelKey, pcr11, nil, azureEvidenceOptions{vmpl: 2})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
+		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VMPL")
+}
+
+// TestVerifyAzureSNP_RejectsNonSHA256QuoteBank: the PCR digest is recomputed and
+// compared as SHA-256, so a quote whose PCR selection is over a different bank
+// (e.g. SHA-1) must be rejected — otherwise a SHA-1-bank quote paired with
+// SHA-256-shaped values could slip past the digest check.
+func TestVerifyAzureSNP_RejectsNonSHA256QuoteBank(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+
+	ev, roots := azureEvidenceOpts(t, nonce, channelKey, pcr11, nil, azureEvidenceOptions{quoteBank: legacytpm.AlgSHA1})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
+		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SHA-256 bank")
 }
 
 // TestVerifyAzureSNP_Accepts: a well-formed bundle — genuine SNP report binding the
