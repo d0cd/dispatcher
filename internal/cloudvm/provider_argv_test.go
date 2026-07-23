@@ -177,24 +177,60 @@ func TestAWSCreateVM_PassesIdempotencyClientToken(t *testing.T) {
 
 	i := slices.Index(runArgs, "--client-token")
 	if assert.GreaterOrEqual(t, i, 0, "run-instances must carry a --client-token for idempotent retries") {
-		// Scoped to the run id AND this attempt's security group (sg-123), so a
-		// spot-reclaim re-provision gets a distinct token instead of colliding.
-		assert.Equal(t, "plan_x-123", runArgs[i+1])
+		// run id + the first attempt counter (a fresh provider starts at 1).
+		assert.Equal(t, "plan_x-1", runArgs[i+1])
 	}
 }
 
 // The client token must be stable within one provisioning attempt (so the CLI's
 // internal retries dedupe to one instance) but distinct across attempts (so a
-// spot-reclaim re-provision, which creates a fresh security group, doesn't reuse
-// the terminated instance's token and hit IdempotentParameterMismatch).
+// spot-reclaim re-provision launches a NEW instance). Uniqueness comes from the
+// attempt counter, NOT the security-group id (a retry can adopt the same SG).
 func TestAWSClientToken_DistinctPerAttempt(t *testing.T) {
 	opts := VMOptions{Tags: map[string]string{"dispatcher-run-id": "run_abc"}}
-	first := awsClientToken(opts, "sg-0aaa")
-	second := awsClientToken(opts, "sg-0bbb")
-	assert.NotEqual(t, first, second, "a fresh security group (new attempt) must yield a distinct token")
-	assert.Equal(t, first, awsClientToken(opts, "sg-0aaa"), "same attempt must be stable for CLI-retry idempotency")
+	first := awsClientToken(opts, 1)
+	second := awsClientToken(opts, 2)
+	assert.NotEqual(t, first, second, "a later attempt must yield a distinct token")
+	assert.Equal(t, first, awsClientToken(opts, 1), "same attempt must be stable for CLI-retry idempotency")
 	assert.Contains(t, first, "run_abc")
 	assert.LessOrEqual(t, len(first), 64, "AWS caps client tokens at 64 chars")
+}
+
+// Regression guard for the spot-reclaim retry path: two CreateVM calls on the
+// same provider and run — even when the security group is the SAME (adopted on
+// retry) — must send DISTINCT run-instances client tokens, or EC2 idempotency
+// returns the reclaimed (terminated) instance and the retry never re-provisions.
+func TestAWSCreateVM_DistinctTokenAcrossReprovision(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "get-parameter"):
+			return []byte("ami-1"), nil
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-1"), nil
+		case slices.Contains(args, "create-security-group"):
+			return []byte("sg-SAME"), nil // same id both calls (models adoption)
+		default:
+			return []byte(""), nil
+		}
+	})
+	var tokens []string
+	prev := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, args ...string) ([]byte, error) {
+		if i := slices.Index(args, "--client-token"); i >= 0 && i+1 < len(args) {
+			tokens = append(tokens, args[i+1])
+		}
+		return nil, assert.AnError // token captured; the create's own error is irrelevant
+	}
+	t.Cleanup(func() { retryCLIOutput = prev })
+
+	p := NewAWSProvider("us-east-1")
+	opts := VMOptions{Region: "us-east-1", InstanceType: "t3.micro",
+		Tags: map[string]string{"dispatcher-run-id": "run_z"}}
+	_, _ = p.CreateVM(context.Background(), opts)
+	_, _ = p.CreateVM(context.Background(), opts)
+
+	require.Len(t, tokens, 2)
+	assert.NotEqual(t, tokens[0], tokens[1], "a re-provision must get a fresh token even with the same SG")
 }
 
 func TestAWSProvider_Argv(t *testing.T) {

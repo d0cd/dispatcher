@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
@@ -15,6 +16,10 @@ import (
 // AWSProvider implements Provider using the aws CLI.
 type AWSProvider struct {
 	defaultRegion string
+	// createSeq gives each CreateVM call a distinct run-instances idempotency
+	// token, so a spot-reclaim re-provision launches a NEW instance instead of
+	// colliding with the reclaimed attempt's token.
+	createSeq atomic.Uint64
 }
 
 // NewAWSProvider creates an AWS provider.
@@ -131,6 +136,9 @@ func awsConfidentialArgs(opts VMOptions) ([]string, error) {
 }
 
 func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
+	// One distinct idempotency token per CreateVM call: stable across the CLI's
+	// internal retries within this call, different on a later re-provision.
+	attempt := a.createSeq.Add(1)
 	region := opts.Region
 	if region == "" {
 		region = a.defaultRegion
@@ -195,7 +203,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	// instance is created would make the retry provision a SECOND instance. A
 	// stable per-run client token makes the create idempotent — a retry returns
 	// the already-created instance instead of duplicating it.
-	if token := awsClientToken(opts, sgID); token != "" {
+	if token := awsClientToken(opts, attempt); token != "" {
 		args = append(args, "--client-token", token)
 	}
 
@@ -349,13 +357,13 @@ func awsTagSpec(resourceType string, tags map[string]string) string {
 }
 
 // awsClientToken returns an idempotency token for run-instances, scoped to the
-// run AND this provisioning attempt's security group. Within one CreateVM call
-// the token is stable, so the CLI's internal retries dedupe to one instance;
-// across attempts it differs, because a spot-reclaim re-provision creates a
-// fresh security group — reusing the terminated instance's token with the new
-// group's args would fail as IdempotentParameterMismatch. AWS caps client
-// tokens at 64 ASCII chars; the run id + group id suffix stay well under.
-func awsClientToken(opts VMOptions, sgID string) string {
+// run AND this provisioning attempt (a monotonic per-CreateVM counter). Within
+// one CreateVM call the token is stable, so the CLI's internal retries dedupe to
+// one instance; across attempts it differs, so a spot-reclaim re-provision
+// launches a NEW instance instead of the reclaimed one. It must NOT depend on
+// the security-group id, which a retry can adopt unchanged. AWS caps client
+// tokens at 64 ASCII chars; run id + a small integer stay well under.
+func awsClientToken(opts VMOptions, attempt uint64) string {
 	base := opts.Tags["dispatcher-run-id"]
 	if base == "" {
 		base = opts.Name
@@ -363,10 +371,7 @@ func awsClientToken(opts VMOptions, sgID string) string {
 	if base == "" {
 		return ""
 	}
-	if sgID != "" {
-		return base + "-" + strings.TrimPrefix(sgID, "sg-")
-	}
-	return base
+	return fmt.Sprintf("%s-%d", base, attempt)
 }
 
 // awsCreateSSHSecurityGroup creates a security group in the region's default VPC
