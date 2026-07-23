@@ -2,7 +2,9 @@ package cloudvm
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -127,6 +129,75 @@ func TestFirstAvailableAzureSKU_NoneAvailable(t *testing.T) {
 	})
 	_, err := firstAvailableAzureSKU(context.Background(), "eastus", "Standard_B2s")
 	require.Error(t, err)
+}
+
+// End-to-end control flow: a restricted GENERAL-PURPOSE size is masked by az as a
+// "content already consumed" crash; CreateVM probes availability, substitutes the
+// smallest available general-purpose size, and retries the create with it.
+func TestAzureCreateVM_SubstitutesRestrictedGeneralPurpose(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "list-skus") {
+			if slices.Contains(args, "--size") { // availability probe
+				return []byte(`[{"name":"Standard_B2s","restrictions":[{"reasonCode":"NotAvailableForSubscription"}]}]`), nil
+			}
+			return []byte(`[
+				{"name":"Standard_B2s","capabilities":[{"name":"vCPUs","value":"2"},{"name":"MemoryGB","value":"4"}],"restrictions":[{"reasonCode":"NotAvailableForSubscription"}]},
+				{"name":"Standard_D2als_v7","capabilities":[{"name":"vCPUs","value":"2"},{"name":"MemoryGB","value":"8"}],"restrictions":[]}
+			]`), nil
+		}
+		return []byte("[]"), nil // adoptCreatedVM's vm-list probe: none
+	})
+
+	var createSizes []string
+	prev := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, args ...string) ([]byte, error) {
+		for i, a := range args {
+			if a == "--size" && i+1 < len(args) {
+				createSizes = append(createSizes, args[i+1])
+			}
+		}
+		if len(createSizes) == 1 { // first create: the masked restriction crash
+			return nil, errors.New("The content for this response was already consumed")
+		}
+		return []byte(`{"id":"/subscriptions/x/vm","publicIpAddress":"203.0.113.9"}`), nil
+	}
+	t.Cleanup(func() { retryCLIOutput = prev })
+
+	vm, err := NewAzureProvider("rg", "eastus").CreateVM(context.Background(), VMOptions{
+		Region: "eastus", InstanceType: "Standard_B2s",
+		Tags: map[string]string{"dispatcher-run-id": "r"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "203.0.113.9", vm.IP)
+	require.Len(t, createSizes, 2)
+	assert.Equal(t, "Standard_B2s", createSizes[0])
+	assert.Equal(t, "Standard_D2als_v7", createSizes[1], "retry uses the available general-purpose substitute")
+}
+
+// A restricted GPU (N-series) size must fail closed with the actionable reason,
+// never be silently substituted onto a CPU-only general-purpose VM.
+func TestAzureCreateVM_FailsClosedForGPURequest(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "list-skus") && slices.Contains(args, "--size") {
+			return []byte(`[{"name":"Standard_NC6","restrictions":[{"reasonCode":"NotAvailableForSubscription"}]}]`), nil
+		}
+		return []byte("[]"), nil
+	})
+	creates := 0
+	prev := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		creates++
+		return nil, errors.New("The content for this response was already consumed")
+	}
+	t.Cleanup(func() { retryCLIOutput = prev })
+
+	_, err := NewAzureProvider("rg", "eastus").CreateVM(context.Background(), VMOptions{
+		Region: "eastus", InstanceType: "Standard_NC6",
+		Tags: map[string]string{"dispatcher-run-id": "r"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "choose a different")
+	assert.Equal(t, 1, creates, "a GPU request must not be retried with a general-purpose substitute")
 }
 
 func TestAzureProvider_ListResources_Argv(t *testing.T) {

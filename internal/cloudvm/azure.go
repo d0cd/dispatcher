@@ -178,6 +178,15 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		// retry the create once rather than failing the run outright.
 		if strings.Contains(err.Error(), "already consumed") {
 			if ok, reason := azureSKUAvailable(ctx, location, instanceType); !ok {
+				// Only substitute a general-purpose size for another one. A GPU
+				// (N-series) or confidential (DC/EC, or any confidential run) request
+				// can't be preserved by a general-purpose substitute, so fail closed
+				// with the actionable reason rather than silently downgrading the
+				// workload onto a CPU-only / non-confidential VM.
+				if opts.ConfidentialType != "" || !azureGeneralPurpose(instanceType) {
+					return nil, fmt.Errorf("azure: VM size %s is %s in %s — choose a different --size or region: %w",
+						instanceType, reason, location, err)
+				}
 				alt, altErr := firstAvailableAzureSKU(ctx, location, instanceType)
 				if altErr != nil {
 					return nil, fmt.Errorf("azure: VM size %s is %s in %s and no available substitute was found (%v): %w",
