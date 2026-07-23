@@ -186,6 +186,15 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if err != nil {
 		return nil, err
 	}
+	// Reap the per-run security group on ANY failure between here and a live
+	// instance — the read-pubkey / write-user-data / parse paths would otherwise
+	// leak it. Cleared once an instance takes ownership of the group.
+	createdOK := false
+	defer func() {
+		if !createdOK {
+			awsDeleteSecurityGroup(context.Background(), region, sgID)
+		}
+	}()
 
 	tagSpec := awsTagSpec("instance", opts.Tags)
 
@@ -246,9 +255,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	output, err := retryCLIOutput(ctx, "aws", "aws ec2 run-instances", args...)
 	if err != nil {
-		// No instance took ownership of the group; reclaim it now.
-		awsDeleteSecurityGroup(ctx, region, sgID)
-		return nil, err
+		return nil, err // the deferred guard reclaims the unused group
 	}
 
 	var result struct {
@@ -278,6 +285,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		return nil, err
 	}
 
+	createdOK = true // the live instance owns the group now
 	return &VMInfo{
 		ID:        instanceID,
 		IP:        ip,

@@ -233,6 +233,38 @@ func TestAWSCreateVM_DistinctTokenAcrossReprovision(t *testing.T) {
 	assert.NotEqual(t, tokens[0], tokens[1], "a re-provision must get a fresh token even with the same SG")
 }
 
+// A CreateVM failure BETWEEN security-group creation and a live instance (e.g.
+// an unreadable ssh pubkey) must reap the per-run SG, not leak it.
+func TestAWSCreateVM_ReapsSGOnEarlyFailure(t *testing.T) {
+	calls := captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-1"), nil
+		case slices.Contains(args, "create-security-group"):
+			return []byte("sg-1"), nil
+		default:
+			return []byte(""), nil // authorize-ingress, delete-security-group
+		}
+	})
+
+	// Fail at read-ssh-pubkey: a nonexistent key path with a login user set.
+	_, err := NewAWSProvider("us-east-1").CreateVM(context.Background(), VMOptions{
+		Region: "us-east-1", InstanceType: "t3.micro", Image: "ami-1",
+		SSHKeyPath: "/nonexistent/dispatcher-nope.pub", SSHUser: "ubuntu",
+		Tags: map[string]string{"dispatcher-run-id": "r"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "read ssh pubkey")
+
+	sawDelete := false
+	for _, c := range *calls {
+		if slices.Contains(c.args, "delete-security-group") && slices.Contains(c.args, "sg-1") {
+			sawDelete = true
+		}
+	}
+	assert.True(t, sawDelete, "the per-run SG must be reaped when CreateVM fails before an instance exists")
+}
+
 func TestAWSProvider_Argv(t *testing.T) {
 	p := NewAWSProvider("us-east-1")
 
