@@ -329,8 +329,13 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 	}
 
 	var inst struct {
-		Name   string `json:"name"`
-		Status string `json:"status"`
+		Name              string `json:"name"`
+		Status            string `json:"status"`
+		NetworkInterfaces []struct {
+			AccessConfigs []struct {
+				NatIP string `json:"natIP"`
+			} `json:"accessConfigs"`
+		} `json:"networkInterfaces"`
 	}
 	if err := json.Unmarshal(output, &inst); err != nil {
 		return nil, err
@@ -341,7 +346,14 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 		state = VMStateTerminated
 	}
 
-	return &VMInfo{ID: vmID, Name: inst.Name, State: state}, nil
+	// Surface the external IP so the adoptCreatedVM recovery path can reach the VM
+	// over SSH, mirroring CreateVM's parsing.
+	ip := ""
+	if len(inst.NetworkInterfaces) > 0 && len(inst.NetworkInterfaces[0].AccessConfigs) > 0 {
+		ip = inst.NetworkInterfaces[0].AccessConfigs[0].NatIP
+	}
+
+	return &VMInfo{ID: vmID, Name: inst.Name, IP: ip, State: state}, nil
 }
 
 func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {

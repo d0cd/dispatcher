@@ -210,6 +210,11 @@ func EstimateCostWithHistory(spec types.WorkloadSpec, t types.TargetConfig, hist
 		// GPU jobs / cloud rate-card fallbacks); scaleEstimateToHours hardcodes
 		// Medium. A real bump only comes from ConfidenceForTarget (≥3 samples) below.
 		scaled.Confidence = base.Confidence
+		// Carry forward the catalog-sourced spot ratio and exclusions, which
+		// scaleEstimateToHours doesn't recompute — otherwise ApplySpot loses the
+		// precise live ratio and falls back to the coarse per-provider factor.
+		scaled.SpotRatio = base.SpotRatio
+		scaled.Exclusions = base.Exclusions
 		scaled.Assumptions = append(scaled.Assumptions,
 			fmt.Sprintf("based on historical median runtime of %s", histDuration.Round(time.Second)))
 		base = scaled

@@ -34,6 +34,22 @@ func TestGetVM_NotFoundIsTerminated(t *testing.T) {
 	}
 }
 
+// GCP GetVM must surface the VM's external IP, exactly as CreateVM does. The
+// adoptCreatedVM recovery path (a VM created server-side just before a transient
+// create error) returns GetVM(id); without the IP, WaitForSSH dials ":22", stalls
+// the full timeout, and the recovery degrades to a no-op teardown.
+func TestGCP_GetVM_ReturnsExternalIP(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	runCLI = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte(`{"name":"vm-1","status":"RUNNING","networkInterfaces":[{"accessConfigs":[{"natIP":"203.0.113.7"}]}]}`), nil
+	}
+	vm, err := NewGCPProvider("proj", "zone").GetVM(context.Background(), "vm-1")
+	require.NoError(t, err)
+	assert.Equal(t, "203.0.113.7", vm.IP, "GetVM must parse the external natIP")
+	assert.Equal(t, VMStateRunning, vm.State)
+}
+
 // isVMNotFound must key off the VM id, so a not-found for something else — a
 // missing CLI binary or a wrong resource group — is NOT misread as the VM being
 // gone (which would stop teardown and leak a live, billing VM).

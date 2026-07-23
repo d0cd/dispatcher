@@ -207,6 +207,45 @@ func TestEstimateCost_LiveCatalog(t *testing.T) {
 	assert.Contains(t, est.Assumptions[0], "cx22", "should pick the cheapest matching instance")
 }
 
+// The history/scaling path must preserve the catalog-sourced SpotRatio so a spot
+// workload with historical runs still prices off the precise live spot ratio
+// rather than degrading to the coarse per-provider discount factor.
+func TestEstimateCostWithHistory_PreservesSpotRatio(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cat, _, err := cloudvm.NewLiveCatalog(context.Background(), &stubFetcher{
+		provider: cloudvm.ProviderHetzner,
+		instances: []cloudvm.InstanceType{
+			{Name: "cx22", Provider: cloudvm.ProviderHetzner, VCPUs: 2, MemoryGB: 4,
+				PricePerHour: 0.010, SpotPricePerHour: 0.0022, Arch: "x86_64"}, // 0.22 spot ratio
+		},
+	})
+	require.NoError(t, err)
+
+	spec := types.WorkloadSpec{
+		DetectedKind: types.WorkloadKindScript,
+		Requirements: types.ResourceRequirements{CPU: "2"},
+	}
+	target := types.TargetConfig{
+		ID:           "hetzner-vm",
+		Kind:         types.TargetKindCloudVM,
+		Capabilities: types.Capabilities{Accounting: types.AccountingCapability{RateCard: "hetzner"}},
+	}
+
+	base := EstimateCost(spec, target, cat)
+	require.InDelta(t, 0.22, base.SpotRatio, 0.001, "sanity: base estimate carries the catalog spot ratio")
+
+	store, err := NewHistoryStore()
+	require.NoError(t, err)
+	require.NoError(t, store.Record(RunHistory{
+		RunID: "r1", TargetID: "hetzner-vm", WorkloadKind: string(spec.DetectedKind),
+		ActualDuration: 2 * time.Hour, Success: true, CompletedAt: time.Now(),
+	}))
+
+	est := EstimateCostWithHistory(spec, target, store, cat)
+	assert.InDelta(t, 0.22, est.SpotRatio, 0.001,
+		"the scaled (history) estimate must keep the catalog spot ratio, not drop it to zero")
+}
+
 // TestEstimateCost_PopulatesSelectedInstanceType verifies the estimate carries
 // the selected instance type structurally (not just in the assumptions prose),
 // so provisioning can launch the instance that was actually priced.
