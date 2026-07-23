@@ -162,6 +162,22 @@ func TestCLI_TargetsAdd_KeyFile(t *testing.T) {
 	assert.Equal(t, "/tmp/k", tc.SSH.KeyFile)
 }
 
+// A custom cloud-vm target can never be executed (only the built-in *-vm targets
+// resolve a provider adapter), so `targets add --kind cloud-vm` must be rejected
+// at add time rather than silently creating an unrunnable target.
+func TestCLI_TargetsAdd_RejectsCloudVM(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	_, _, err := executeCommand("targets", "add", "my-cloud", "--kind", "cloud-vm")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cloud-vm")
+
+	r := target.NewRegistry()
+	require.NoError(t, r.LoadUserConfig())
+	_, ok := r.Get("my-cloud")
+	assert.False(t, ok, "the unrunnable cloud-vm target must not be persisted")
+}
+
 func TestCLI_TargetsRemove(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 

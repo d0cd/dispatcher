@@ -111,5 +111,15 @@ func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate,
 		})
 	}
 
+	// Declared outputs on a target whose adapter can't retrieve them are silently
+	// lost: the docker and kubernetes adapters return no artifacts and tear the
+	// container/pod down after the run, so anything the workload wrote is gone.
+	if len(w.Outputs) > 0 && (t.Kind == types.TargetKindDocker || t.Kind == types.TargetKindKubernetes) {
+		risks = append(risks, types.Risk{
+			Category:    "outputs-unretrievable",
+			Description: "workload declares outputs: but the " + string(t.Kind) + " target does not retrieve artifacts and tears the container/pod down after the run — declared results will be lost; use an ssh or cloud-vm target to collect them",
+		})
+	}
+
 	return risks
 }

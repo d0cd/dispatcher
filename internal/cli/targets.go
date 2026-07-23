@@ -85,11 +85,15 @@ var targetsAddCmd = &cobra.Command{
 
 		kind := types.TargetKind(addFlags.kind)
 		switch kind {
-		case types.TargetKindDocker, types.TargetKindSSH, types.TargetKindKubernetes,
-			types.TargetKindCloudVM:
+		case types.TargetKindDocker, types.TargetKindSSH, types.TargetKindKubernetes:
 			// valid
+		case types.TargetKindCloudVM:
+			// A registry cloud-vm target resolves no provider adapter at run time
+			// (only the built-in *-vm targets do), so adding one would create a
+			// target that always fails to execute. Reject it rather than mislead.
+			return fmt.Errorf("custom cloud-vm targets are not runnable — use a built-in *-vm target (aws-vm, gcp-vm, azure-vm, hetzner-vm, oci-vm, lambda-vm)")
 		default:
-			return fmt.Errorf("unknown target kind %q (valid: docker, ssh, kubernetes, cloud-vm)", addFlags.kind)
+			return fmt.Errorf("unknown target kind %q (valid: docker, ssh, kubernetes)", addFlags.kind)
 		}
 
 		t := types.TargetConfig{
@@ -364,7 +368,7 @@ func statusIcon(status string) string {
 }
 
 func init() {
-	targetsAddCmd.Flags().StringVar(&addFlags.kind, "kind", "docker", "target kind: docker, ssh, kubernetes, cloud-vm")
+	targetsAddCmd.Flags().StringVar(&addFlags.kind, "kind", "docker", "target kind: docker, ssh, kubernetes")
 	targetsAddCmd.Flags().StringVar(&addFlags.host, "host", "", "hostname for SSH targets")
 	targetsAddCmd.Flags().StringVar(&addFlags.user, "user", "", "username for SSH targets")
 	targetsAddCmd.Flags().IntVar(&addFlags.port, "port", 22, "port for SSH targets")
