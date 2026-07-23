@@ -16,7 +16,7 @@ import (
 // capturePCR11 is a capture-only atls.Validator: it reads PCR11 out of the
 // azure-snp evidence bundle without pinning, so a first run can learn the PCR11
 // to pin. It proves nothing about image identity — the pinned re-run below does.
-type capturePCR11 struct{ pcr11 string }
+type capturePCR11 struct{ pcr11, measurement string }
 
 func (c *capturePCR11) Validate(_ context.Context, evidence, _, _ []byte) error {
 	ev, err := parseAzureSNPEvidence(evidence)
@@ -24,6 +24,9 @@ func (c *capturePCR11) Validate(_ context.Context, evidence, _, _ []byte) error 
 		return err
 	}
 	c.pcr11 = hex.EncodeToString(ev.PCRs[11])
+	if rep, err := parseSNPReport(ev.SNPReport); err == nil {
+		c.measurement = hex.EncodeToString(rep.measurement)
+	}
 	return nil
 }
 
@@ -48,16 +51,18 @@ func TestGolden_AzureSNPLiveExchange(t *testing.T) {
 	ctx := context.Background()
 
 	pcr11 := strings.TrimSpace(os.Getenv("DISPATCHER_AZURESNP_LIVE_PCR11"))
+	measurement := strings.TrimSpace(os.Getenv("DISPATCHER_AZURESNP_LIVE_MEASUREMENT"))
 	if pcr11 == "" {
 		capture := &capturePCR11{}
 		_, err := agent.RunOverATLS(ctx, addr, capture, agent.Payload{Command: []string{"true"}})
 		require.NoError(t, err, "capture run")
 		require.NotEmpty(t, capture.pcr11, "the evidence bundle must carry PCR11")
 		pcr11 = capture.pcr11
-		t.Logf("captured PCR11 = %s", pcr11)
+		measurement = capture.measurement
+		t.Logf("captured PCR11 = %s, launch measurement = %s", pcr11, measurement)
 	}
 
-	v := AzureSNPValidatorPinned(map[int]string{11: pcr11}, 0)
+	v := AzureSNPValidatorPinned(map[int]string{11: pcr11}, measurement, 0)
 	result, err := agent.RunOverATLS(ctx, addr, v, agent.Payload{
 		Command: []string{"sh", "-c", "echo hi from CVM; echo secret=$SECRET"},
 		DotEnv:  []byte("SECRET=azuresnp-sealed\n"),

@@ -150,11 +150,18 @@ func captureMeasurement(target confidential.Target, source string) (confidential
 		// Verify the full SEV-SNP + vTPM chain (fresh nonce, AK-bound quote) and derive
 		// the hardware-attested PCR11, so a compromised or MITM'd /attest endpoint can't
 		// poison the pinned measurement.
-		pcr11, err := attest.CaptureAzureSNPMeasurement(context.Background(), source)
+		pcr11, launchMeasurement, err := attest.CaptureAzureSNPMeasurement(context.Background(), source)
 		if err != nil {
 			return confidential.Pin{}, err
 		}
-		return confidential.Pin{Image: confidentialCaptureFlags.image, Measurement: pcr11, CapturedAt: nowRFC3339()}, nil
+		// Pin PCR11 AND the SNP launch measurement — the latter roots the vTPM AK in
+		// trusted Azure firmware and is required for a sound verify (see azure_snp.go).
+		return confidential.Pin{
+			Image:       confidentialCaptureFlags.image,
+			Measurement: pcr11,
+			Extra:       map[string]string{"launchMeasurement": launchMeasurement},
+			CapturedAt:  nowRFC3339(),
+		}, nil
 	}
 	return confidential.Pin{}, fmt.Errorf("unknown target %q", target)
 }

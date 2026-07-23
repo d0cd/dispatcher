@@ -174,7 +174,7 @@ func TestVerifyAzureSNP_RejectsDebugPolicy(t *testing.T) {
 	channelKey := []byte("azure-channel-public-key-32-byte")
 	pcr11 := make48(0xAB)[:32]
 	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, snpPolicyDebug, 9)
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "debug")
 }
@@ -184,7 +184,7 @@ func TestVerifyAzureSNP_RejectsMigrateMA(t *testing.T) {
 	channelKey := []byte("azure-channel-public-key-32-byte")
 	pcr11 := make48(0xAB)[:32]
 	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, snpPolicyMigrateMA, 9)
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "migration")
 }
@@ -194,7 +194,7 @@ func TestVerifyAzureSNP_RejectsBelowMinTCB(t *testing.T) {
 	channelKey := []byte("azure-channel-public-key-32-byte")
 	pcr11 := make48(0xAB)[:32]
 	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, 0, 5) // reported TCB 5
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}, MinTCB: 9})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}, MinTCB: 9})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TCB")
 }
@@ -208,12 +208,40 @@ func TestVerifyAzureSNP_Accepts(t *testing.T) {
 	pcr11 := make48(0xAB)[:32] // PCR values are the bank hash width (SHA-256 = 32)
 
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
-	measurement, gotKey, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	measurement, gotKey, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, hex.EncodeToString(pcr11), measurement, "measurement is the pinned PCR11")
 	assert.Equal(t, channelKey, gotKey, "the bound channel key is returned to seal to")
+}
+
+// The SNP launch MEASUREMENT roots the vTPM AK in trusted Azure firmware. Without
+// it, an attacker with their own ARK-chaining SNP box could embed their own AK in
+// REPORT_DATA and forge the entire vTPM/PCR chain. A missing or mismatched pin
+// must fail closed.
+func TestVerifyAzureSNP_EnforcesLaunchMeasurement(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
+
+	pol := func(meas string) AzureSNPPolicy {
+		return AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}, Measurement: meas}
+	}
+
+	// The genuine report's launch measurement (make48(0x11)) verifies.
+	_, _, err := verifyAzureSNP(ev, pol(hex.EncodeToString(make48(0x11))))
+	require.NoError(t, err)
+
+	// No launch measurement pinned → fail closed (the AK can't be rooted).
+	_, _, err = verifyAzureSNP(ev, pol(""))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "launch measurement")
+
+	// A mismatched launch measurement → reject (attacker firmware).
+	_, _, err = verifyAzureSNP(ev, pol(hex.EncodeToString(make48(0x22))))
+	require.Error(t, err)
 }
 
 // TestCaptureAzureSNPPCR11_DerivesVerifiedPCR11: capture-time verification of a
@@ -226,7 +254,7 @@ func TestCaptureAzureSNPPCR11_DerivesVerifiedPCR11(t *testing.T) {
 	pcr11 := make48(0xAB)[:32]
 
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
-	got, err := captureAzureSNPPCR11(ev, roots, nonce)
+	got, _, err := captureAzureSNPPCR11(ev, roots, nonce)
 	require.NoError(t, err)
 	assert.Equal(t, hex.EncodeToString(pcr11), got, "capture derives the hardware-attested PCR11")
 }
@@ -241,7 +269,7 @@ func TestCaptureAzureSNPPCR11_RejectsForgedQuote(t *testing.T) {
 		signed := sha256.Sum256(e.Quote)
 		e.QuoteSig, _ = rsa.SignPKCS1v15(rand.Reader, other, crypto.SHA256, signed[:])
 	})
-	_, err := captureAzureSNPPCR11(ev, roots, nonce)
+	_, _, err := captureAzureSNPPCR11(ev, roots, nonce)
 	require.Error(t, err, "a bundle not signed by the bound AK cannot be captured")
 }
 
@@ -258,7 +286,7 @@ func TestVerifyAzureSNP_RejectsUnquotedPinnedPCR(t *testing.T) {
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, func(e *agent.AzureSNPEvidence) {
 		e.PCRs[7] = make48(0x77)[:32]
 	})
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{7: hex.EncodeToString(make48(0x77)[:32])},
 	})
 	require.Error(t, err)
@@ -273,7 +301,7 @@ func TestVerifyAzureSNP_RejectsPCRMismatch(t *testing.T) {
 	pcr11 := make48(0xAB)[:32]
 
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(make48(0xCD)[:32])},
 	})
 	require.Error(t, err)
@@ -291,7 +319,7 @@ func TestVerifyAzureSNP_RejectsUnboundAK(t *testing.T) {
 		e.RuntimeData = append([]byte(nil), e.RuntimeData...)
 		e.RuntimeData[len(e.RuntimeData)-2] ^= 0xFF // tamper → SHA-256 no longer matches REPORT_DATA
 	})
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
 	})
 	require.Error(t, err)
@@ -306,7 +334,7 @@ func TestVerifyAzureSNP_RejectsNonceMismatch(t *testing.T) {
 	pcr11 := make48(0xAB)[:32]
 
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: bytesRepeat(0x11, 32), PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
 	})
 	require.Error(t, err)
@@ -325,7 +353,7 @@ func TestVerifyAzureSNP_RejectsForgedQuote(t *testing.T) {
 		signed := sha256.Sum256(e.Quote)
 		e.QuoteSig, _ = rsa.SignPKCS1v15(rand.Reader, other, crypto.SHA256, signed[:])
 	})
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
 	})
 	require.Error(t, err)

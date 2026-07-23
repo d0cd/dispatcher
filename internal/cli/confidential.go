@@ -83,9 +83,11 @@ func newAzureSNPConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, e
 	pin := confidential.Resolve(confidential.AzureSNP)
 	image := orEnv(pin.Image, "DISPATCHER_AZURE_SNP_IMAGE")
 	pcr11 := orEnv(pin.Measurement, "DISPATCHER_AZURE_SNP_PCR11")
-	if image == "" || pcr11 == "" {
-		return nil, fmt.Errorf("confidential Azure measured runs need the pinned measured image: set DISPATCHER_AZURE_SNP_IMAGE " +
-			"(a ConfidentialVm gallery image id) and DISPATCHER_AZURE_SNP_PCR11 (its measured PCR11); build with deploy/azure-uki/mkosi")
+	launchMeas := orEnv(pin.Extra["launchMeasurement"], "DISPATCHER_AZURE_SNP_LAUNCH_MEASUREMENT")
+	if image == "" || pcr11 == "" || launchMeas == "" {
+		return nil, fmt.Errorf("confidential Azure measured runs need the pinned measured image AND the SNP launch measurement: set DISPATCHER_AZURE_SNP_IMAGE " +
+			"(a ConfidentialVm gallery image id), DISPATCHER_AZURE_SNP_PCR11 (its measured PCR11), and DISPATCHER_AZURE_SNP_LAUNCH_MEASUREMENT " +
+			"(the SNP launch measurement that roots the vTPM AK — re-capture to record it); build with deploy/azure-uki/mkosi")
 	}
 	rg := os.Getenv("DISPATCHER_AZURE_RG")
 	if rg == "" {
@@ -93,7 +95,7 @@ func newAzureSNPConfidentialAdapter(_ context.Context) (adapter.TargetAdapter, e
 	}
 	location := os.Getenv("DISPATCHER_AZURE_LOCATION")
 	return cloudvm.NewAzureSNPConfidentialAdapter(
-		cloudvm.NewAzureProvider(rg, location), image, map[int]string{11: pcr11},
+		cloudvm.NewAzureProvider(rg, location), image, map[int]string{11: pcr11}, launchMeas,
 		cloudvm.Config{ProviderID: cloudvm.ProviderAzure, Region: location, SSHUser: "dispatcher"},
 	), nil
 }

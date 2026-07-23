@@ -20,6 +20,7 @@ const (
 	snpReportLen    = 0x4A0
 	snpSignedLen    = 0x2A0
 	snpOffPolicy    = 0x08
+	snpOffVMPL      = 0x30 // VMPL, u32 (the privilege level the report was requested at)
 	snpOffSigAlgo   = 0x34
 	snpOffData      = 0x50  // REPORT_DATA, 64 bytes
 	snpOffMeas      = 0x90  // MEASUREMENT, 48 bytes
@@ -52,6 +53,7 @@ type snpReport struct {
 	signed      []byte // the 0x2A0-byte signed prefix
 	sigAlgo     uint32
 	policy      uint64
+	vmpl        uint32
 	reportedTCB uint64
 	measurement []byte
 	reportData  []byte
@@ -68,6 +70,7 @@ func parseSNPReport(b []byte) (*snpReport, error) {
 		signed:      append([]byte(nil), b[:snpSignedLen]...),
 		sigAlgo:     leUint32(b[snpOffSigAlgo:]),
 		policy:      leUint64(b[snpOffPolicy:]),
+		vmpl:        leUint32(b[snpOffVMPL:]),
 		reportedTCB: leUint64(b[snpOffTCB:]),
 		measurement: append([]byte(nil), b[snpOffMeas:snpOffMeas+snpLenMeas]...),
 		reportData:  append([]byte(nil), b[snpOffData:snpOffData+snpLenData]...),
