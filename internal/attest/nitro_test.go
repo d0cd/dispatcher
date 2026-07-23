@@ -130,6 +130,60 @@ func TestVerifyNitroDoc_Accepts(t *testing.T) {
 	assert.Equal(t, []byte("channel-public-key-bytes-32-xxxx"), channelKey, "the bound channel key is returned to seal to")
 }
 
+// TestVerifyNitroDoc_RejectsCALeaf: a document whose "leaf" is actually a CA cert
+// that chains to the pinned root. A genuine NSM leaf is an end-entity cert; a CA
+// posing as the signing leaf must be rejected so an intermediate can never stand
+// in for the enclave's attestation key.
+func TestVerifyNitroDoc_RejectsCALeaf(t *testing.T) {
+	root, rootKey := nitroTestPKI(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	nonce := []byte("nonce-from-verifier-32-bytes-xxx")
+
+	// Build a CA cert (IsCA=true) signed by root, and sign the COSE doc with it.
+	caKey, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	require.NoError(t, err)
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(9),
+		Subject:               pkix.Name{CommonName: "rogue-ca-leaf"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, root, &caKey.PublicKey, rootKey)
+	require.NoError(t, err)
+
+	doc := nitroDoc{
+		ModuleID:    "i-0abc-enc0",
+		Digest:      "SHA384",
+		Timestamp:   1_700_000_000_000,
+		PCRs:        map[uint][]byte{0: nitroPCR(0x0A)},
+		Certificate: caDER,
+		CABundle:    [][]byte{root.Raw},
+		PublicKey:   []byte("channel-public-key-bytes-32-xxxx"),
+		Nonce:       nonce,
+	}
+	payload, err := cbor.Marshal(doc)
+	require.NoError(t, err)
+	signer, err := cose.NewSigner(cose.AlgorithmES384, caKey)
+	require.NoError(t, err)
+	msg := cose.NewSign1Message()
+	msg.Payload = payload
+	msg.Headers.Protected.SetAlgorithm(cose.AlgorithmES384)
+	require.NoError(t, msg.Sign(rand.Reader, nil, signer))
+	raw, err := msg.MarshalCBOR()
+	require.NoError(t, err)
+
+	_, _, err = verifyNitroDoc(raw, pool, NitroPolicy{
+		Nonce: nonce,
+		PCRs:  map[int]string{0: hex.EncodeToString(nitroPCR(0x0A))},
+	})
+	require.Error(t, err, "a CA cert posing as the NSM leaf must be rejected")
+	assert.Contains(t, err.Error(), "end-entity")
+}
+
 // TestVerifyNitroDoc_RejectsUntrustedRoot: a document whose leaf does not chain to
 // the pinned root must fail (an attacker's self-signed NSM).
 func TestVerifyNitroDoc_RejectsUntrustedRoot(t *testing.T) {
