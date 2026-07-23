@@ -390,16 +390,59 @@ func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string, t
 		createArgs = append(createArgs, "--tag-specifications", awsTagSpec("security-group", tags))
 	}
 	out, err = runCLI(ctx, "aws", createArgs...)
+	adopted := false
 	if err != nil {
-		return "", fmt.Errorf("aws create security group: %w", err)
+		// A same-run retry (e.g. a spot-reclaim re-provision) can find the per-run
+		// SG still present because the terminated instance no longer reports its SG
+		// membership, so teardown couldn't locate and delete it. Adopt the existing
+		// group (name+VPC identify this run's group) instead of failing the retry.
+		if isAWSDuplicateSG(err) {
+			if existing := awsFindSGByName(ctx, region, vpc, name); existing != "" {
+				out = []byte(existing)
+				adopted = true
+			}
+		}
+		if !adopted {
+			return "", fmt.Errorf("aws create security group: %w", err)
+		}
 	}
 	sg := strings.TrimSpace(string(out))
 	if _, err := runCLI(ctx, "aws", "ec2", "authorize-security-group-ingress", "--region", region,
 		"--group-id", sg, "--protocol", "tcp", "--port", "22", "--cidr", cidr); err != nil {
-		awsDeleteSecurityGroup(ctx, region, sg)
+		// An adopted group already carries the ingress rule; a duplicate is success.
+		if isAWSDuplicatePermission(err) {
+			return sg, nil
+		}
+		if !adopted {
+			awsDeleteSecurityGroup(ctx, region, sg)
+		}
 		return "", fmt.Errorf("aws authorize ssh ingress: %w", err)
 	}
 	return sg, nil
+}
+
+func isAWSDuplicateSG(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "InvalidGroup.Duplicate")
+}
+
+func isAWSDuplicatePermission(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "InvalidPermission.Duplicate")
+}
+
+// awsFindSGByName resolves a security group id by its name within a VPC, used to
+// adopt a per-run group that a prior teardown left behind. Returns "" if none.
+func awsFindSGByName(ctx context.Context, region, vpc, name string) string {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-security-groups", "--region", region,
+		"--filters", "Name=group-name,Values="+name, "Name=vpc-id,Values="+vpc,
+		"--query", "SecurityGroups[0].GroupId", "--output", "text")
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" || id == "None" {
+		return ""
+	}
+	return id
 }
 
 // awsDeleteSecurityGroup removes a group (best-effort; a group in use can't be

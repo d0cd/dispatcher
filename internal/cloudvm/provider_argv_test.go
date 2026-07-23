@@ -2,12 +2,38 @@ package cloudvm
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// On a spot-reclaim re-provision the per-run SG can survive teardown (a terminated
+// instance stops reporting its SG membership). CreateVM's SG setup must adopt the
+// existing same-name group instead of failing on InvalidGroup.Duplicate.
+func TestAWSCreateSSHSecurityGroup_AdoptsDuplicate(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-1"), nil
+		case slices.Contains(args, "create-security-group"):
+			return nil, errors.New("An error occurred (InvalidGroup.Duplicate) when calling the CreateSecurityGroup operation: the security group 'dispatcher-r' already exists")
+		case slices.Contains(args, "describe-security-groups"):
+			return []byte("sg-existing\n"), nil
+		case slices.Contains(args, "authorize-security-group-ingress"):
+			return nil, errors.New("An error occurred (InvalidPermission.Duplicate) when calling the AuthorizeSecurityGroupIngress operation: the specified rule already exists")
+		default:
+			return []byte(""), nil
+		}
+	})
+	sg, err := awsCreateSSHSecurityGroup(context.Background(), "us-east-1", "dispatcher-r", "0.0.0.0/0",
+		map[string]string{"dispatcher": "true"})
+	require.NoError(t, err, "a duplicate SG on retry must be adopted, not fatal")
+	assert.Equal(t, "sg-existing", sg)
+}
 
 func TestAWSInstanceArch(t *testing.T) {
 	cases := map[string]string{
