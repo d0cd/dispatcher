@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
@@ -84,21 +83,7 @@ func attestFunc() agent.AttestFunc {
 			pcrMap[uint32(idx)] = digest
 		}
 
-		ev := agent.AzureSNPEvidence{
-			SNPReport:   snpReport,
-			VCEK:        vcekDER,
-			ASK:         askDER,
-			RuntimeData: runtimeData,
-			Quote:       quote,
-			QuoteSig:    sig.RSA.Signature,
-			PCRs:        pcrMap,
-			ChannelKey:  channelPub,
-		}
-		raw, err := json.Marshal(ev)
-		if err != nil {
-			return "", err
-		}
-		return base64.StdEncoding.EncodeToString(raw), nil
+		return agent.AssembleAzureSNP(snpReport, runtimeData, vcekDER, askDER, quote, sig.RSA.Signature, pcrMap, channelPub)
 	}
 }
 
