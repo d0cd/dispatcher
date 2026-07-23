@@ -56,10 +56,11 @@ func TestCreateConfidentialSpaceVM_ParseFailureTearsDown(t *testing.T) {
 
 	g := &GCPProvider{project: "p", zone: "us-central1-a"}
 	opts := VMOptions{
-		Name:                  "dispatcher-cs-job",
-		Region:                "us-central1-a",
-		ConfidentialAllowFrom: "1.2.3.4/32",
-		Tags:                  map[string]string{"dispatcher": "true", "dispatcher-run-id": "plan_x"},
+		Name:                   "dispatcher-cs-job",
+		Region:                 "us-central1-a",
+		ConfidentialSpaceImage: "us-docker.pkg.dev/proj/repo/agent@sha256:abc123",
+		ConfidentialAllowFrom:  "1.2.3.4/32",
+		Tags:                   map[string]string{"dispatcher": "true", "dispatcher-run-id": "plan_x"},
 	}
 
 	_, err := g.createConfidentialSpaceVM(context.Background(), opts)

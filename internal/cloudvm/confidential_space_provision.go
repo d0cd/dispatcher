@@ -154,6 +154,12 @@ func (g *GCPProvider) createConfidentialSpaceVM(ctx context.Context, opts VMOpti
 			return nil, err
 		}
 	}
+	// The image ref goes into a comma-joined inline --metadata value, so a comma
+	// or other CLI-significant char would corrupt the metadata block. Validate the
+	// charset (as every other gcloud argv value is), matching the standard path.
+	if !isSafeArg(opts.ConfidentialSpaceImage) {
+		return nil, fmt.Errorf("gcp: confidential-space image ref %q contains characters outside [a-zA-Z0-9_.:/@-]", opts.ConfidentialSpaceImage)
+	}
 	args := gcpConfidentialSpaceCreateArgs(opts, zone, g.project)
 
 	output, err := retryCLIOutput(ctx, "gcloud", "gcloud compute instances create", args...)
