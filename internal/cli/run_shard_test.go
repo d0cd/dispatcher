@@ -19,6 +19,42 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
+func fanoutPlan(perRun, budget float64, sh types.ShardSpec, approvals int) *types.Plan {
+	return &types.Plan{
+		Constraints:       types.PlanConstraints{MaxEstimatedCostUSD: budget},
+		Recommendation:    &types.Recommendation{EstimatedCost: types.CostEstimate{Value: perRun, Currency: "USD"}},
+		RequiredApprovals: make([]types.PolicyRequirement, approvals),
+		Workload:          types.WorkloadSpec{Shard: sh},
+	}
+}
+
+// A count-mode fan-out must enforce --max-cost and the approval threshold against
+// the TOTAL spend, not a single shard.
+func TestCheckShardFanoutCost(t *testing.T) {
+	const auto = 5.0
+
+	// $4.50/run × 100 shards = $450: busts a $5 budget even though one shard fits.
+	err := checkShardFanoutCost(fanoutPlan(4.50, 5.0, types.ShardSpec{Count: 100}, 0), auto, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds --max-cost")
+
+	// No budget, but the aggregate exceeds the auto-approve threshold → needs --yes.
+	err = checkShardFanoutCost(fanoutPlan(4.50, 0, types.ShardSpec{Count: 100}, 0), auto, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pass --yes")
+
+	// The same aggregate is allowed once approved.
+	assert.NoError(t, checkShardFanoutCost(fanoutPlan(4.50, 0, types.ShardSpec{Count: 100}, 0), auto, true))
+
+	// A small fan-out under the threshold with no budget/approvals is fine.
+	assert.NoError(t, checkShardFanoutCost(fanoutPlan(1.0, 0, types.ShardSpec{Count: 2}, 0), auto, false))
+
+	// A discover-mode (unbounded) fan-out can't be confirmed within a budget.
+	err = checkShardFanoutCost(fanoutPlan(1.0, 10.0, types.ShardSpec{Discover: "ls"}, 0), auto, false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unbounded")
+}
+
 func shardPlan(spec types.ShardSpec) *types.Plan {
 	return &types.Plan{
 		Metadata:       types.PlanMetadata{ID: "plan_shard"},

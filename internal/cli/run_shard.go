@@ -12,6 +12,47 @@ import (
 	"github.com/d0cd/dispatcher/internal/types"
 )
 
+// shardFanoutCount returns the number of full runs a sharded plan will provision
+// and whether that number is bounded. Count-mode is exact; discover-mode is
+// capped by Count when set (a known upper bound) and otherwise unbounded.
+func shardFanoutCount(s types.ShardSpec) (int, bool) {
+	if s.Discover != "" {
+		if s.Count > 0 {
+			return s.Count, true // Count caps the shard count → known worst case
+		}
+		return 0, false // unbounded until the discover command runs
+	}
+	if s.Count > 0 {
+		return s.Count, true
+	}
+	return 1, true
+}
+
+// checkShardFanoutCost enforces --max-cost and the approval threshold against the
+// TOTAL fan-out spend (shard count × the per-run estimate the plan priced), since
+// a fan-out multiplies real cost by the shard count. Returns a non-nil error when
+// the run must be blocked (over budget, or needs approval and --yes was not given).
+func checkShardFanoutCost(p *types.Plan, autoApproveUSD float64, yes bool) error {
+	perRun := p.Recommendation.EstimatedCost.Value
+	count, known := shardFanoutCount(p.Workload.Shard)
+	total := perRun * float64(count)
+
+	if budget := p.Constraints.MaxEstimatedCostUSD; budget > 0 {
+		if !known {
+			return fmt.Errorf("sharded run with a discover-based (unbounded) shard count cannot be confirmed within --max-cost $%.2f; set a fixed shard.count or drop the budget", budget)
+		}
+		if total > budget {
+			return fmt.Errorf("fan-out total estimated cost $%.2f (%d shards × $%.2f) exceeds --max-cost $%.2f", total, count, perRun, budget)
+		}
+	}
+	// A fan-out auto-approves each shard, so the aggregate — which can exceed the
+	// threshold even when a single shard doesn't — must be approved up front.
+	if (!known || total > autoApproveUSD || len(p.RequiredApprovals) > 0) && !yes {
+		return fmt.Errorf("this fan-out's total estimated cost is $%.2f across %d shards; sharded runs auto-approve each shard — pass --yes to approve the whole fan-out", total, count)
+	}
+	return nil
+}
+
 // shardOutcomes collects each shard's run so their outputs can be aggregated
 // after the fan-out. Safe for concurrent record from shard goroutines.
 type shardOutcomes struct {

@@ -18,6 +18,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/cost"
 	"github.com/d0cd/dispatcher/internal/plan"
+	"github.com/d0cd/dispatcher/internal/policy"
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/shard"
 	"github.com/d0cd/dispatcher/internal/target"
@@ -215,10 +216,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Sharded fan-out: run the workload across N shards, each a full run.
 	if p.Workload.Shard.Enabled() {
-		// A sharded run auto-approves each shard, so a plan needing approval
-		// must be approved once, up front, via --yes — never silently bypassed.
-		if len(p.RequiredApprovals) > 0 && !runFlags.yes {
-			return fmt.Errorf("this plan requires approval; sharded runs auto-approve each shard — pass --yes to approve the whole fan-out")
+		// The plan priced a SINGLE run; enforce --max-cost and the approval
+		// threshold against the TOTAL fan-out spend so a large shard.count can't
+		// silently bypass either control.
+		if err := checkShardFanoutCost(p, policy.DefaultCostAutoApproveUSD, runFlags.yes); err != nil {
+			return err
+		}
+		if count, _ := shardFanoutCount(p.Workload.Shard); count > 1 {
+			fmt.Fprintf(os.Stderr, "Fan-out:           %d shards, ~%s %s total\n",
+				count, formatCost(p.Recommendation.EstimatedCost.Value*float64(count)), p.Recommendation.EstimatedCost.Currency)
 		}
 		shardCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
