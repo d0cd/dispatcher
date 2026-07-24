@@ -102,7 +102,9 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		return nil, fmt.Errorf("azure: %w", err)
 	}
 	if opts.AllowSSHFrom != "" {
-		return nil, errFirewallUnsupported("azure")
+		if err := validateFirewallCIDR(opts.AllowSSHFrom); err != nil {
+			return nil, fmt.Errorf("azure: %w", err)
+		}
 	}
 
 	args := []string{
@@ -114,6 +116,12 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		"--image", image,
 		"--admin-username", "dispatcher",
 		"--output", "json",
+	}
+	// Per-run SSH firewall: create the VM with NO default SSH rule (Azure
+	// default-denies inbound from the Internet), then add one scoped ALLOW rule
+	// below — SSH is reachable only from opts.AllowSSHFrom, never briefly open.
+	if opts.AllowSSHFrom != "" {
+		args = append(args, "--nsg-rule", "NONE")
 	}
 	// Inject dispatcher's per-run public key. --generate-ssh-keys would make
 	// Azure mint (or reuse ~/.ssh) a key dispatcher doesn't hold, so it could
@@ -218,6 +226,17 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		return nil, fmt.Errorf("cannot parse az output: %w", err)
 	}
 
+	// Scope SSH to the requested CIDR on the auto-created <name>NSG. On failure,
+	// reap the VM rather than leave one whose SSH posture is undefined.
+	if opts.AllowSSHFrom != "" {
+		if err := a.createSSHRule(ctx, opts.Name, opts.AllowSSHFrom); err != nil {
+			cctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			_ = a.DestroyVM(cctx, opts.Name)
+			return nil, fmt.Errorf("azure ssh firewall: %w", err)
+		}
+	}
+
 	return &VMInfo{
 		ID:           opts.Name, // Azure uses name for most operations
 		Name:         opts.Name,
@@ -227,6 +246,22 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		CreatedAt:    time.Now().UTC(),
 		Tags:         opts.Tags,
 	}, nil
+}
+
+// createSSHRule adds a least-privilege inbound SSH rule (tcp/22 from cidr) to the
+// VM's auto-created <name>NSG. The VM is created with --nsg-rule NONE, so this is
+// the only inbound allow and SSH is reachable only from cidr. If the NSG isn't
+// present the rule-create fails loud (never leaving SSH silently open).
+func (a *AzureProvider) createSSHRule(ctx context.Context, vmName, cidr string) error {
+	_, err := runCLI(ctx, "az", "network", "nsg", "rule", "create",
+		"--resource-group", a.resourceGroup,
+		"--nsg-name", vmName+"NSG",
+		"--name", "dispatcher-ssh",
+		"--priority", "300",
+		"--destination-port-ranges", sshPort,
+		"--source-address-prefixes", cidr,
+		"--access", "Allow", "--protocol", "Tcp", "--direction", "Inbound")
+	return err
 }
 
 // azureSKUAvailable reports whether the VM size is orderable in the location for

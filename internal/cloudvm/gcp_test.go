@@ -62,3 +62,31 @@ func TestGCPCreateVM_SSHFirewallLifecycle(t *testing.T) {
 	assert.Contains(t, joined, "firewall-rules create dispatcher-fw-run1 ", "must create the allow rule")
 	assert.Contains(t, joined, "--tags=dispatcher-fw-run1", "the instance must carry the firewall tag")
 }
+
+// Azure restricts SSH via --nsg-rule NONE at create + one scoped ALLOW rule on the
+// auto <name>NSG (Azure default-denies inbound, so no deny rule is needed).
+func TestAzureCreateVM_SSHFirewallLifecycle(t *testing.T) {
+	prevRun, prevRetry := runCLI, retryCLIOutput
+	t.Cleanup(func() { runCLI = prevRun; retryCLIOutput = prevRetry })
+	var calls []string
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return []byte(`[]`), nil
+	}
+	retryCLIOutput = func(_ context.Context, _, _ string, args ...string) ([]byte, error) {
+		calls = append(calls, strings.Join(args, " "))
+		return []byte(`{"id":"/x","publicIpAddress":"1.2.3.4"}`), nil
+	}
+	a := NewAzureProvider("rg", "eastus")
+	_, err := a.CreateVM(context.Background(), VMOptions{
+		Name: "vm1", InstanceType: "Standard_B1s", AllowSSHFrom: "203.0.113.4/32",
+		Tags: map[string]string{"dispatcher-run-id": "run1"},
+	})
+	require.NoError(t, err)
+	joined := strings.Join(calls, "\n")
+	assert.Contains(t, joined, "--nsg-rule NONE", "the VM must be created without a default open-SSH rule")
+	assert.Contains(t, joined, "network nsg rule create", "a scoped SSH rule must be added")
+	assert.Contains(t, joined, "--nsg-name vm1NSG")
+	assert.Contains(t, joined, "--source-address-prefixes 203.0.113.4/32")
+	assert.Contains(t, joined, "--destination-port-ranges 22")
+}

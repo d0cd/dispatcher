@@ -172,13 +172,13 @@ func TestHetznerFirewallArgs(t *testing.T) {
 // or a no-op rule that implies SSH is locked down. GCP is included because an
 // additive ALLOW rule cannot restrict the default network's default-allow-ssh.
 func TestFirewallUnsupportedProviders(t *testing.T) {
-	// AWS and GCP are intentionally absent: they now provision a per-run firewall
-	// (SG / deny+allow rules) for SSH ingress instead of rejecting --allow-ssh-from.
+	// AWS/GCP/Azure are intentionally absent: they now provision a per-run firewall
+	// (SG / deny+allow rules / scoped NSG rule) for SSH ingress instead of rejecting
+	// --allow-ssh-from.
 	cases := []struct {
 		name     string
 		provider Provider
 	}{
-		{"azure", NewAzureProvider("rg", "eastus")},
 		{"lima", NewLimaProvider()},
 	}
 	for _, c := range cases {
