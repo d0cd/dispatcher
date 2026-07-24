@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/d0cd/dispatcher/internal/secrets"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -139,6 +140,24 @@ func TestLambdaListVMs_FiltersByEncodedRunID(t *testing.T) {
 	all, err := p.ListVMs(context.Background(), map[string]string{"dispatcher": "true"})
 	require.NoError(t, err)
 	require.Len(t, all, 2)
+}
+
+// NewLambdaProvider resolves its API key through the generic secrets resolver, so
+// a configured secrets: command supplies the key without a plaintext env var.
+func TestNewLambdaProvider_ResolvesKeyFromSecretCommand(t *testing.T) {
+	os.Unsetenv("DISPATCHER_LAMBDA_API_KEY")
+	secrets.SetCommands(map[string][]string{"DISPATCHER_LAMBDA_API_KEY": {"printf", "resolved-key"}})
+	t.Cleanup(func() { secrets.SetCommands(nil); os.Unsetenv("DISPATCHER_LAMBDA_API_KEY") })
+
+	p := NewLambdaProvider("us-east-1")
+	var gotAuth string
+	p.do = func(req *http.Request) (*http.Response, error) {
+		gotAuth = req.Header.Get("Authorization")
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":[]}`)), Header: make(http.Header)}, nil
+	}
+	_, err := p.ListVMs(context.Background(), map[string]string{"dispatcher": "true"})
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer resolved-key", gotAuth, "the API key must be resolved from the secrets: command")
 }
 
 func TestLambdaDestroyVM_TerminatesAndDeletesKey(t *testing.T) {

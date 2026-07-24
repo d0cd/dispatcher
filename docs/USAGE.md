@@ -123,6 +123,22 @@ the instance type via the plan (e.g. `gpu_1x_a100`); Lambda has no safe default.
 Provisioning only — no confidential execution, no per-run SSH firewall, and no
 in-VM watchdog (a dead dispatcher is reclaimed by `dispatcher gc`).
 
+### Secrets from a command
+
+Rather than exporting a credential in plaintext, `dispatcher.yaml` can resolve any
+`DISPATCHER_*` secret from a command whose stdout is the value. An explicit
+environment variable always wins; otherwise the command runs (lazily, on first
+use) and its trimmed output is used. It's generic — supply whatever command reads
+your secret (a secret manager, `pass`, a script):
+
+```yaml
+secrets:
+  DISPATCHER_LAMBDA_API_KEY: ["pass", "show", "lambda/api-key"]
+```
+
+A command that fails leaves the variable unset, so the provider fails closed as if
+no key were configured.
+
 User-defined targets (any SSH host, custom cloud) are added with `dispatcher targets add`.
 
 ## Bring your own hosts

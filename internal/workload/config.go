@@ -110,6 +110,11 @@ type DispatcherConfig struct {
 	// shards' outputs are collected and how a shard failure is handled.
 	Shard     *DispatchShardConfig     `yaml:"shard,omitempty"`
 	Aggregate *DispatchAggregateConfig `yaml:"aggregate,omitempty"`
+	// Secrets maps an environment-variable name to a command whose stdout supplies
+	// its value when the variable is unset, so credentials (e.g. a provider API
+	// key) need never be written in plaintext. The command is operator-supplied and
+	// generic — any secret manager or script that prints the secret.
+	Secrets map[string][]string `yaml:"secrets,omitempty"`
 }
 
 // DispatchShardConfig describes fan-out in dispatcher.yaml.

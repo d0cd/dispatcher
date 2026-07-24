@@ -12,6 +12,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/policy"
 	"github.com/d0cd/dispatcher/internal/risk"
+	"github.com/d0cd/dispatcher/internal/secrets"
 	"github.com/d0cd/dispatcher/internal/target"
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/d0cd/dispatcher/internal/workload"
@@ -53,6 +54,9 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		return nil, fmt.Errorf("load dispatcher config: %w", cfgErr)
 	}
 	if cfg != nil {
+		// Register secret-resolution commands before any provider reads a secret,
+		// so a configured credential command is honored for this run.
+		secrets.SetCommands(cfg.Secrets)
 		if constraints.MaxEstimatedCostUSD == 0 && cfg.MaxCost > 0 {
 			constraints.MaxEstimatedCostUSD = cfg.MaxCost
 		}

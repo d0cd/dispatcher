@@ -11,6 +11,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/d0cd/dispatcher/internal/secrets"
 )
 
 // LambdaProvider implements Provider against the Lambda Cloud REST API
@@ -51,13 +53,14 @@ func (l LambdaProvider) redactedString() string {
 }
 
 // NewLambdaProvider builds a Lambda Cloud provider. The API key comes from
-// DISPATCHER_LAMBDA_API_KEY; region defaults to us-east-1 when unset.
+// DISPATCHER_LAMBDA_API_KEY — set directly, or resolved from a configured
+// secrets: command; region defaults to us-east-1 when unset.
 func NewLambdaProvider(region string) *LambdaProvider {
 	if region == "" {
 		region = "us-east-1"
 	}
 	return &LambdaProvider{
-		apiKey:        secret(os.Getenv("DISPATCHER_LAMBDA_API_KEY")),
+		apiKey:        secret(secrets.Get("DISPATCHER_LAMBDA_API_KEY")),
 		defaultRegion: region,
 		baseURL:       "https://cloud.lambda.ai/api/v1",
 		do:            http.DefaultClient.Do,
