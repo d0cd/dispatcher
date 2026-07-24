@@ -151,6 +151,47 @@ func TestAzureFetcher_Fetch(t *testing.T) {
 	assert.Equal(t, "Standard_F4s_v2", instances[1].Name)
 }
 
+// Azure returns a Spot meter alongside the on-demand row for a SKU; the fetcher
+// must fold that live spot price into the SKU's SpotPricePerHour (not drop it and
+// fall back to the coarse per-provider factor), and ignore the legacy Low Priority
+// meter.
+func TestAzureFetcher_MergesSpotPrices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"Items": [
+				{
+					"armSkuName": "Standard_D2s_v3", "retailPrice": 0.096,
+					"productName": "Virtual Machines DSv3 Series", "meterName": "D2s v3",
+					"unitOfMeasure": "1 Hour", "type": "Consumption"
+				},
+				{
+					"armSkuName": "Standard_D2s_v3", "retailPrice": 0.019,
+					"productName": "Virtual Machines DSv3 Series", "meterName": "D2s v3 Spot",
+					"unitOfMeasure": "1 Hour", "type": "Consumption"
+				},
+				{
+					"armSkuName": "Standard_D2s_v3", "retailPrice": 0.012,
+					"productName": "Virtual Machines DSv3 Series Low Priority",
+					"meterName": "D2s v3 Low Priority",
+					"unitOfMeasure": "1 Hour", "type": "Consumption"
+				}
+			],
+			"NextPageLink": ""
+		}`))
+	}))
+	defer srv.Close()
+
+	f := &AzureFetcher{Region: "eastus", BaseURL: srv.URL, Client: srv.Client()}
+	instances, err := f.Fetch(context.Background())
+	require.NoError(t, err)
+
+	require.Len(t, instances, 1, "only the on-demand row is emitted as an instance")
+	assert.Equal(t, "Standard_D2s_v3", instances[0].Name)
+	assert.Equal(t, 0.096, instances[0].PricePerHour, "on-demand price")
+	assert.Equal(t, 0.019, instances[0].SpotPricePerHour, "live spot price folded in, not the legacy Low Priority rate")
+}
+
 // --- AWS: parser-level tests ------------------------------------------------
 
 func TestAWSFetcher_ParseQueryEntry(t *testing.T) {
