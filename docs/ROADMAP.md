@@ -95,7 +95,8 @@ only if control-plane starvation is ever actually observed).
 |---|---|---|
 | **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. (The warning when `outputs:` is set on an unretrievable target is implemented as the `outputs-unretrievable` risk; actual collection remains.) | M | Medium |
 | **Per-run SSH firewall beyond Hetzner + AWS** — `--allow-ssh-from` is honored end-to-end on hetzner-vm and aws-vm (per-run firewall / security group); GCP/Azure/Lima/Kubernetes still reject it — no per-run firewall (Azure `az vm create` opens tcp/22 by default; a scoped NSG rule is unimplemented; GCP's additive default-allow-ssh can't be subtracted). Add the GCP/Azure NSG/firewall rules. | S | Low |
-| **Spot/preemptible support** — delivered end-to-end: a `--spot` flag on plan/run, real provisioning on AWS/GCP/Azure/OCI, live spot pricing via `SpotRatio`/`ApplySpot`, and reclaim detection in the adapter. | — | Done |
+| **Spot/preemptible support** — delivered end-to-end: a `--spot` flag on plan/run, real provisioning on AWS/GCP/Azure/OCI, live spot pricing via `SpotRatio`/`ApplySpot` (all four providers, Azure Spot now folded from the retail feed), and reclaim detection in the adapter. | — | Done |
+| **Eviction-notice polling** — AWS (2-min IMDS warning), GCP/Azure (~30s metadata/Scheduled Events) all signal an impending spot reclaim; dispatcher only notices after the VM is gone. Deferred: without workload checkpointing the notice buys little (nowhere to drain/flush to), so it's only worth wiring once checkpoint/resume support exists — if ever. | M | Deferred |
 
 ## Confidential computing (secure jobs)
 
