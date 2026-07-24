@@ -3,13 +3,12 @@ name: Live Hetzner stress lane
 # Opt-in live-provider reliability check: provisions a REAL Hetzner VM and runs a
 # CPU-saturating job end-to-end, asserting control-plane headroom / watchdog
 # renewal (the run completes under saturation), artifact recovery, budget
-# accounting, and zero residual resources. Costs a few cents per run, so it is
-# manual + weekly only — never on PRs or forks.
+# accounting, and zero residual resources. It costs real money, so it is
+# **manual only** (workflow_dispatch) — it never runs on a schedule, PR, or fork.
+# Trigger it deliberately from the Actions tab when you want to spend.
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 6 * * 1' # Mondays 06:00 UTC
 
 permissions:
   contents: read
