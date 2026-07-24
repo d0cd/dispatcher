@@ -51,6 +51,7 @@ func loadLiveCatalogScoped(stderr io.Writer, targetID, region string) *cloudvm.C
 		cache(scopedHetznerFetcher(targetID, region), regionFor("hetzner-vm", targetID, region)),
 		cache(cloudvm.NewAzureFetcher(""), ""),
 		cache(cloudvm.NewGCPFetcher(""), ""),
+		cache(cloudvm.NewOCIFetcher(), ""),
 		cache(scopedLambdaFetcher(targetID, region), regionFor("lambda-vm", targetID, region)),
 	}
 	// AWS live pricing (the Price List Query API) is ~8 sequential CLI calls.
