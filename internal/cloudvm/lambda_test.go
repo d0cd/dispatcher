@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/d0cd/dispatcher/internal/secrets"
 	"github.com/stretchr/testify/assert"
@@ -161,12 +162,19 @@ func TestNewLambdaProvider_ResolvesKeyFromSecretCommand(t *testing.T) {
 }
 
 func TestLambdaDestroyVM_TerminatesAndDeletesKey(t *testing.T) {
+	lambdaTerminateBackoff = 0
+	t.Cleanup(func() { lambdaTerminateBackoff = 4 * time.Second })
 	deletedKey := false
+	terminated := false // after terminate, GetVM must report the instance leaving
 	p, _ := newLambdaTestProvider(t, func(method, path string, _ []byte) (int, string) {
 		switch {
 		case method == http.MethodGet && strings.HasSuffix(path, "/instances/inst-9"):
+			if terminated {
+				return 200, `{"data":{"id":"inst-9","name":"dispatcher-run_abc","status":"terminated"}}`
+			}
 			return 200, `{"data":{"id":"inst-9","name":"dispatcher-run_abc","status":"active"}}`
 		case method == http.MethodPost && strings.HasSuffix(path, "/instance-operations/terminate"):
+			terminated = true
 			return 200, `{"data":{"terminated_instances":[{"id":"inst-9"}]}}`
 		case method == http.MethodGet && strings.HasSuffix(path, "/ssh-keys"):
 			return 200, `{"data":[{"id":"key-1","name":"dispatcher-run_abc"}]}`
@@ -180,6 +188,56 @@ func TestLambdaDestroyVM_TerminatesAndDeletesKey(t *testing.T) {
 	})
 	require.NoError(t, p.DestroyVM(context.Background(), "inst-9"))
 	assert.True(t, deletedKey, "the per-run ssh key must be deleted on teardown")
+}
+
+// Lambda can 200 a terminate without acting (observed: a finished run left a
+// billing GPU up). DestroyVM must verify and retry until the instance actually
+// leaves the running state, not trust the first 200.
+func TestLambdaDestroyVM_RetriesUntilConfirmed(t *testing.T) {
+	lambdaTerminateBackoff = 0
+	t.Cleanup(func() { lambdaTerminateBackoff = 4 * time.Second })
+	terminateCalls := 0
+	p, _ := newLambdaTestProvider(t, func(method, path string, _ []byte) (int, string) {
+		switch {
+		case method == http.MethodGet && strings.HasSuffix(path, "/instances/inst-9"):
+			// Still active until the SECOND terminate takes effect.
+			if terminateCalls >= 2 {
+				return 200, `{"data":{"id":"inst-9","name":"n","status":"terminating"}}`
+			}
+			return 200, `{"data":{"id":"inst-9","name":"n","status":"active"}}`
+		case method == http.MethodPost && strings.HasSuffix(path, "/instance-operations/terminate"):
+			terminateCalls++
+			return 200, `{"data":{"terminated_instances":[]}}` // 200 but nothing terminated
+		case method == http.MethodGet && strings.HasSuffix(path, "/ssh-keys"):
+			return 200, `{"data":[]}`
+		default:
+			return 200, `{"data":{}}`
+		}
+	})
+	require.NoError(t, p.DestroyVM(context.Background(), "inst-9"))
+	assert.GreaterOrEqual(t, terminateCalls, 2, "must retry terminate until the instance is confirmed leaving")
+}
+
+// If the instance never leaves the running state, teardown must fail loud (so the
+// run doesn't report a clean teardown while a GPU keeps billing; gc is the backstop).
+func TestLambdaDestroyVM_FailsWhenNeverConfirmed(t *testing.T) {
+	lambdaTerminateBackoff = 0
+	lambdaTerminateTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { lambdaTerminateBackoff = 4 * time.Second })
+	t.Cleanup(func() { lambdaTerminateTimeout = 90 * time.Second })
+	p, _ := newLambdaTestProvider(t, func(method, path string, _ []byte) (int, string) {
+		switch {
+		case method == http.MethodGet && strings.HasSuffix(path, "/instances/inst-9"):
+			return 200, `{"data":{"id":"inst-9","name":"n","status":"active"}}` // never leaves
+		case method == http.MethodPost && strings.HasSuffix(path, "/instance-operations/terminate"):
+			return 200, `{"data":{"terminated_instances":[]}}`
+		default:
+			return 200, `{"data":{}}`
+		}
+	})
+	err := p.DestroyVM(context.Background(), "inst-9")
+	require.Error(t, err, "teardown that can't confirm termination must fail loud")
+	assert.Contains(t, err.Error(), "not confirmed terminated")
 }
 
 func TestLambdaCheckCLI_RequiresAPIKey(t *testing.T) {

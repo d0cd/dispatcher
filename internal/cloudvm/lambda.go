@@ -277,6 +277,14 @@ func (l *LambdaProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error
 	}, nil
 }
 
+// lambdaTerminateBackoff is the wait between terminate retries and
+// lambdaTerminateTimeout bounds the confirmation loop; both are vars so tests run
+// without real delays.
+var (
+	lambdaTerminateBackoff = 4 * time.Second
+	lambdaTerminateTimeout = 90 * time.Second
+)
+
 func (l *LambdaProvider) DestroyVM(ctx context.Context, vmID string) error {
 	// Recover the name (→ ssh-key name) before terminating so the per-run key can
 	// be deleted afterward; best-effort if the instance is already gone.
@@ -284,19 +292,52 @@ func (l *LambdaProvider) DestroyVM(ctx context.Context, vmID string) error {
 	if vm, err := l.GetVM(ctx, vmID); err == nil {
 		keyName = vm.Name
 	}
-	err := l.lambdaDo(ctx, http.MethodPost, "/instance-operations/terminate", map[string]any{
-		"instance_ids": []string{vmID},
-	}, nil)
-	if err != nil {
-		var apiErr *lambdaAPIError
-		if !(errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound) {
-			return fmt.Errorf("lambda terminate: %w", err)
-		}
+	if err := l.terminateAndConfirm(ctx, vmID); err != nil {
+		return err
 	}
 	if keyName != "" {
 		l.deleteSSHKey(ctx, keyName)
 	}
 	return nil
+}
+
+// terminateAndConfirm terminates the instance and verifies it is actually
+// terminating or gone. Lambda can accept a terminate on a just-active instance
+// without acting (HTTP 200, nothing terminated) — observed leaving a finished
+// run's GPU billing — so a single call returning nil is not proof of teardown.
+// Retry until the instance leaves the running state or a deadline passes, failing
+// loud otherwise so a run never reports a clean teardown while an instance lives.
+func (l *LambdaProvider) terminateAndConfirm(ctx context.Context, vmID string) error {
+	deadline := time.Now().Add(lambdaTerminateTimeout)
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(lambdaTerminateBackoff):
+			}
+		}
+		err := l.lambdaDo(ctx, http.MethodPost, "/instance-operations/terminate", map[string]any{
+			"instance_ids": []string{vmID},
+		}, nil)
+		if err != nil {
+			var apiErr *lambdaAPIError
+			if errors.As(err, &apiErr) && apiErr.status == http.StatusNotFound {
+				return nil // already gone
+			}
+			lastErr = err
+		} else if vm, gErr := l.GetVM(ctx, vmID); gErr != nil {
+			lastErr = gErr
+		} else if vm.State == VMStateTerminated || vm.State == VMStateStopping {
+			return nil // confirmed terminating/gone
+		} else {
+			lastErr = fmt.Errorf("instance still %v", vm.State)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("lambda terminate: instance %s not confirmed terminated after retries: %w", vmID, lastErr)
+		}
+	}
 }
 
 func (l *LambdaProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {
