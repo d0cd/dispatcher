@@ -140,9 +140,12 @@ machine. A secret command runs against your (unlocked) secret manager, so a
 per-project `dispatcher.yaml` is **not** allowed to define one — running an
 untrusted repo must not be able to read your credentials; a project-level
 `secrets:` block is ignored with a warning. An explicit environment variable
-still overrides the resolved value. The command runs lazily on first use, its
-trimmed output is cached, and a command that fails leaves the variable unset so
-the provider fails closed.
+still overrides the resolved value. The command runs lazily — only when that
+provider actually provisions or tears down a VM, not when pricing it as an
+alternative during `plan`/`run` — so an unrelated run never touches your secret
+manager. Its trimmed output is cached, and a command that fails leaves the
+variable unset so the provider fails closed. (Live pricing for such a provider
+still works if the credential is already exported in the environment.)
 
 User-defined targets (any SSH host, custom cloud) are added with `dispatcher targets add`.
 

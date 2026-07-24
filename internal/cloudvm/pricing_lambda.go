@@ -6,9 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
-
-	"github.com/d0cd/dispatcher/internal/secrets"
 )
 
 // LambdaInstanceTypesURL is the Lambda Cloud endpoint that lists instance types
@@ -35,10 +34,16 @@ func (l LambdaFetcher) redactedString() string {
 	return fmt.Sprintf("LambdaFetcher{region:%q, baseURL:%q, apiKey:%s}", l.Region, l.baseURL, l.apiKey)
 }
 
+// NewLambdaFetcher reads the API key from the environment only — it never runs a
+// configured secret command. Pricing Lambda as a cross-provider alternative
+// shouldn't shell out to the operator's secret manager on every plan/run; the
+// command is resolved lazily by NewLambdaProvider when Lambda actually runs. With
+// no key in the environment, the fetcher self-skips (Fetch returns
+// ErrCredentialsMissing) and Lambda falls back to the built-in catalog.
 func NewLambdaFetcher(region string) *LambdaFetcher {
 	return &LambdaFetcher{
 		Region:  region,
-		apiKey:  secret(secrets.Get("DISPATCHER_LAMBDA_API_KEY")),
+		apiKey:  secret(os.Getenv("DISPATCHER_LAMBDA_API_KEY")),
 		client:  http.DefaultClient,
 		baseURL: LambdaInstanceTypesURL,
 	}

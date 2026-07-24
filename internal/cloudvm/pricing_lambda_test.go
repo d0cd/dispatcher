@@ -3,7 +3,10 @@ package cloudvm
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
+
+	"github.com/d0cd/dispatcher/internal/secrets"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,4 +74,24 @@ func TestLambdaGPUModel(t *testing.T) {
 	assert.Equal(t, "a100", lambdaGPUModel("A100 (40 GB SXM4)"))
 	assert.Equal(t, "gh200", lambdaGPUModel("GH200 (96 GB)"))
 	assert.Equal(t, "", lambdaGPUModel(""))
+}
+
+// Pricing Lambda as a cross-provider alternative must never execute a configured
+// secret command — that would shell out to the operator's (unlocked) secret
+// manager on every plan/run, even for unrelated targets. The command runs only
+// when the Lambda provider actually provisions. So the pricing fetcher reads the
+// key from the environment only and self-skips when it isn't there.
+func TestNewLambdaFetcher_DoesNotRunSecretCommand(t *testing.T) {
+	os.Unsetenv("DISPATCHER_LAMBDA_API_KEY")
+	secrets.SetGlobal(map[string][]string{
+		"DISPATCHER_LAMBDA_API_KEY": {"printf", "secretval"},
+	})
+	t.Cleanup(func() {
+		secrets.SetGlobal(nil)
+		os.Unsetenv("DISPATCHER_LAMBDA_API_KEY")
+	})
+	f := NewLambdaFetcher("")
+	f.baseURL = "http://127.0.0.1:1" // never reached once we skip on missing creds
+	_, err := f.Fetch(context.Background())
+	require.ErrorIs(t, err, ErrCredentialsMissing)
 }
