@@ -134,7 +134,7 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 	opts := VMOptions{
 		Name:                   fmt.Sprintf("dispatcher-cs-%s", adapter.SanitizeName(w.Name)),
 		Region:                 region,
-		ConfidentialType:       "sev-snp",
+		ConfidentialType:       w.Requirements.Confidential.Type,
 		ConfidentialSpaceImage: imageRef,
 		// Always cap the instance lifetime so a CLI crash that skips the deferred
 		// teardown can't leak a billing SEV VM. Use the run's MaxDuration when set,
@@ -292,18 +292,30 @@ func (a *ConfidentialSpaceAdapter) Execute(ctx context.Context, p *types.Plan) (
 
 func (a *ConfidentialSpaceAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
 	state := h.State.(*confidentialRunState)
-	if err := a.deps.provider.DestroyVM(ctx, state.VMID); err != nil {
-		return &adapter.CleanupResult{Success: false, Errors: []string{err.Error()}}, nil
+	var cleaned, errs []string
+
+	vmErr := a.deps.provider.DestroyVM(ctx, state.VMID)
+	if vmErr != nil {
+		errs = append(errs, vmErr.Error())
+	} else {
+		cleaned = append(cleaned, state.VMID)
 	}
-	cleaned := []string{state.VMID}
-	// Best-effort: reap the per-run agent-port firewall so it doesn't linger.
+
+	// Reap the per-run agent-port firewall regardless of the VM outcome: it's an
+	// independent resource, and gating it behind DestroyVM leaks it whenever
+	// DestroyVM hits a transient error (e.g. the VM mid-self-terminate on a
+	// confidential run). Surface a reap failure rather than swallow it — gc reaps
+	// it by run-id as a backstop, but a silent success hides the leak.
 	if fw, ok := a.deps.provider.(agentFirewaller); ok {
 		name := agentFirewallName(state.VMID)
-		if err := fw.deleteAgentFirewall(ctx, name); err == nil {
+		if err := fw.deleteAgentFirewall(ctx, name); err != nil {
+			errs = append(errs, "agent firewall (gc will reap): "+err.Error())
+		} else {
 			cleaned = append(cleaned, name)
 		}
 	}
-	return &adapter.CleanupResult{Success: true, ResourcesCleaned: cleaned}, nil
+
+	return &adapter.CleanupResult{Success: vmErr == nil, ResourcesCleaned: cleaned, Errors: errs}, nil
 }
 
 // confidentialLifetime is the hard instance-lifetime cap for a confidential run:

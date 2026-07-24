@@ -86,13 +86,16 @@ func TestGCPConfidentialSpaceCreateArgs(t *testing.T) {
 		ConfidentialSpaceImage: "us-east1-docker.pkg.dev/p/r/attest@sha256:abc",
 		Tags:                   map[string]string{"dispatcher": "true", "dispatcher-run-id": "run-1"},
 	}
-	args := gcpConfidentialSpaceCreateArgs(opts, "us-east4-a", "proj")
+	args, err := gcpConfidentialSpaceCreateArgs(opts, "us-east4-a", "proj")
+	require.NoError(t, err)
 	joined := strings.Join(args, " ")
 
 	// The single non-obvious, live-validated requirement: without cloud-platform
 	// scope the launcher's verifier fails and the workload never runs.
 	assert.True(t, slices.Contains(args, "--scopes=cloud-platform"), "must request cloud-platform scope")
 
+	// An unset confidential type enforces nothing at verification, so provisioning
+	// takes the cheapest/most-available option: plain SEV.
 	assert.True(t, slices.Contains(args, "--confidential-compute-type=SEV"))
 	assert.True(t, slices.Contains(args, "--shielded-secure-boot"))
 	assert.True(t, slices.Contains(args, "--maintenance-policy=TERMINATE"))
@@ -114,34 +117,75 @@ func TestGCPConfidentialSpaceCreateArgs(t *testing.T) {
 	assert.Contains(t, joined, "dispatcher-run-id=run-1", "labelled so gc can reap it")
 }
 
+// GCP Confidential Space attestation supports SEV only; sev provisions SEV, and a
+// sev-snp/tdx request fails before any VM is provisioned (its CS launcher would
+// fail attestation and shut the VM down).
+func TestGCPConfidentialSpaceCreateArgs_ConfidentialType(t *testing.T) {
+	sev, err := gcpConfidentialSpaceCreateArgs(VMOptions{Name: "j", ConfidentialSpaceImage: "r@sha256:d", ConfidentialType: "sev"}, "z", "")
+	require.NoError(t, err)
+	assert.True(t, slices.Contains(sev, "--confidential-compute-type=SEV"))
+
+	_, err = gcpConfidentialSpaceCreateArgs(VMOptions{Name: "j", ConfidentialSpaceImage: "r@sha256:d", ConfidentialType: "sev-snp"}, "z", "")
+	assert.Error(t, err, "sev-snp is unsupported by CS attestation and must fail before provisioning")
+
+	_, err = gcpConfidentialSpaceCreateArgs(VMOptions{Name: "j", ConfidentialSpaceImage: "r@sha256:d", ConfidentialType: "tdx"}, "z", "")
+	assert.Error(t, err, "an unsupported TEE type must fail before provisioning")
+}
+
+func TestGCPCSComputeType(t *testing.T) {
+	for _, tc := range []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"", "SEV", false}, {"any", "SEV", false}, {"sev", "SEV", false}, {"SEV", "SEV", false},
+		{"sev-snp", "", true}, {"SEV-SNP", "", true}, {"tdx", "", true}, {"garbage", "", true},
+	} {
+		got, err := gcpCSComputeType(tc.in)
+		if tc.wantErr {
+			assert.Error(t, err, tc.in)
+			continue
+		}
+		require.NoError(t, err, tc.in)
+		assert.Equal(t, tc.want, got, tc.in)
+	}
+}
+
 func TestGCPConfidentialSpaceCreateArgs_HonorsExplicitMachine(t *testing.T) {
-	args := gcpConfidentialSpaceCreateArgs(VMOptions{
+	args, err := gcpConfidentialSpaceCreateArgs(VMOptions{
 		Name: "x", InstanceType: "n2d-standard-8", ConfidentialSpaceImage: "ref@sha256:d",
 	}, "z", "")
+	require.NoError(t, err)
 	assert.True(t, slices.Contains(args, "n2d-standard-8"))
 	assert.False(t, slices.Contains(args, "--project"), "no project flag when project is empty")
 }
 
 func TestGCPConfidentialSpaceCreateArgs_NetworkTagWhenFirewalled(t *testing.T) {
 	opts := VMOptions{Name: "job", ConfidentialSpaceImage: "ref@sha256:d", ConfidentialAllowFrom: "203.0.113.4/32"}
-	joined := strings.Join(gcpConfidentialSpaceCreateArgs(opts, "z", ""), " ")
+	args, err := gcpConfidentialSpaceCreateArgs(opts, "z", "")
+	require.NoError(t, err)
+	joined := strings.Join(args, " ")
 	assert.Contains(t, joined, "--tags="+agentFirewallName("job"), "VM must carry the firewall's target tag")
 
 	// Without a source CIDR there is no firewall, so no network tag.
-	joinedNoFw := strings.Join(gcpConfidentialSpaceCreateArgs(VMOptions{Name: "job", ConfidentialSpaceImage: "r@sha256:d"}, "z", ""), " ")
-	assert.NotContains(t, joinedNoFw, "--tags=")
+	argsNoFw, err := gcpConfidentialSpaceCreateArgs(VMOptions{Name: "job", ConfidentialSpaceImage: "r@sha256:d"}, "z", "")
+	require.NoError(t, err)
+	assert.NotContains(t, strings.Join(argsNoFw, " "), "--tags=")
 }
 
 // A bounded run must cap the CS instance's lifetime at the source (cost backstop
 // against a CLI crash that skips the deferred teardown); an unbounded run must not.
 func TestGCPConfidentialSpaceCreateArgs_MaxRunDurationBackstop(t *testing.T) {
 	opts := VMOptions{Name: "job", ConfidentialSpaceImage: "ref@sha256:d", MaxLifetimeSeconds: 3600}
-	joined := strings.Join(gcpConfidentialSpaceCreateArgs(opts, "z", ""), " ")
+	args, err := gcpConfidentialSpaceCreateArgs(opts, "z", "")
+	require.NoError(t, err)
+	joined := strings.Join(args, " ")
 	assert.Contains(t, joined, "--max-run-duration=3600s")
 	assert.Contains(t, joined, "--instance-termination-action=DELETE")
 
-	joinedNoCap := strings.Join(gcpConfidentialSpaceCreateArgs(VMOptions{Name: "job", ConfidentialSpaceImage: "r@sha256:d"}, "z", ""), " ")
-	assert.NotContains(t, joinedNoCap, "--max-run-duration")
+	argsNoCap, err := gcpConfidentialSpaceCreateArgs(VMOptions{Name: "job", ConfidentialSpaceImage: "r@sha256:d"}, "z", "")
+	require.NoError(t, err)
+	assert.NotContains(t, strings.Join(argsNoCap, " "), "--max-run-duration")
 }
 
 func TestGCPAgentFirewallArgs(t *testing.T) {

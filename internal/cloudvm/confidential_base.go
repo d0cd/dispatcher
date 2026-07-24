@@ -151,6 +151,16 @@ func (a *confidentialVMAdapter) Cleanup(ctx context.Context, h *adapter.RunHandl
 // error so the caller aborts the run, rather than opening the agent port to
 // 0.0.0.0/0 (which would let any host race dispatcher's sealed payload).
 func detectEgressCIDR(ctx context.Context) (string, error) {
+	// Escape hatch for callers behind CGNAT / a NAT pool / an egress proxy, where
+	// the ipify-detected /32 won't match the actual connection source and the
+	// agent-port firewall would silently drop it (SYN timeout). Opt-in and
+	// validated, so a bad value fails closed instead of reaching the firewall argv.
+	if override := strings.TrimSpace(os.Getenv("DISPATCHER_AGENT_ALLOW_CIDR")); override != "" {
+		if _, _, err := net.ParseCIDR(override); err != nil {
+			return "", fmt.Errorf("DISPATCHER_AGENT_ALLOW_CIDR %q is not a valid CIDR: %w", override, err)
+		}
+		return override, nil
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
 	if err != nil {
 		return "", fmt.Errorf("build egress-ip request: %w", err)

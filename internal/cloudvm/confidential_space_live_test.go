@@ -34,11 +34,19 @@ func TestGolden_CSLiveAdapter(t *testing.T) {
 	repoRoot := os.Getenv("DISPATCHER_CS_REPO_ROOT")
 	require.NotEmpty(t, repoRoot, "DISPATCHER_CS_REPO_ROOT required (dispatcher source tree)")
 
+	// Co-locate the agent image with the VM's region (a cross-region Artifact
+	// Registry pull can outlast the agent-readiness window). Overridable so the run
+	// can point at a registry in the same region as available SEV-SNP capacity.
+	registry := os.Getenv("DISPATCHER_CS_REGISTRY")
+	if registry == "" {
+		registry = "us-east1-docker.pkg.dev"
+	}
+
 	ctx := context.Background()
 	keys, err := attest.LoadGoogleCSKeys(ctx)
 	require.NoError(t, err)
 	build := NewAgentImageBuilder(ImageBuildConfig{
-		Registry: "us-east1-docker.pkg.dev", Project: project, Repo: "dispatcher-cs", RepoRoot: repoRoot,
+		Registry: registry, Project: project, Repo: "dispatcher-cs", RepoRoot: repoRoot,
 	})
 	a := NewConfidentialSpaceAdapter(NewGCPProvider(project, zone), keys, build,
 		Config{ProviderID: ProviderGCP, Region: zone})
@@ -50,8 +58,10 @@ func TestGolden_CSLiveAdapter(t *testing.T) {
 		Metadata: types.PlanMetadata{ID: "live-int"},
 		Workload: types.WorkloadSpec{
 			Name: "live", Source: types.WorkloadSource{Path: src},
-			Command:      []string{"sh", "-c", "echo integrated=$SECRET; cat hello.txt"},
-			Requirements: types.ResourceRequirements{Confidential: types.ConfidentialRequirement{Required: true, Type: "sev-snp"}},
+			Command: []string{"sh", "-c", "echo integrated=$SECRET; cat hello.txt"},
+			// GCP Confidential Space attestation supports SEV (Google Cloud
+			// Attestation rejects SEV-SNP for CS with UNSUPPORTED_CC_TECHNOLOGY).
+			Requirements: types.ResourceRequirements{Confidential: types.ConfidentialRequirement{Required: true, Type: "sev"}},
 		},
 	}
 
