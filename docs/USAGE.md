@@ -125,19 +125,22 @@ in-VM watchdog (a dead dispatcher is reclaimed by `dispatcher gc`).
 
 ### Secrets from a command
 
-Rather than exporting a credential in plaintext, `dispatcher.yaml` can resolve any
-`DISPATCHER_*` secret from a command whose stdout is the value. An explicit
-environment variable always wins; otherwise the command runs (lazily, on first
-use) and its trimmed output is used. It's generic — supply whatever command reads
-your secret (a secret manager, `pass`, a script):
+Rather than exporting a credential in plaintext, dispatcher can resolve any
+`DISPATCHER_*` secret from a command whose stdout is the value. It's generic —
+supply whatever command reads your secret (a secret manager, `pass`, a script):
 
 ```yaml
 secrets:
   DISPATCHER_LAMBDA_API_KEY: ["pass", "show", "lambda/api-key"]
 ```
 
-A command that fails leaves the variable unset, so the provider fails closed as if
-no key were configured.
+Operator-level credentials (like a provider API key) belong in the **user-global**
+config at `~/.config/dispatcher/config.yaml` (honors `$XDG_CONFIG_HOME`), so
+they're set once per machine. A per-project `dispatcher.yaml` may also carry a
+`secrets:` block, which **overrides** the global one for the same variable.
+Precedence is **environment variable → project → global**; the command runs
+lazily on first use and its trimmed output is cached. A command that fails leaves
+the variable unset, so the provider fails closed as if no key were configured.
 
 User-defined targets (any SSH host, custom cloud) are added with `dispatcher targets add`.
 

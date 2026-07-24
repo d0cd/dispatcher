@@ -146,8 +146,8 @@ func TestLambdaListVMs_FiltersByEncodedRunID(t *testing.T) {
 // a configured secrets: command supplies the key without a plaintext env var.
 func TestNewLambdaProvider_ResolvesKeyFromSecretCommand(t *testing.T) {
 	os.Unsetenv("DISPATCHER_LAMBDA_API_KEY")
-	secrets.SetCommands(map[string][]string{"DISPATCHER_LAMBDA_API_KEY": {"printf", "resolved-key"}})
-	t.Cleanup(func() { secrets.SetCommands(nil); os.Unsetenv("DISPATCHER_LAMBDA_API_KEY") })
+	secrets.SetProject(map[string][]string{"DISPATCHER_LAMBDA_API_KEY": {"printf", "resolved-key"}})
+	t.Cleanup(func() { secrets.SetProject(nil); os.Unsetenv("DISPATCHER_LAMBDA_API_KEY") })
 
 	p := NewLambdaProvider("us-east-1")
 	var gotAuth string

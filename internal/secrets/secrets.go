@@ -20,31 +20,44 @@ import (
 const resolveTimeout = 2 * time.Minute
 
 var (
-	mu       sync.Mutex
-	commands map[string][]string
+	mu      sync.Mutex
+	global  map[string][]string // user-global config (~/.config/dispatcher/config.yaml)
+	project map[string][]string // per-project dispatcher.yaml (overrides global)
 )
 
-// SetCommands registers the env-var → command argv map from the loaded config.
-// Called once at config load, before any provider reads a secret. Replaces any
-// prior registration.
-func SetCommands(m map[string][]string) {
+// SetGlobal registers the operator-level secret commands from the user-global
+// config, applied to every command. Replaces any prior global registration.
+func SetGlobal(m map[string][]string) {
 	mu.Lock()
 	defer mu.Unlock()
-	commands = m
+	global = m
 }
 
-// Get returns the value of the named secret. An already-set environment variable
-// always wins (so an explicit export or CI secret overrides the command). Failing
-// that, the configured command is run and its trimmed stdout is returned and
-// cached into the environment (so a re-read, and any child process, sees it). A
-// missing command or a command failure yields "" — the caller fails closed as if
-// the secret were simply unset; the failure is surfaced on stderr, not swallowed.
+// SetProject registers the per-project secret commands from dispatcher.yaml. A
+// project entry overrides a global entry for the same variable. Replaces any prior
+// project registration.
+func SetProject(m map[string][]string) {
+	mu.Lock()
+	defer mu.Unlock()
+	project = m
+}
+
+// Get returns the value of the named secret. Precedence: an already-set
+// environment variable always wins (an explicit export or CI secret), then the
+// per-project command, then the user-global command. The chosen command is run
+// and its trimmed stdout is cached into the environment (so a re-read, and any
+// child process, sees it). A missing command or a command failure yields "" — the
+// caller fails closed as if the secret were unset; the failure is surfaced on
+// stderr, not swallowed.
 func Get(name string) string {
 	if v := os.Getenv(name); v != "" {
 		return v
 	}
 	mu.Lock()
-	argv := commands[name]
+	argv := project[name]
+	if len(argv) == 0 {
+		argv = global[name]
+	}
 	mu.Unlock()
 	if len(argv) == 0 {
 		return ""

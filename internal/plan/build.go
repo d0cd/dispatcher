@@ -56,7 +56,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 	if cfg != nil {
 		// Register secret-resolution commands before any provider reads a secret,
 		// so a configured credential command is honored for this run.
-		secrets.SetCommands(cfg.Secrets)
+		secrets.SetProject(cfg.Secrets)
 		if constraints.MaxEstimatedCostUSD == 0 && cfg.MaxCost > 0 {
 			constraints.MaxEstimatedCostUSD = cfg.MaxCost
 		}
