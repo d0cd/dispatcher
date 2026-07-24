@@ -3,10 +3,13 @@
 Remaining work, grouped by theme. dispatcher has broad backend coverage — landed
 and live-validated: provisioning/pricing across Hetzner / AWS / GCP / Azure, plus
 Kubernetes, Lima, local process/docker, and **Firecracker microVMs**; durable
-execution; **GPU end-to-end** (GCP + AWS, via driver-baked images);
-**measured confidential computing paths on GCP, Azure, and AWS** (Confidential
-Space / measured SNP / Nitro plus live evidence, GCP SEV-SNP
-golden-validated on real hardware) with the `dispatcher confidential` measured-image
+execution; **GPU provisioning** (GCP + AWS, via driver-baked images — code-path
+tested; a repeatable end-to-end live validation is pending, gated on GPU quota or
+a quota-free GPU provider); **measured confidential computing paths on GCP, Azure,
+and AWS** (Confidential Space / measured SNP / Nitro plus live evidence — GCP
+Confidential Space is **SEV** and is live-validated end-to-end; Google Cloud
+Attestation does not support SEV-SNP for Confidential Space) with the
+`dispatcher confidential` measured-image
 pin pipeline; **sharding/fan-out**; per-run SSH-key injection + per-run
 firewalls; and the bring-your-own-hosts importer. What's left is completeness
 gaps and new capabilities. A July 2026 live 37 GB, CPU-saturating cloud workload
@@ -120,7 +123,7 @@ enforced on the `azure-snp` path. Remaining:
 
 | Item | Effort | Impact |
 |---|---|---|
-| **AWS live pricing** — the EC2 bulk price list is ~479 MB and rarely parses in the plan timeout (now correctly skipped → static/rate-card fallback). Replace with the lightweight Price List Query API (`get-products`). | M | Low |
+| **AWS live pricing** — *delivered:* replaced the ~479 MB EC2 bulk price list with the lightweight Price List Query API (`aws pricing get-products`) plus `describe-spot-price-history` for spot, so plan/run price AWS off the live catalog. | — | Done |
 | k8s Confidential Containers — a different, larger model. Out of scope until demand. | — | — |
 
 ## Low-latency burst execution
@@ -237,8 +240,7 @@ the opt-in live stress lane. Remaining priorities:
    backend shells out to a CLI) and adds cheap on-demand H100/A100.
 2. **Low-latency** — cloud-native fast backend (prebaked images / warm pools) +
    startup-latency feasibility so the planner prefers fast backends for short jobs.
-3. **Shell completion** and **AWS live pricing** (replace the 479 MB bulk list
-   with the Price List Query API).
+3. **Shell completion** (`ValidArgsFunction` for run-ids / target-ids / enum flags).
 
 CI hardening is delivered — `staticcheck` (full default set, U1000 included) and
 per-package coverage floors are enforced and blocking.
