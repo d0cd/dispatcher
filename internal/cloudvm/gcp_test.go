@@ -90,3 +90,29 @@ func TestAzureCreateVM_SSHFirewallLifecycle(t *testing.T) {
 	assert.Contains(t, joined, "--source-address-prefixes 203.0.113.4/32")
 	assert.Contains(t, joined, "--destination-port-ranges 22")
 }
+
+// DestroyVM must reap the per-run SSH firewall. It recovers the run id from the
+// instance's labels (via GetVM) and deletes the allow+deny rules keyed on it.
+// Regression: GetVM formerly dropped labels, so vm.Tags was empty and the reap
+// was dead code — the firewall leaked on every successful teardown.
+func TestGCPDestroyVM_ReapsSSHFirewall(t *testing.T) {
+	prev := runCLI
+	t.Cleanup(func() { runCLI = prev })
+	var deletes []string
+	runCLI = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "instances describe"):
+			return []byte(`{"name":"vm1","status":"RUNNING","labels":{"dispatcher-run-id":"plan-6fkwnpq"}}`), nil
+		case strings.Contains(joined, "firewall-rules delete"):
+			deletes = append(deletes, args[3]) // compute firewall-rules delete <name>
+			return []byte(``), nil
+		default:
+			return []byte(`value(zone)`), nil // resolveZone + instances delete
+		}
+	}
+	g := NewGCPProvider("proj", "us-central1-a")
+	require.NoError(t, g.DestroyVM(context.Background(), "vm1"))
+	assert.Contains(t, deletes, "dispatcher-fw-plan-6fkwnpq", "allow rule must be reaped")
+	assert.Contains(t, deletes, "dispatcher-fw-plan-6fkwnpq-deny", "deny rule must be reaped")
+}

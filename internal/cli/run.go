@@ -192,7 +192,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// per-run firewall, failing before creating a run/VM rather than deep inside
 	// provisioning (or silently ignoring the requested restriction).
 	if runFlags.allowSSHFrom != "" && !perRunFirewallSupported(p.Recommendation.Target) {
-		return fmt.Errorf("--allow-ssh-from is not supported on %s (only hetzner-vm and aws-vm implement a per-run SSH firewall) — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
+		return fmt.Errorf("--allow-ssh-from is not supported on %s (only hetzner-vm, aws-vm, gcp-vm, and azure-vm implement a per-run SSH firewall) — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
 	}
 
 	// Spot is only meaningful on the hyperscalers; fail closed rather than

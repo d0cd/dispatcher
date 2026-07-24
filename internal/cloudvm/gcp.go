@@ -338,8 +338,9 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 	}
 
 	var inst struct {
-		Name              string `json:"name"`
-		Status            string `json:"status"`
+		Name              string            `json:"name"`
+		Status            string            `json:"status"`
+		Labels            map[string]string `json:"labels"`
 		NetworkInterfaces []struct {
 			AccessConfigs []struct {
 				NatIP string `json:"natIP"`
@@ -362,7 +363,7 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 		ip = inst.NetworkInterfaces[0].AccessConfigs[0].NatIP
 	}
 
-	return &VMInfo{ID: vmID, Name: inst.Name, IP: ip, State: state}, nil
+	return &VMInfo{ID: vmID, Name: inst.Name, IP: ip, State: state, Tags: inst.Labels}, nil
 }
 
 func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
