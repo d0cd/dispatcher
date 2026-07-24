@@ -10,6 +10,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"testing"
 	"time"
@@ -121,7 +122,20 @@ func (a *azureRoundTrip) issuer(bindOverride []byte) atls.Issuer {
 			commit = bindOverride
 		}
 		quote, sig := signedQuote(a.t, a.akPriv, a.pcrs, agent.MAABindingNonce(nonce, commit))
-		return agent.AssembleAzureSNP(a.report, a.runtimeData, a.ch.vcek.Raw, a.ch.ask.Raw, quote, sig, a.pcrs, commit)
+		raw, err := json.Marshal(agent.AzureSNPEvidence{
+			SNPReport:   a.report,
+			VCEK:        a.ch.vcek.Raw,
+			ASK:         a.ch.ask.Raw,
+			RuntimeData: a.runtimeData,
+			Quote:       quote,
+			QuoteSig:    sig,
+			PCRs:        a.pcrs,
+			ChannelKey:  commit,
+		})
+		if err != nil {
+			return "", err
+		}
+		return base64.StdEncoding.EncodeToString(raw), nil
 	})
 }
 
