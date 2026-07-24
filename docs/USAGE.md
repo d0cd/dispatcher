@@ -134,13 +134,15 @@ secrets:
   DISPATCHER_LAMBDA_API_KEY: ["pass", "show", "lambda/api-key"]
 ```
 
-Operator-level credentials (like a provider API key) belong in the **user-global**
-config at `~/.config/dispatcher/config.yaml` (honors `$XDG_CONFIG_HOME`), so
-they're set once per machine. A per-project `dispatcher.yaml` may also carry a
-`secrets:` block, which **overrides** the global one for the same variable.
-Precedence is **environment variable → project → global**; the command runs
-lazily on first use and its trimmed output is cached. A command that fails leaves
-the variable unset, so the provider fails closed as if no key were configured.
+Secret **commands are only honored from the user-global** config at
+`~/.config/dispatcher/config.yaml` (honors `$XDG_CONFIG_HOME`), set once per
+machine. A secret command runs against your (unlocked) secret manager, so a
+per-project `dispatcher.yaml` is **not** allowed to define one — running an
+untrusted repo must not be able to read your credentials; a project-level
+`secrets:` block is ignored with a warning. An explicit environment variable
+still overrides the resolved value. The command runs lazily on first use, its
+trimmed output is cached, and a command that fails leaves the variable unset so
+the provider fails closed.
 
 User-defined targets (any SSH host, custom cloud) are added with `dispatcher targets add`.
 

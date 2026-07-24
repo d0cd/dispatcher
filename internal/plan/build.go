@@ -12,7 +12,6 @@ import (
 	"github.com/d0cd/dispatcher/internal/dlog"
 	"github.com/d0cd/dispatcher/internal/policy"
 	"github.com/d0cd/dispatcher/internal/risk"
-	"github.com/d0cd/dispatcher/internal/secrets"
 	"github.com/d0cd/dispatcher/internal/target"
 	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/d0cd/dispatcher/internal/workload"
@@ -54,9 +53,16 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		return nil, fmt.Errorf("load dispatcher config: %w", cfgErr)
 	}
 	if cfg != nil {
-		// Register secret-resolution commands before any provider reads a secret,
-		// so a configured credential command is honored for this run.
-		secrets.SetProject(cfg.Secrets)
+		// Secret-resolution commands are honored only from the user-global config
+		// (~/.config/dispatcher/config.yaml, registered at CLI startup). A per-project
+		// dispatcher.yaml must NOT be able to define a command that runs against the
+		// operator's unlocked secret manager, so a project secrets: block is ignored
+		// with a warning rather than silently.
+		if len(cfg.Secrets) > 0 {
+			dlog.L().Warn("secrets.per_project_ignored",
+				"note", "per-project secrets: are not executed; put operator credentials in ~/.config/dispatcher/config.yaml",
+				"count", len(cfg.Secrets))
+		}
 		if constraints.MaxEstimatedCostUSD == 0 && cfg.MaxCost > 0 {
 			constraints.MaxEstimatedCostUSD = cfg.MaxCost
 		}

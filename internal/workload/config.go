@@ -110,10 +110,12 @@ type DispatcherConfig struct {
 	// shards' outputs are collected and how a shard failure is handled.
 	Shard     *DispatchShardConfig     `yaml:"shard,omitempty"`
 	Aggregate *DispatchAggregateConfig `yaml:"aggregate,omitempty"`
-	// Secrets maps an environment-variable name to a command whose stdout supplies
-	// its value when the variable is unset, so credentials (e.g. a provider API
-	// key) need never be written in plaintext. The command is operator-supplied and
-	// generic — any secret manager or script that prints the secret.
+	// Secrets is NOT honored from a per-project dispatcher.yaml: a secret command
+	// runs against the operator's unlocked secret manager, so an untrusted repo must
+	// not be able to define one. Configure credential commands in the user-global
+	// ~/.config/dispatcher/config.yaml instead (OperatorConfig.Secrets). This field
+	// exists only so a stray project-level block is warned about, not silently
+	// ignored.
 	Secrets map[string][]string `yaml:"secrets,omitempty"`
 }
 
