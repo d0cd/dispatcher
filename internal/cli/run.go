@@ -85,7 +85,7 @@ func parseOptimize(s string) (types.OptimizeGoal, error) {
 // --allow-ssh-from; the rest reject it rather than silently ignore it.
 func perRunFirewallSupported(target string) bool {
 	switch target {
-	case "hetzner-vm", "aws-vm":
+	case "hetzner-vm", "aws-vm", "gcp-vm":
 		return true
 	default:
 		return false

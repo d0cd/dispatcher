@@ -338,10 +338,10 @@ func TestCLI_GC_DryRun(t *testing.T) {
 // per-run SSH firewall (Hetzner and AWS), and rejected for the rest — so an AWS
 // user isn't wrongly told a working feature is unsupported.
 func TestPerRunFirewallSupported(t *testing.T) {
-	for _, target := range []string{"hetzner-vm", "aws-vm"} {
+	for _, target := range []string{"hetzner-vm", "aws-vm", "gcp-vm"} {
 		assert.True(t, perRunFirewallSupported(target), "%s implements a per-run SSH firewall", target)
 	}
-	for _, target := range []string{"gcp-vm", "azure-vm", "local-docker", "kubernetes"} {
+	for _, target := range []string{"azure-vm", "local-docker", "kubernetes"} {
 		assert.False(t, perRunFirewallSupported(target), "%s has no per-run SSH firewall", target)
 	}
 }

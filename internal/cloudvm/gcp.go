@@ -160,13 +160,18 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		args = append(args, "--labels", strings.Join(pairs, ","))
 	}
 
-	// A per-run firewall is not yet implementable correctly on GCP: instances
-	// land on the project's default network, whose built-in default-allow-ssh
-	// rule permits tcp:22 from 0.0.0.0/0, and an additive ALLOW rule cannot
-	// subtract that access. Rejecting (rather than attaching a no-op rule that
-	// implies SSH is locked down) avoids false confidence.
+	// Per-run SSH firewall: a pure ALLOW can't subtract the default network's
+	// default-allow-ssh (0.0.0.0/0 tcp:22), so restrict with a higher-priority DENY
+	// (tcp:22 from anywhere) + a still-higher-priority ALLOW (tcp:22 from the CIDR)
+	// on the VM's tag. Create it BEFORE the instance so there is no open window.
 	if opts.AllowSSHFrom != "" {
-		return nil, errFirewallUnsupported("gcp")
+		if err := validateFirewallCIDR(opts.AllowSSHFrom); err != nil {
+			return nil, fmt.Errorf("gcp: %w", err)
+		}
+		if err := g.createSSHFirewall(ctx, opts); err != nil {
+			return nil, fmt.Errorf("gcp ssh firewall: %w", err)
+		}
+		args = append(args, "--tags="+firewallName(opts))
 	}
 
 	output, err := retryCLIOutput(ctx, "gcloud", "gcloud compute instances create", args...)
@@ -175,6 +180,10 @@ func (g *GCPProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		// billing VM; adopt it if the retry-then-"already exists" left one behind.
 		if vm := adoptCreatedVM(ctx, g, opts.Tags["dispatcher-run-id"]); vm != nil {
 			return vm, nil
+		}
+		// No adoptable instance — don't leave the just-created SSH firewall behind.
+		if opts.AllowSSHFrom != "" {
+			g.deleteSSHFirewall(context.Background(), firewallName(opts))
 		}
 		return nil, err
 	}
@@ -357,6 +366,12 @@ func (g *GCPProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error) {
 }
 
 func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
+	// Recover the run id from the instance's labels BEFORE deletion so the per-run
+	// SSH firewall (keyed on the run id) can be reaped afterward; best-effort.
+	runID := ""
+	if vm, err := g.GetVM(ctx, vmID); err == nil {
+		runID = vm.Tags["dispatcher-run-id"]
+	}
 	args := []string{
 		"compute", "instances", "delete", vmID,
 		"--zone", g.resolveZone(ctx, vmID),
@@ -368,12 +383,64 @@ func (g *GCPProvider) DestroyVM(ctx context.Context, vmID string) error {
 	if _, err := runCLI(ctx, "gcloud", args...); err != nil {
 		// Already gone — teardown is idempotent (matches OCI + the GetVM contract),
 		// so a retried/racing gc pass doesn't report a spurious cleanup failure.
-		if isVMNotFound(err, vmID) {
-			return nil
+		if !isVMNotFound(err, vmID) {
+			return fmt.Errorf("gcloud compute instances delete failed: %w", err)
 		}
-		return fmt.Errorf("gcloud compute instances delete failed: %w", err)
+	}
+	// Reap the per-run SSH firewall (allow + deny), if any. gc backstops a failure.
+	if runID != "" {
+		g.deleteSSHFirewall(ctx, firewallNameFromString(runID))
 	}
 	return nil
+}
+
+// gcpSSHFirewallArgs builds the DENY + ALLOW rules that restrict SSH to cidr on
+// instances tagged with name. name is the allow rule and the network tag;
+// name+"-deny" is the deny rule. The run id rides in each description so gc can
+// reap a leaked rule. ALLOW (priority 900) beats DENY (1000): the CIDR matches
+// allow first; every other source falls through to deny before the low-priority
+// default-allow-ssh (65534).
+func gcpSSHFirewallArgs(name, cidr, runID, project string) (allow, deny []string) {
+	rule := func(ruleName, action, sources string, priority int) []string {
+		a := []string{
+			"compute", "firewall-rules", "create", ruleName,
+			"--network=default",
+			"--direction=INGRESS",
+			"--action=" + action,
+			"--rules=tcp:" + sshPort,
+			"--source-ranges=" + sources,
+			"--target-tags=" + name,
+			fmt.Sprintf("--priority=%d", priority),
+			"--description=" + firewallRunIDMarker + runID,
+			"--quiet",
+		}
+		if project != "" {
+			a = append(a, "--project", project)
+		}
+		return a
+	}
+	return rule(name, "ALLOW", cidr, 900), rule(name+"-deny", "DENY", "0.0.0.0/0", 1000)
+}
+
+func (g *GCPProvider) createSSHFirewall(ctx context.Context, opts VMOptions) error {
+	allow, deny := gcpSSHFirewallArgs(firewallName(opts), opts.AllowSSHFrom, opts.Tags["dispatcher-run-id"], g.project)
+	for _, ruleArgs := range [][]string{deny, allow} {
+		if _, err := runCLI(ctx, "gcloud", ruleArgs...); err != nil && !strings.Contains(err.Error(), "already exists") {
+			return err
+		}
+	}
+	return nil
+}
+
+// deleteSSHFirewall removes both per-run SSH rules (allow + deny). Best-effort.
+func (g *GCPProvider) deleteSSHFirewall(ctx context.Context, name string) {
+	for _, n := range []string{name, name + "-deny"} {
+		args := []string{"compute", "firewall-rules", "delete", n, "--quiet"}
+		if g.project != "" {
+			args = append(args, "--project", g.project)
+		}
+		_, _ = runCLI(ctx, "gcloud", args...)
+	}
 }
 
 func (g *GCPProvider) ListVMs(ctx context.Context, tags map[string]string) ([]VMInfo, error) {
