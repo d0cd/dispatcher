@@ -6,8 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
+
+	"github.com/d0cd/dispatcher/internal/secrets"
 )
 
 // LambdaInstanceTypesURL is the Lambda Cloud endpoint that lists instance types
@@ -37,7 +38,7 @@ func (l LambdaFetcher) redactedString() string {
 func NewLambdaFetcher(region string) *LambdaFetcher {
 	return &LambdaFetcher{
 		Region:  region,
-		apiKey:  secret(os.Getenv("DISPATCHER_LAMBDA_API_KEY")),
+		apiKey:  secret(secrets.Get("DISPATCHER_LAMBDA_API_KEY")),
 		client:  http.DefaultClient,
 		baseURL: LambdaInstanceTypesURL,
 	}
