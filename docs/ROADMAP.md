@@ -3,9 +3,9 @@
 Remaining work, grouped by theme. dispatcher has broad backend coverage — landed
 and live-validated: provisioning/pricing across Hetzner / AWS / GCP / Azure, plus
 Kubernetes, Lima, local process/docker, and **Firecracker microVMs**; durable
-execution; **GPU end-to-end** (live-validated on Lambda: provision → `nvidia-smi`
-→ teardown; the GCP/AWS driver-baked-image path is test-covered, live validation
-pending GPU quota); **measured confidential computing paths on GCP, Azure,
+execution; **GPU end-to-end** (live-validated on Lambda and on GCP L4:
+provision → `nvidia-smi` → teardown; the AWS driver-baked-image path is
+test-covered); **measured confidential computing paths on GCP, Azure,
 and AWS** (Confidential Space / measured SNP / Nitro plus live evidence — GCP
 Confidential Space is **SEV** and is live-validated end-to-end; Google Cloud
 Attestation does not support SEV-SNP for Confidential Space) with the
@@ -97,8 +97,8 @@ only if control-plane starvation is ever actually observed).
 | Item | Effort | Impact |
 |---|---|---|
 | **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. (The warning when `outputs:` is set on an unretrievable target is implemented as the `outputs-unretrievable` risk; actual collection remains.) | M | Medium |
-| **Per-run SSH firewall** — *delivered* on hetzner-vm, aws-vm, **gcp-vm** (deny+allow rule pair — a pure ALLOW can't subtract GCP's default-allow-ssh), and **azure-vm** (`--nsg-rule NONE` at create + one scoped ALLOW rule on the auto NSG). Only lima/kubernetes reject `--allow-ssh-from`. Argv-tested; a live SSH-restriction smoke test remains. | — | Done (GCP/Azure) |
-| **OCI live pricing** — the only cloud VM provider without a live price fetcher (AWS/GCP/Azure/Hetzner/Lambda have one); OCI falls back to the static rate card. Add an OCI Price List API fetcher (`pricing_oci.go`) so plan/run price OCI off live data. | M | Low |
+| **Per-run SSH firewall** — *delivered* on hetzner-vm, aws-vm, **gcp-vm** (deny+allow rule pair — a pure ALLOW can't subtract GCP's default-allow-ssh), and **azure-vm** (`--nsg-rule NONE` at create + one scoped ALLOW rule on the auto NSG). Only lima/kubernetes reject `--allow-ssh-from`. Live-validated on GCP and Azure (SSH lands from the allowed CIDR; teardown reaps the rules) — the GCP run surfaced and fixed a firewall-reap leak (GetVM dropped instance labels). | — | Done |
+| **OCI live pricing** — *delivered:* an OCI Price List API fetcher (`pricing_oci.go`, no auth) prices the offered Flex shapes (A1/E4/E5) per-OCPU-hour + per-GB-memory-hour, so plan/run price OCI off live data. Live prices match the static rate card exactly. | — | Done |
 | **Spot/preemptible support** — delivered end-to-end: a `--spot` flag on plan/run, real provisioning on AWS/GCP/Azure/OCI, live spot pricing via `SpotRatio`/`ApplySpot` (all four providers, Azure Spot now folded from the retail feed), and reclaim detection in the adapter. | — | Done |
 | **Eviction-notice polling** — AWS (2-min IMDS warning), GCP/Azure (~30s metadata/Scheduled Events) all signal an impending spot reclaim; dispatcher only notices after the VM is gone. Deferred: without workload checkpointing the notice buys little (nowhere to drain/flush to), so it's only worth wiring once checkpoint/resume support exists — if ever. | M | Deferred |
 
