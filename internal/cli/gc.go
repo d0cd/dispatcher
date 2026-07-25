@@ -49,6 +49,36 @@ type gcReport struct {
 	External    []gcStandingJSON `json:"external,omitempty"`    // not dispatcher-owned, listed only
 	MonthlyUSD  float64          `json:"monthlyUsdTotal"`       // total ongoing cost across all listed resources
 	CostWarning bool             `json:"costWarning,omitempty"` // MonthlyUSD exceeds the warn threshold
+	ScopeNote   string           `json:"scopeNote,omitempty"`   // caveat when a cloud's scan is confined to one RG/project
+}
+
+// scopeLimitNote returns a caveat when the adapter set includes a provider whose
+// GC scan is confined to one scope — Azure (the configured resource group) and
+// GCP (the configured project). Leaked dispatcher resources outside that scope
+// aren't enumerated, so an empty gc doesn't mean "no leaks anywhere". Returns ""
+// when no scope-limited provider is present.
+func scopeLimitNote(adapterIDs []string) string {
+	azure, gcp := false, false
+	for _, id := range adapterIDs {
+		switch id {
+		case "azure-vm":
+			azure = true
+		case "gcp-vm":
+			gcp = true
+		}
+	}
+	var scopes []string
+	if azure {
+		scopes = append(scopes, "Azure (configured resource group only)")
+	}
+	if gcp {
+		scopes = append(scopes, "GCP (configured project only)")
+	}
+	if len(scopes) == 0 {
+		return ""
+	}
+	return "Note: GC scanned one scope per cloud — " + strings.Join(scopes, ", ") +
+		". Dispatcher resources in other resource groups or projects are not listed here."
 }
 
 var gcCmd = &cobra.Command{
@@ -201,6 +231,12 @@ before running for real, especially with long-lived state directories.`,
 		// reaping would destroy the whole live fleet. Refuse unless overridden.
 		// Dry-run is exempt (it never destroys and shows the user the problem); the
 		// JSON path without --yes is exempt too (it errors out before destroying).
+		adapterIDs := make([]string, 0, len(adapters))
+		for _, a := range adapters {
+			adapterIDs = append(adapterIDs, a.ID())
+		}
+		scopeNote := scopeLimitNote(adapterIDs)
+
 		willDestroy := !gcFlags.dryRun && (!asJSON || gcFlags.force)
 		if willDestroy && !gcFlags.allowEmptyStore && len(runIDs) == 0 && len(orphans) > 0 {
 			return fmt.Errorf("refusing to GC: run store has 0 records but %d dispatcher-owned resource(s) reference run IDs — the state dir is likely misconfigured (check $DISPATCHER_HOME / --state-dir). Re-run with --allow-empty-store if the store is genuinely empty and these are real orphans", len(orphans))
@@ -253,6 +289,7 @@ before running for real, especially with long-lived state directories.`,
 				report.MonthlyUSD += e.MonthlyUSD
 			}
 			report.CostWarning = gcFlags.warnOver > 0 && report.MonthlyUSD > gcFlags.warnOver
+			report.ScopeNote = scopeNote
 			return emitJSON(report)
 		}
 
@@ -268,6 +305,9 @@ before running for real, especially with long-lived state directories.`,
 		if gcFlags.warnOver > 0 && ongoing > gcFlags.warnOver {
 			red.Fprintf(os.Stderr, "\nWARNING: ongoing cost ~$%.2f/mo exceeds the $%.2f/mo threshold (--warn-over).\n",
 				ongoing, gcFlags.warnOver)
+		}
+		if scopeNote != "" {
+			color.New(color.Faint).Fprintf(os.Stderr, "\n%s\n", scopeNote)
 		}
 
 		if len(orphans) == 0 {

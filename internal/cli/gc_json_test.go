@@ -193,3 +193,21 @@ func TestGCDiscoversAllCloudTargets(t *testing.T) {
 		assert.True(t, viaCLI || viaEnv, "gc must discover %s (it's a provisionable target) or it leaks orphaned VMs invisibly", target)
 	}
 }
+
+// gc only scans one scope per cloud on Azure (the configured resource group) and
+// GCP (the configured project). scopeLimitNote surfaces that boundary so a user
+// doesn't read an empty gc as "no leaks anywhere".
+func TestScopeLimitNote(t *testing.T) {
+	n := scopeLimitNote([]string{"hetzner-vm", "azure-vm", "gcp-vm", "aws-vm"})
+	assert.Contains(t, n, "Azure")
+	assert.Contains(t, n, "GCP")
+	assert.Contains(t, n, "resource group")
+	assert.Contains(t, n, "project")
+
+	az := scopeLimitNote([]string{"azure-vm"})
+	assert.Contains(t, az, "Azure")
+	assert.NotContains(t, az, "GCP (")
+
+	// No scope-limited provider → no note.
+	assert.Empty(t, scopeLimitNote([]string{"hetzner-vm", "aws-vm"}))
+}
