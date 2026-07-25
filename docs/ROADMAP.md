@@ -119,7 +119,7 @@ only if control-plane starvation is ever actually observed).
 ## Confidential computing (secure jobs)
 
 Design: [confidential-computing.md](confidential-computing.md). Provisioning
-(GCP SEV-SNP + AMD Milan pin, AWS `AmdSevSnp`, Azure ConfidentialVM), the typed
+(GCP Confidential Space on SEV + AMD Milan pin, AWS `AmdSevSnp`, Azure ConfidentialVM), the typed
 `confidential:` model, verifier cores, pinned AMD ARK/AWS roots, **and the live
 attested-TLS evidence path** have landed on all three measured backends: dispatcher
 dials the measured in-TEE agent (`internal/attest/agent` + `cmd/dispatcher-attest*`)
@@ -134,12 +134,29 @@ fails closed unless the plan selects a measured backend: Nitro on AWS,
 `profile: azure-snp` on Azure, or Confidential Space on GCP. The unmeasured
 standard AWS SEV-SNP and Azure MAA routes were removed — their SSH-delivered agent
 sat outside the measured launch chain. **AMD KDS CRL revocation** remains,
-enforced on the `azure-snp` path. Remaining:
+enforced on the `azure-snp` path.
+
+**Remaining — none planned for immediate build; captured so the coverage gaps are
+explicit.** Today the design is *one measured VM/enclave backend per cloud* (AWS
+Nitro, Azure SEV-SNP+vTPM, GCP Confidential Space/SEV). The items below would
+harden those backends, add new TEE types, or cover confidential offerings
+dispatcher doesn't touch — grouped as **harden**, **new backend**, and **out of
+scope**. dispatcher does not support SGX, serverless confidential containers
+(ACI / Cloud Run), or confidential data/DB PaaS today.
 
 | Item | Effort | Impact |
 |---|---|---|
-| **AWS live pricing** — *delivered:* replaced the ~479 MB EC2 bulk price list with the lightweight Price List Query API (`aws pricing get-products`) plus `describe-spot-price-history` for spot, so plan/run price AWS off the live catalog. | — | Done |
-| k8s Confidential Containers — a different, larger model. Out of scope until demand. | — | — |
+| **AWS live pricing** — *delivered:* replaced the ~479 MB EC2 bulk price list with the lightweight Price List Query API (`aws pricing get-products`) plus `describe-spot-price-history` for spot. | — | Done |
+| *Harden* — **Confidential OS-disk encryption (Azure)** — wire `DiskWithVMGuestState` so the OS disk is host-opaque (today dispatcher uses `VMGuestStateOnly`, which encrypts only the vTPM/guest-state blob). Closes the N1 disk-at-rest gap on the strongest backend. | M | Medium |
+| *Harden* — **In-TEE encrypted scratch (all backends)** — the measured agent provisions a dm-crypt volume keyed from a secret released post-attestation (key lives only in TEE memory), so workload disk writes are ciphertext to the host — a generic N1 fix. Reboot-ephemeral. Cheap precursor first: tmpfs `/tmp`, swap off, core dumps off in the measured image. | M–L | Medium |
+| *New backend* — **Confidential GPU (H100 on A3 / L4 on G4)** — release the secret only if **both** the NVIDIA GPU attestation (device cert + measurement, via NRAS or a local verifier) **and** the CPU TEE (TDX/SEV-SNP) verify; protects weights/prompts/context on the PCIe bus + VRAM. dispatcher rejects confidential+GPU today (CPU-only CVMs). The convergence of the GPU and confidential threads — highest-value gap. | L | High |
+| *New backend* — **GCP direct SEV-SNP** — a measured GCP CVM (raw SEV-SNP report → pinned AMD ARK, agent folded into the launch measurement / vTPM PCR) as an alternative to Confidential Space, upgrading GCP's anchor from Google's attestation service to AMD silicon with enforceable `minTCB` + KDS CRL. Verifier core already golden-validated against a GCP-captured report; the measured-image/provisioning side is the build. Narrow benefit (distrust of Google's attestation *service*, not just the hypervisor). | L | Low–Med |
+| *New backend* — **Intel TDX (Azure/GCP)** — a TDX-quote verifier + measured image so `type: tdx` is attestable (today `azure-vm` advertises `tdx` with no measured path; GCP TDX is rejected). A 4th attestation type alongside SEV-SNP / Nitro / CS. | L | Low |
+| *New backend* — **Run already-SGX-compiled apps as plain workloads** — needs an **instance-type pin** first (no SKU override exists; the planner picks from the catalog by cpu/mem/gpu), then run the app on an Azure DCsv3 as an ordinary, *non-attested-by-dispatcher* workload — the image brings the SGX runtime and the app self-attests; dispatcher provides provisioning + firewall/watchdog/budget/teardown. Azure-only. | S (pin) / M (SGX) | Low |
+| *New backend* — **dispatcher-attested SGX (DCAP)** — verify the enclave's ECDSA/DCAP quote against Intel roots, allowlist MRENCLAVE/MRSIGNER, bind the aTLS channel to `REPORT_DATA`. A different shape from the launch-measurement model (per-enclave MRENCLAVE, no whole-VM launch measurement). Only for a concrete requirement. | L | Low |
+| *New backend* — **Serverless confidential containers (Confidential ACI / Cloud Run Jobs)** — ephemeral, k8s-shaped adapters (no VM to own; auto-stop + per-execution billing make the durable watchdog/gc machinery moot) plus a new attestation path (their TEE attestation differs from the launch-measurement model). Two builds: the plain adapter, then its confidential/attestation variant. | M / L | Low |
+| *Out of scope* — **k8s Confidential Containers / Confidential GKE nodes** — confidential worker nodes + CoCo, a different and larger model. Until demand. | — | — |
+| *Out of scope* — **Confidential data/DB PaaS** (Azure SQL Always Encrypted w/ enclaves, Confidential BigQuery/Dataflow, customer-managed in-enclave DBs) — managed analytics/database services, not compute dispatcher provisions and attests. A confidential *compute* run can call them, but dispatcher won't wrap them. | — | — |
 
 ## Low-latency burst execution
 
