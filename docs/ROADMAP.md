@@ -43,6 +43,9 @@ and the guest watchdog deallocates via an IMDS token at TTL instead of halting
 (a bare halt leaves it *Stopped (allocated)*, still compute-billing). Best-effort:
 without role-assignment rights the guest falls back to `shutdown` + the `gc`
 backstop. So the Azure cost backstop is now automatic like the other clouds.
+Live-validated on Azure that the VM gets a system identity and the guest obtains a
+usable IMDS/ARM token; the grant + deallocate-succeeds path needs an Owner/UAA
+account (a non-admin subscription exercised the graceful fallback, as designed).
 
 Remaining polish: also surface the spend warning in `status` (not only on
 `gc`/`bill`); wire GPU long-tail pricing to the live catalog; and the lower-priority
