@@ -47,10 +47,14 @@ Live-validated on Azure that the VM gets a system identity and the guest obtains
 usable IMDS/ARM token; the grant + deallocate-succeeds path needs an Owner/UAA
 account (a non-admin subscription exercised the graceful fallback, as designed).
 
-Remaining polish: also surface the spend warning in `status` (not only on
-`gc`/`bill`); wire GPU long-tail pricing to the live catalog; and the lower-priority
-items surfaced by audit (Azure/GCP GC are scoped to the configured RG/project;
-Azure auto-created VNet handled best-effort).
+GC polish *delivered:* `status` now surfaces the ongoing-spend warning (sums
+non-terminal runs' cost locally — no cloud scan — over `DISPATCHER_WARN_OVER`,
+default $25); gc reprices instances from the live catalog so the GPU long-tail
+estimate tracks live rates instead of the static rate card; and gc emits a
+scope note naming that Azure/GCP scans are confined to the configured resource
+group / project (a broad multi-scope scan would need org-wide rights and risk
+touching resources dispatcher doesn't own, so the boundary is made explicit
+rather than crossed). Remaining: Azure auto-created VNet handled best-effort.
 
 ## Large artifacts & supervised cloud jobs
 
