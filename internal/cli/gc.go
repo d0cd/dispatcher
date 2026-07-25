@@ -163,6 +163,11 @@ before running for real, especially with long-lived state directories.`,
 		var standing []adapter.ResourceInfo
 		var external []adapter.ResourceInfo
 
+		// Live prices for the ongoing-cost estimate: the static rate card drifts
+		// most for GPU instances. Nil when offline / live pricing disabled, in
+		// which case reprice is a no-op and the static estimate stands.
+		liveCatalog := loadLiveCatalog(os.Stderr)
+
 		for _, a := range adapters {
 			resources, err := a.ListResources(ctx)
 			if err != nil {
@@ -171,6 +176,7 @@ before running for real, especially with long-lived state directories.`,
 				}
 				continue
 			}
+			cloudvm.RepriceInstancesLive(resources, liveCatalog)
 
 			for _, res := range resources {
 				// Hard boundary: anything dispatcher doesn't own is listed for
