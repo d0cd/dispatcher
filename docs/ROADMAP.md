@@ -3,9 +3,9 @@
 Remaining work, grouped by theme. dispatcher has broad backend coverage — landed
 and live-validated: provisioning/pricing across Hetzner / AWS / GCP / Azure, plus
 Kubernetes, Lima, local process/docker, and **Firecracker microVMs**; durable
-execution; **GPU end-to-end** (live-validated on Lambda and on GCP L4:
-provision → `nvidia-smi` → teardown; the AWS driver-baked-image path is
-test-covered); **measured confidential computing paths on GCP, Azure,
+execution; **GPU end-to-end** (live-validated on Lambda, GCP L4, and AWS T4:
+provision → `nvidia-smi` → teardown, zero residual); **measured confidential
+computing paths on GCP, Azure,
 and AWS** (Confidential Space / measured SNP / Nitro plus live evidence — GCP
 Confidential Space is **SEV** and is live-validated end-to-end; Google Cloud
 Attestation does not support SEV-SNP for Confidential Space) with the
