@@ -113,7 +113,7 @@ The watchdog is installed by cloud-init as a `systemd` service (`Restart=always`
 
 Default TTL is 30 minutes; tune via `watchdogTtl` in `dispatcher.yaml` or `--watchdog-ttl`.
 
-**Azure caveat:** the self-destruct is a guest-side `shutdown`, which stops compute billing on Hetzner/AWS/GCP. On Azure a guest halt leaves the VM *Stopped (allocated)* — still fully compute-billing; only a control-plane `az vm deallocate` (which the credential-less guest cannot call) stops charges. So on Azure the watchdog caps the OS but not compute cost; the deallocating backstop is `dispatcher gc`, which reaps stopped-but-allocated Azure VMs (manual/scheduled, not automatic). Auto-deallocation on Azure (managed identity + IMDS) is tracked in the roadmap.
+**Azure billing:** a guest-side `shutdown` stops compute billing on AWS/GCP, but on Azure a halt leaves the VM *Stopped (allocated)* — still fully compute-billing; only a control-plane `deallocate` stops charges. So on Azure the VM is created with a system-assigned managed identity granted `deallocate` on **itself** (least privilege), and the watchdog deallocates via an IMDS token at TTL instead of halting. This is best-effort: if the operator lacks role-assignment rights (`Microsoft.Authorization/roleAssignments/write`), the grant is skipped, the guest falls back to `shutdown`, and `dispatcher gc` remains the deallocating backstop (it reaps stopped-but-allocated Azure VMs by their dispatcher label).
 
 ## History and run state
 

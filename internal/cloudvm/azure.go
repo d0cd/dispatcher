@@ -115,6 +115,10 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 		"--size", instanceType,
 		"--image", image,
 		"--admin-username", "dispatcher",
+		// System-assigned managed identity so the guest watchdog can deallocate
+		// itself at TTL (a bare halt leaves an Azure VM Stopped-allocated, still
+		// compute-billing). Deallocate rights are granted below, scoped to the VM.
+		"--assign-identity", "[system]",
 		"--output", "json",
 	}
 	// Per-run SSH firewall: create the VM with NO default SSH rule (Azure
@@ -221,6 +225,9 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 	var result struct {
 		ID              string `json:"id"`
 		PublicIpAddress string `json:"publicIpAddress"`
+		Identity        struct {
+			PrincipalId string `json:"principalId"`
+		} `json:"identity"`
 	}
 	if err := json.Unmarshal(output, &result); err != nil {
 		return nil, fmt.Errorf("cannot parse az output: %w", err)
@@ -235,6 +242,12 @@ func (a *AzureProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, 
 			_ = a.DestroyVM(cctx, opts.Name)
 			return nil, fmt.Errorf("azure ssh firewall: %w", err)
 		}
+	}
+
+	// Let the VM's identity deallocate itself at watchdog TTL. Best-effort: an
+	// operator without role-assignment rights keeps the gc backstop.
+	if result.Identity.PrincipalId != "" && result.ID != "" {
+		a.grantSelfDeallocate(ctx, result.Identity.PrincipalId, result.ID)
 	}
 
 	return &VMInfo{
@@ -262,6 +275,28 @@ func (a *AzureProvider) createSSHRule(ctx context.Context, vmName, cidr string) 
 		"--source-address-prefixes", cidr,
 		"--access", "Allow", "--protocol", "Tcp", "--direction", "Inbound")
 	return err
+}
+
+// grantSelfDeallocate grants the VM's system-assigned identity permission to
+// deallocate itself, scoped to the VM resource (least privilege — the identity
+// can manage only its own VM). "Virtual Machine Contributor" is the built-in role
+// carrying Microsoft.Compute/virtualMachines/deallocate/action. Best-effort: an
+// operator without Microsoft.Authorization/roleAssignments/write keeps the
+// existing gc backstop, so a failure is logged, not fatal.
+func (a *AzureProvider) grantSelfDeallocate(ctx context.Context, principalID, vmResourceID string) {
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	if _, err := runCLI(cctx, "az", "role", "assignment", "create",
+		"--assignee-object-id", principalID,
+		"--assignee-principal-type", "ServicePrincipal",
+		"--role", "Virtual Machine Contributor",
+		"--scope", vmResourceID,
+		"--output", "none",
+	); err != nil {
+		dlog.L().Warn("azure.self_deallocate.role_assignment_failed",
+			"err", err.Error(),
+			"hint", "guest watchdog will halt (Stopped-allocated); dispatcher gc reclaims it")
+	}
 }
 
 // azureSKUAvailable reports whether the VM size is orderable in the location for

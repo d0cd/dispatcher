@@ -37,14 +37,17 @@ authoritative per-cloud spend (Cost Explorer / Azure Consumption / GCP
 BigQuery export), and `gc --warn-over <usd>` warns loudly when total ongoing
 cost crosses a threshold.
 
+**Auto-deallocating Azure watchdog** — *delivered:* an Azure VM is created with a
+system-assigned managed identity granted `deallocate` on itself (least privilege),
+and the guest watchdog deallocates via an IMDS token at TTL instead of halting
+(a bare halt leaves it *Stopped (allocated)*, still compute-billing). Best-effort:
+without role-assignment rights the guest falls back to `shutdown` + the `gc`
+backstop. So the Azure cost backstop is now automatic like the other clouds.
+
 Remaining polish: also surface the spend warning in `status` (not only on
-`gc`/`bill`); wire GPU long-tail pricing to the live catalog; **an auto-deallocating
-Azure watchdog** — the guest `shutdown` self-destruct leaves an Azure VM
-*Stopped (allocated)* (still compute-billing), so if the CLI dies before teardown
-only `gc` reclaims it; a managed-identity + IMDS-token `deallocate` would make the
-Azure cost backstop automatic like the other clouds; and the lower-priority items
-surfaced by audit (Azure/GCP GC are scoped to the configured RG/project; Azure
-auto-created VNet handled best-effort).
+`gc`/`bill`); wire GPU long-tail pricing to the live catalog; and the lower-priority
+items surfaced by audit (Azure/GCP GC are scoped to the configured RG/project;
+Azure auto-created VNet handled best-effort).
 
 ## Large artifacts & supervised cloud jobs
 

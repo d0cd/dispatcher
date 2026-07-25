@@ -338,7 +338,7 @@ func TestCloudVMState_Serialization(t *testing.T) {
 }
 
 func TestWatchdogCloudInit(t *testing.T) {
-	script := WatchdogCloudInit(30*time.Minute, "ubuntu")
+	script := WatchdogCloudInit(30*time.Minute, "ubuntu", DefaultWatchdogSelfDestruct)
 	assert.Contains(t, script, "watchdog-deadline")
 	assert.Contains(t, script, "shutdown -h now")
 	assert.Contains(t, script, "sleep 60")
@@ -364,8 +364,36 @@ func TestWatchdogCloudInit(t *testing.T) {
 func TestWatchdogCloudInit_RootLoginNeedsNoChown(t *testing.T) {
 	// Where the login user is root (Hetzner/Firecracker) the file is already
 	// root-owned, so no chown is emitted.
-	script := WatchdogCloudInit(30*time.Minute, "root")
+	script := WatchdogCloudInit(30*time.Minute, "root", DefaultWatchdogSelfDestruct)
 	assert.NotContains(t, script, "chown root")
+}
+
+// watchdogSelfDestructFor picks the per-provider expiry action: every provider
+// halts the OS except Azure, where a bare halt leaves the VM Stopped(allocated)
+// and still compute-billing, so the guest must deallocate itself via IMDS.
+func TestWatchdogSelfDestructFor(t *testing.T) {
+	azure := watchdogSelfDestructFor(ProviderAzure)
+	assert.Contains(t, azure, "deallocate", "Azure must deallocate, not just halt")
+	assert.Contains(t, azure, "shutdown -h now", "and still halt as a fallback")
+
+	for _, p := range []ProviderID{ProviderAWS, ProviderGCP, ProviderHetzner, ProviderOCI} {
+		sd := watchdogSelfDestructFor(p)
+		assert.Equal(t, DefaultWatchdogSelfDestruct, sd, "%s should halt, not deallocate", p)
+		assert.NotContains(t, sd, "deallocate")
+	}
+}
+
+// The Azure expiry action must obtain a managed-identity token from IMDS, read
+// its own subscription/RG/name from instance metadata, and POST deallocate to
+// ARM — then fall back to halting the OS if any of that is unavailable.
+func TestWatchdogCloudInit_AzureDeallocate(t *testing.T) {
+	script := WatchdogCloudInit(30*time.Minute, "dispatcher", watchdogSelfDestructFor(ProviderAzure))
+	assert.Contains(t, script, "identity/oauth2/token", "must fetch an IMDS managed-identity token")
+	assert.Contains(t, script, "management.azure.com", "must call ARM")
+	assert.Contains(t, script, "/deallocate?api-version=", "must POST the deallocate action")
+	assert.Contains(t, script, "instance/compute/$1", "must read its own metadata from IMDS")
+	assert.Contains(t, script, "_az_meta subscriptionId", "must read its own subscription id")
+	assert.Contains(t, script, "shutdown -h now", "must still halt as a fallback")
 }
 
 func TestProviderBaseRates(t *testing.T) {

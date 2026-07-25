@@ -200,7 +200,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	if p.Constraints.WatchdogTTL > 0 {
 		ttl = p.Constraints.WatchdogTTL
 	}
-	userData := WatchdogCloudInit(ttl, sshUser)
+	userData := WatchdogCloudInit(ttl, sshUser, watchdogSelfDestructFor(a.config.ProviderID))
 	vmName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
 
 	// Pin the region: the plan's choice wins over the adapter default, and the

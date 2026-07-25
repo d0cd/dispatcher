@@ -16,6 +16,40 @@ const DefaultWatchdogTTL = 30 * time.Minute
 // wipe it and the cost-cap backstop would silently never fire again.
 const watchdogDeadlinePath = "/var/lib/dispatcher/watchdog-deadline"
 
+// DefaultWatchdogSelfDestruct halts the OS when the deadline passes. On AWS/GCP a
+// guest halt stops compute billing; on Hetzner the server bills as long as it
+// exists (running or off) so the deleting backstop is `dispatcher gc`.
+const DefaultWatchdogSelfDestruct = `shutdown -h now 2>/dev/null || poweroff 2>/dev/null || kill 1`
+
+// azureWatchdogSelfDestruct deallocates the VM through its own managed identity
+// before halting. A bare halt leaves an Azure VM "Stopped (allocated)" — still
+// fully compute-billing; only a control-plane deallocate stops charges. The guest
+// gets an IMDS token for its system-assigned identity (granted deallocate rights
+// on itself at create time), reads its own subscription/RG/name from instance
+// metadata, and POSTs the deallocate action to ARM. If the identity or role isn't
+// available the calls no-op and it falls back to halting the OS (dispatcher gc
+// then reclaims the stopped-allocated VM).
+func azureWatchdogSelfDestruct() string {
+	return `_az_meta() { curl -s -m 10 -H Metadata:true "http://169.254.169.254/metadata/instance/compute/$1?api-version=2021-02-01&format=text"; }
+  AZ_TOKEN=$(curl -s -m 10 -H Metadata:true "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fmanagement.azure.com%2F" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+  AZ_SUB=$(_az_meta subscriptionId); AZ_RG=$(_az_meta resourceGroupName); AZ_VM=$(_az_meta name)
+  if [ -n "$AZ_TOKEN" ] && [ -n "$AZ_SUB" ] && [ -n "$AZ_RG" ] && [ -n "$AZ_VM" ]; then
+    curl -s -m 30 -X POST -H "Authorization: Bearer $AZ_TOKEN" -H "Content-Length: 0" "https://management.azure.com/subscriptions/$AZ_SUB/resourceGroups/$AZ_RG/providers/Microsoft.Compute/virtualMachines/$AZ_VM/deallocate?api-version=2023-07-01" && logger "dispatcher-watchdog: deallocate requested" 2>/dev/null || true
+    sleep 30
+  fi
+  ` + DefaultWatchdogSelfDestruct
+}
+
+// watchdogSelfDestructFor returns the deadline-expiry action for a provider.
+// Azure deallocates via IMDS (a guest halt would keep billing); every other
+// provider halts the OS.
+func watchdogSelfDestructFor(p ProviderID) string {
+	if p == ProviderAzure {
+		return azureWatchdogSelfDestruct()
+	}
+	return DefaultWatchdogSelfDestruct
+}
+
 // WatchdogCloudInit returns a cloud-init user-data script that installs
 // a self-destruct watchdog. The initial deadline is computed at VM boot
 // time, not at script-generation time — slow provisioning (cloud-init
@@ -27,17 +61,9 @@ const watchdogDeadlinePath = "/var/lib/dispatcher/watchdog-deadline"
 // re-launched after a reboot and re-reads the persisted deadline — shutting
 // down immediately if the deadline already passed.
 //
-// BILLING CAVEAT: the self-destruct is a guest-side `shutdown -h now`, which on
-// AWS/GCP stops compute billing. On Azure a guest halt leaves the VM "Stopped
-// (allocated)" — still fully compute-billing; only a control-plane `az vm
-// deallocate` stops charges, which a credential-less guest cannot call. Hetzner
-// Cloud bills a server for as long as it EXISTS, running or off, so a guest halt
-// does NOT stop Hetzner billing either. On both Azure and Hetzner the guest halt
-// caps the OS but NOT compute cost; the deleting/deallocating backstop is
-// `dispatcher gc` (it reaps stopped-but-allocated Azure VMs and powered-off
-// Hetzner servers by their dispatcher label). Auto-stop from the guest (managed
-// identity / API token → REST) is tracked in ROADMAP.
-func WatchdogCloudInit(initialTTL time.Duration, loginUser string) string {
+// selfDestruct is the shell run when the deadline passes — DefaultWatchdogSelfDestruct
+// for most providers, azureWatchdogSelfDestruct for Azure (see watchdogSelfDestructFor).
+func WatchdogCloudInit(initialTTL time.Duration, loginUser, selfDestruct string) string {
 	ttlSeconds := int(initialTTL.Seconds())
 	// cloud-init runs as root, so the deadline file it writes is root-owned.
 	// Renewal (ExtendWatchdogViaSSH) connects as the login user, which is
@@ -62,7 +88,7 @@ while true; do
   NOW=$(date +%%s)
   if [ "$NOW" -gt "$DEADLINE" ]; then
     logger "dispatcher-watchdog: TTL expired, shutting down" 2>/dev/null || true
-    shutdown -h now 2>/dev/null || poweroff 2>/dev/null || kill 1
+    %s
   fi
   sleep 60
 done
@@ -85,7 +111,7 @@ UNIT_EOF
 
 systemctl daemon-reload
 systemctl enable --now dispatcher-watchdog.service
-`, ttlSeconds, watchdogDeadlinePath, chownDeadline, watchdogDeadlinePath)
+`, ttlSeconds, watchdogDeadlinePath, chownDeadline, watchdogDeadlinePath, selfDestruct)
 }
 
 // ExtendWatchdogViaSSH updates the deadline file on the remote VM.

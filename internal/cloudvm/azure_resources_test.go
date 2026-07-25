@@ -201,6 +201,69 @@ func TestAzureCreateVM_FailsClosedForGPURequest(t *testing.T) {
 	assert.Equal(t, 1, creates, "a GPU request must not be retried with a general-purpose substitute")
 }
 
+// The Azure guest watchdog deallocates via its managed identity, so CreateVM
+// must assign a system identity and grant it deallocate rights scoped to the VM
+// itself (least privilege) so a bare halt can't leave a Stopped-allocated,
+// still-billing VM behind.
+func TestAzureCreateVM_AssignsSelfDeallocateRole(t *testing.T) {
+	var createArgs []string
+	prev := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, args ...string) ([]byte, error) {
+		createArgs = args
+		return []byte(`{"id":"/subscriptions/x/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1","publicIpAddress":"203.0.113.9","identity":{"principalId":"pid-123"}}`), nil
+	}
+	t.Cleanup(func() { retryCLIOutput = prev })
+
+	calls := captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) { return []byte("{}"), nil })
+
+	vm, err := NewAzureProvider("rg", "eastus").CreateVM(context.Background(), VMOptions{
+		Region: "eastus", InstanceType: "Standard_B2s",
+		Tags: map[string]string{"dispatcher-run-id": "r"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "203.0.113.9", vm.IP)
+	assert.Contains(t, strings.Join(createArgs, " "), "--assign-identity [system]",
+		"the VM must be created with a system-assigned managed identity")
+
+	var roleCall *cliCall
+	for i := range *calls {
+		if slices.Contains((*calls)[i].args, "assignment") {
+			roleCall = &(*calls)[i]
+		}
+	}
+	require.NotNil(t, roleCall, "must grant the identity deallocate rights")
+	ra := strings.Join(roleCall.args, " ")
+	assert.Contains(t, ra, "role assignment create")
+	assert.Contains(t, ra, "Virtual Machine Contributor")
+	assert.Contains(t, ra, "pid-123", "must grant to the VM's own principal")
+	assert.Contains(t, ra, "--scope /subscriptions/x/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1",
+		"scoped to the VM itself, not the whole subscription/RG")
+}
+
+// A missing role-assignment permission (operator isn't Owner/UAA) must NOT fail
+// the create — the guest falls back to halting and dispatcher gc reclaims it.
+func TestAzureCreateVM_RoleAssignmentFailureIsNonFatal(t *testing.T) {
+	prev := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"id":"/subscriptions/x/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/vm1","publicIpAddress":"203.0.113.9","identity":{"principalId":"pid-123"}}`), nil
+	}
+	t.Cleanup(func() { retryCLIOutput = prev })
+
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "assignment") {
+			return nil, errors.New("AuthorizationFailed: does not have authorization to perform action 'Microsoft.Authorization/roleAssignments/write'")
+		}
+		return []byte("{}"), nil
+	})
+
+	vm, err := NewAzureProvider("rg", "eastus").CreateVM(context.Background(), VMOptions{
+		Region: "eastus", InstanceType: "Standard_B2s",
+		Tags: map[string]string{"dispatcher-run-id": "r"},
+	})
+	require.NoError(t, err, "role-assignment failure must be best-effort, not fatal")
+	assert.Equal(t, "203.0.113.9", vm.IP)
+}
+
 func TestAzureProvider_ListResources_Argv(t *testing.T) {
 	calls := captureRunCLIWith(t, azResponses(func([]string) ([]byte, bool) { return nil, false }))
 	p := NewAzureProvider("rg", "eastus")

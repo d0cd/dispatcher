@@ -104,7 +104,7 @@ func executeSSHConfidential(ctx context.Context, d sshConfidentialDeps, p *types
 		SecureBootDisabled: d.secureBootOff,
 		SSHKeyPath:         d.sshPubKey,
 		SSHUser:            d.sshUser,
-		UserData:           WatchdogCloudInit(ttl, d.sshUser),
+		UserData:           WatchdogCloudInit(ttl, d.sshUser, DefaultWatchdogSelfDestruct),
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",
