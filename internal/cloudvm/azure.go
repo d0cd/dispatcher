@@ -493,11 +493,18 @@ func (a *AzureProvider) GetVM(ctx context.Context, vmID string) (*VMInfo, error)
 }
 
 func (a *AzureProvider) DestroyVM(ctx context.Context, vmID string) error {
+	return a.destroyVMInRG(ctx, a.resourceGroup, vmID)
+}
+
+// destroyVMInRG deletes a VM (and its cascade) in a specific resource group, so
+// gc can reap a dispatcher-owned VM leaked into an RG other than the configured
+// one. The normal teardown path passes the adapter's own resource group.
+func (a *AzureProvider) destroyVMInRG(ctx context.Context, rg, vmID string) error {
 	// `az vm delete` removes only the VM resource, leaving its auto-created OS
 	// disk, NIC, public IP, and NSG behind — the disk and IP keep billing.
 	// Capture their ids before deleting the VM, then cascade-delete them in
 	// dependency order so teardown doesn't leak.
-	assoc, err := a.gatherVMResources(ctx, vmID)
+	assoc, err := a.gatherVMResources(ctx, rg, vmID)
 	if err != nil {
 		// Already gone — teardown is idempotent (matches OCI + the GetVM contract).
 		if isVMNotFound(err, vmID) {
@@ -511,7 +518,7 @@ func (a *AzureProvider) DestroyVM(ctx context.Context, vmID string) error {
 	}
 
 	if _, err := runCLI(ctx, "az", "vm", "delete",
-		"--resource-group", a.resourceGroup,
+		"--resource-group", rg,
 		"--name", vmID,
 		"--yes",
 		"--force-deletion", "true",

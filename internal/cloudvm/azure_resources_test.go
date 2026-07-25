@@ -271,24 +271,26 @@ func TestAzureProvider_ListResources_Argv(t *testing.T) {
 	_, err := p.ListResources(context.Background())
 	require.NoError(t, err)
 
-	assert.True(t, containsCall(*calls, "az", "vm", "list", "--resource-group", "rg", "--show-details", "--output", "json"))
-	assert.True(t, containsCall(*calls, "az", "disk", "list", "--resource-group", "rg", "--output", "json"))
-	assert.True(t, containsCall(*calls, "az", "network", "public-ip", "list", "--resource-group", "rg", "--output", "json"))
-	assert.True(t, containsCall(*calls, "az", "snapshot", "list", "--resource-group", "rg", "--output", "json"))
+	// Subscription-wide (no --resource-group) so gc finds dispatcher resources
+	// leaked into any RG; per-resource routing happens at destroy time.
+	assert.True(t, containsCall(*calls, "az", "vm", "list", "--show-details", "--output", "json"))
+	assert.True(t, containsCall(*calls, "az", "disk", "list", "--output", "json"))
+	assert.True(t, containsCall(*calls, "az", "network", "public-ip", "list", "--output", "json"))
+	assert.True(t, containsCall(*calls, "az", "snapshot", "list", "--output", "json"))
 }
 
 func TestAzureProvider_ListResources_ParsesAndCosts(t *testing.T) {
 	match := func(args []string) ([]byte, bool) {
 		switch {
 		case len(args) >= 2 && args[0] == "vm" && args[1] == "list":
-			return []byte(`[{"name":"vm1","powerState":"VM running","hardwareProfile":{"vmSize":"Standard_B2s"},
+			return []byte(`[{"name":"vm1","powerState":"VM running","resourceGroup":"rg","hardwareProfile":{"vmSize":"Standard_B2s"},
 				"tags":{"dispatcher":"true","dispatcher-run-id":"run_9"}}]`), true
 		case len(args) >= 2 && args[0] == "disk" && args[1] == "list":
-			return []byte(`[{"name":"vm1_OsDisk","diskSizeGb":30,"sku":{"name":"Premium_LRS"},"managedBy":"vm1","tags":{}}]`), true
+			return []byte(`[{"name":"vm1_OsDisk","resourceGroup":"rg","diskSizeGb":30,"sku":{"name":"Premium_LRS"},"managedBy":"vm1","tags":{}}]`), true
 		case len(args) >= 3 && args[0] == "network" && args[1] == "public-ip" && args[2] == "list":
-			return []byte(`[{"name":"vm1-ip","tags":{}}]`), true
+			return []byte(`[{"name":"vm1-ip","resourceGroup":"rg","tags":{}}]`), true
 		case len(args) >= 2 && args[0] == "snapshot" && args[1] == "list":
-			return []byte(`[{"name":"snap1","diskSizeGb":50,"tags":{"dispatcher":"true"}}]`), true
+			return []byte(`[{"name":"snap1","resourceGroup":"rg","diskSizeGb":50,"tags":{"dispatcher":"true"}}]`), true
 		}
 		return nil, false
 	}
@@ -379,4 +381,66 @@ func TestAzureProvider_DestroyResource_InstanceUsesCascade(t *testing.T) {
 
 	_ = p.DestroyResource(context.Background(), adapter.ResourceInfo{ResourceID: "vm1", Kind: adapter.ResourceInstance, Tags: map[string]string{"dispatcher": "true"}})
 	assert.True(t, containsCall(*calls, "az", "vm", "delete", "--resource-group", "rg", "--name", "vm1", "--yes", "--force-deletion", "true"))
+}
+
+// gc must scan the whole subscription so a dispatcher-owned VM leaked into
+// another resource group is still found. External (non-dispatcher) resources
+// stay scoped to the configured RG so a big subscription doesn't flood the report.
+func TestAzureListResources_SubscriptionWide(t *testing.T) {
+	calls := captureRunCLIWith(t, azResponses(func(args []string) ([]byte, bool) {
+		if len(args) >= 2 && args[0] == "vm" && args[1] == "list" {
+			return []byte(`[
+			  {"name":"owned-here","powerState":"VM running","resourceGroup":"rg","location":"eastus","hardwareProfile":{"vmSize":"Standard_B2s"},"tags":{"dispatcher":"true","dispatcher-run-id":"r1"}},
+			  {"name":"owned-elsewhere","powerState":"VM running","resourceGroup":"other-rg","location":"westus","hardwareProfile":{"vmSize":"Standard_B2s"},"tags":{"dispatcher":"true","dispatcher-run-id":"r2"}},
+			  {"name":"external-here","powerState":"VM running","resourceGroup":"rg","location":"eastus","hardwareProfile":{"vmSize":"Standard_B2s"},"tags":{}},
+			  {"name":"external-elsewhere","powerState":"VM running","resourceGroup":"other-rg","location":"westus","hardwareProfile":{"vmSize":"Standard_B2s"},"tags":{}}
+			]`), true
+		}
+		return nil, false
+	}))
+
+	res, err := NewAzureProvider("rg", "eastus").ListResources(context.Background())
+	require.NoError(t, err)
+
+	var vmList []string
+	for _, c := range *calls {
+		if len(c.args) >= 2 && c.args[0] == "vm" && c.args[1] == "list" {
+			vmList = c.args
+		}
+	}
+	require.NotNil(t, vmList)
+	assert.NotContains(t, vmList, "--resource-group", "vm list must be subscription-wide")
+
+	byName := map[string]adapter.ResourceInfo{}
+	for _, r := range res {
+		byName[r.ResourceID] = r
+	}
+	require.Contains(t, byName, "owned-here")
+	require.Contains(t, byName, "owned-elsewhere")
+	assert.Equal(t, "rg", byName["owned-here"].Scope)
+	assert.Equal(t, "other-rg", byName["owned-elsewhere"].Scope, "owned resource carries its own RG for destroy routing")
+	assert.Contains(t, byName, "external-here", "external in the configured RG stays visible")
+	assert.NotContains(t, byName, "external-elsewhere", "external outside the configured RG is not enumerated")
+}
+
+// A dispatcher-owned resource in another RG must be destroyed in THAT RG, not the
+// adapter's configured one.
+func TestAzureDestroyResource_RoutesToResourceRG(t *testing.T) {
+	calls := captureRunCLIWith(t, azResponses(func(args []string) ([]byte, bool) {
+		if len(args) >= 2 && args[0] == "vm" && args[1] == "show" {
+			return []byte(`{"storageProfile":{"osDisk":{"managedDisk":{"id":""}}},"networkProfile":{"networkInterfaces":[]}}`), true
+		}
+		return nil, false
+	}))
+	inst := adapter.ResourceInfo{
+		Kind: adapter.ResourceInstance, ResourceID: "vm-elsewhere",
+		Provider: string(ProviderAzure), Scope: "other-rg",
+		Tags: map[string]string{"dispatcher": "true"},
+	}
+	require.NoError(t, NewAzureProvider("rg", "eastus").DestroyResource(context.Background(), inst))
+	assert.True(t, containsCall(*calls, "az", "vm", "show", "--resource-group", "other-rg", "--name", "vm-elsewhere", "--output", "json"),
+		"satellite enumeration runs in the resource's RG")
+	assert.True(t, containsCall(*calls, "az", "vm", "delete", "--resource-group", "other-rg", "--name", "vm-elsewhere", "--yes", "--force-deletion", "true"),
+		"the VM is deleted in its own RG")
+	assert.False(t, containsCall(*calls, "az", "vm", "delete", "--resource-group", "rg", "--name", "vm-elsewhere", "--yes", "--force-deletion", "true"))
 }
