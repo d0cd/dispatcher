@@ -52,11 +52,10 @@ type gcReport struct {
 	ScopeNote   string           `json:"scopeNote,omitempty"`   // caveat when a cloud's scan is confined to one RG/project
 }
 
-// scopeLimitNote returns a caveat when the adapter set includes a provider whose
-// GC scan is confined to one scope — Azure (the configured resource group) and
-// GCP (the configured project). Leaked dispatcher resources outside that scope
-// aren't enumerated, so an empty gc doesn't mean "no leaks anywhere". Returns ""
-// when no scope-limited provider is present.
+// scopeLimitNote states how far each cloud's scan reached and where its residual
+// boundary is. gc scans Azure subscription-wide and every accessible GCP project,
+// so the remaining blind spots are other Azure subscriptions and GCP projects the
+// credential can't list. Returns "" when neither provider is present.
 func scopeLimitNote(adapterIDs []string) string {
 	azure, gcp := false, false
 	for _, id := range adapterIDs {
@@ -69,16 +68,15 @@ func scopeLimitNote(adapterIDs []string) string {
 	}
 	var scopes []string
 	if azure {
-		scopes = append(scopes, "Azure (configured resource group only)")
+		scopes = append(scopes, "Azure (all resource groups in the active subscription; other subscriptions aren't scanned)")
 	}
 	if gcp {
-		scopes = append(scopes, "GCP (configured project only)")
+		scopes = append(scopes, "GCP (every project the credential can list; a project it can't list is skipped)")
 	}
 	if len(scopes) == 0 {
 		return ""
 	}
-	return "Note: GC scanned one scope per cloud — " + strings.Join(scopes, ", ") +
-		". Dispatcher resources in other resource groups or projects are not listed here."
+	return "Note: gc scanned " + strings.Join(scopes, "; ") + "."
 }
 
 var gcCmd = &cobra.Command{
