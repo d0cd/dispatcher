@@ -50,11 +50,15 @@ account (a non-admin subscription exercised the graceful fallback, as designed).
 GC polish *delivered:* `status` now surfaces the ongoing-spend warning (sums
 non-terminal runs' cost locally — no cloud scan — over `DISPATCHER_WARN_OVER`,
 default $25); gc reprices instances from the live catalog so the GPU long-tail
-estimate tracks live rates instead of the static rate card; and gc emits a
-scope note naming that Azure/GCP scans are confined to the configured resource
-group / project (a broad multi-scope scan would need org-wide rights and risk
-touching resources dispatcher doesn't own, so the boundary is made explicit
-rather than crossed). Remaining: Azure auto-created VNet handled best-effort.
+estimate tracks live rates instead of the static rate card; and gc now scans
+**beyond the configured scope** — Azure subscription-wide (dispatcher-owned
+resources in any resource group, external resources still scoped to the
+configured RG) and every accessible GCP project (owned-only, best-effort;
+projects that can't be listed are logged and skipped). Each resource carries the
+RG/project it lives in and destroy routes there; the dispatcher tag stays the
+reap boundary. A scope note states the residual boundary (other Azure
+subscriptions; unlistable GCP projects). Remaining: Azure auto-created VNet
+handled best-effort.
 
 ## Large artifacts & supervised cloud jobs
 
