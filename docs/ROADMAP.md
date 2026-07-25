@@ -164,7 +164,7 @@ the first REST provider is the real investment (it establishes an HTTP-based
 |---|---|---|---|---|
 | **Oracle Cloud (OCI)** | `oci` CLI, SSH VMs | ✅ near-identical to AWS/GCP | Large always-free tier (Ampere ARM) for CI; cheap ARM | **done — validated + enabled (provisioning only)** |
 | **Vultr** | `vultr-cli` + API, SSH VMs | ✅ | Cheap general + many regions; some GPU | M (low) |
-| **Lambda Cloud** | REST API (no rich CLI), SSH VMs | ~ VM lifecycle fits, but HTTP not CLI | On-demand H100/A100 well below hyperscaler list, often more available | M (first REST adapter) |
+| **Lambda Cloud** | REST API (no rich CLI), SSH VMs | ~ VM lifecycle fits, but HTTP not CLI | On-demand H100/A100 well below hyperscaler list, often more available | **done — validated + enabled (provisioning + GPU)** |
 | **RunPod** | REST/GraphQL + CLI, SSH-able pods | ~ container/VM hybrid | Very cheap community-cloud GPUs, per-second billing; burst GPU | M–L |
 | **Thunder Compute** | `tnr` CLI, SSH VMs | ✅ | Cheap GPU (GPU-over-TCP); newer/less proven | M (immature) |
 | **Modal** | Python SDK, serverless sandboxes | ❌ submit-and-invoke (k8s-shaped, no SSH) | Sub-second sandboxes, autoscale; adds a Python dep | L |
@@ -187,10 +187,11 @@ lane).
 
 **Suggested order:** (1) **Oracle** — *done* (validated + enabled; provisioning
 only, confidential not supported); free always-free tier gives a no-cost CI lane.
-(2) **Lambda Cloud** — *code delivered* (`lambda-vm`): the first REST `Provider`
-(HTTP + API key, not a CLI), with unit tests over a stubbed transport; GPU
-capability advertised, provisioning-only (no confidential, no per-run firewall,
-no in-VM watchdog). Pending live-account validation before it's proven end-to-end.
+(2) **Lambda Cloud** — *delivered + live-validated* (`lambda-vm`): the first REST
+`Provider` (HTTP + API key, not a CLI); GPU provision → `nvidia-smi` → teardown
+confirmed end-to-end on a live account (which surfaced and fixed a teardown leak —
+the terminate API returns 200 without acting, so DestroyVM now verifies-and-retries).
+Provisioning-only (no confidential, no per-run firewall, no in-VM watchdog).
 (3) **RunPod** — cheapest burst GPU, now that the REST pattern exists. (4) **Vultr /
 Thunder** — opportunistic. (5) **Modal** — separate serverless track, not a VM provider.
 
@@ -241,10 +242,10 @@ recoverable artifact collection, control-plane CPU headroom, kernel OOM evidence
 signal-exit retry classification, and the URI+digest bounded source preflight, plus
 the opt-in live stress lane. Remaining priorities:
 
-1. **Candidate backends** — **Oracle (OCI)** ships enabled as a plain provisioning
-   target (no confidential capability); then **Lambda
-   Cloud**, which establishes the reusable REST `Provider` pattern (every current
-   backend shells out to a CLI) and adds cheap on-demand H100/A100.
+1. **Candidate backends** — **Oracle (OCI)** and **Lambda Cloud** both ship enabled
+   and live-validated (Lambda established the reusable REST `Provider` pattern —
+   every other backend shells out to a CLI — and adds cheap on-demand H100/A100).
+   Next is **RunPod** for cheaper burst GPU, now that the REST pattern exists.
 2. **Low-latency** — cloud-native fast backend (prebaked images / warm pools) +
    startup-latency feasibility so the planner prefers fast backends for short jobs.
 3. **Shell completion** (`ValidArgsFunction` for run-ids / target-ids / enum flags).
