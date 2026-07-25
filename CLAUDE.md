@@ -48,7 +48,7 @@ docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, confidential-* design/
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher   # Build binary
-go test ./...                         # Run all tests (~1090 tests across 21 packages)
+go test ./...                         # Run all tests (~1140 tests across 22 packages)
 go vet ./...                          # Lint
 gofmt -l .                            # Find unformatted files
 ```

@@ -91,8 +91,12 @@ SSH access is gated by a **per-run ed25519 key with no password** and host-key p
 **Per-run SSH allowlist (`--allow-ssh-from`).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to restrict inbound SSH to that range:
 
 - **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule from the CIDR, attached at create time; deleted on teardown.
-- **AWS** — sets the per-run security group's SSH ingress to the CIDR (replacing the `0.0.0.0/0` default); `run` accepts `--allow-ssh-from` for `aws-vm`, so this is reachable end-to-end.
-- **GCP / Azure / others** — **rejected** (no silent fallback). GCP's built-in `default-allow-ssh` permits tcp:22 from `0.0.0.0/0` and an additive ALLOW rule cannot subtract that access, so a per-run rule would imply a restriction it does not enforce; restrict SSH at the network/NSG level instead.
+- **AWS** — sets the per-run security group's SSH ingress to the CIDR (replacing the `0.0.0.0/0` default).
+- **GCP** — a **DENY + ALLOW rule pair** on the default network, both scoped to the VM's per-run network tag and reaped on teardown: a high-priority DENY on tcp:22 from `0.0.0.0/0` (an additive ALLOW alone cannot subtract the built-in `default-allow-ssh`) plus a still-higher-priority ALLOW from the CIDR.
+- **Azure** — the VM is created with `--nsg-rule NONE` (no default open-SSH rule; Azure default-denies inbound), then one scoped inbound ALLOW (tcp:22 from the CIDR) is added to the auto-created NSG.
+- **lima / kubernetes** — **rejected** (no silent fallback); restrict SSH at the network level instead.
+
+All four cloud implementations are live-validated (SSH lands from the allowed CIDR; the rules are reaped on teardown).
 
 The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. Operators remain responsible for restricting any non-SSH workload-bound ports.
 
