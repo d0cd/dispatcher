@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/fatih/color"
 
 	"github.com/d0cd/dispatcher/internal/cloudvm"
+	"github.com/d0cd/dispatcher/internal/state"
 )
 
 // loadLiveCatalog runs every configured provider's pricing fetcher in parallel
@@ -37,12 +39,29 @@ func loadLiveCatalogScoped(stderr io.Writer, targetID, region string) *cloudvm.C
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	hetzner := scopedHetznerFetcher(targetID, region)
+	// Every fetcher is wrapped in a disk cache (keyed by the region it prices) so
+	// the multi-second live fetches — GCP paginates ~30k SKUs, AWS makes ~8 CLI
+	// calls — become a once-per-day cost, and a transient API outage falls back
+	// to the last good prices instead of dropping the provider.
+	cacheDir, cacheTTL := pricingCache()
+	cache := func(f cloudvm.Fetcher, r string) cloudvm.Fetcher {
+		return cloudvm.NewCachedFetcher(f, r, cacheDir, cacheTTL)
+	}
 	fetchers := []cloudvm.Fetcher{
-		hetzner,
-		cloudvm.NewAzureFetcher(""),
-		cloudvm.NewAWSFetcher(""),
-		cloudvm.NewGCPFetcher(""),
+		cache(scopedHetznerFetcher(targetID, region), regionFor("hetzner-vm", targetID, region)),
+		cache(cloudvm.NewAzureFetcher(""), ""),
+		cache(cloudvm.NewGCPFetcher(""), ""),
+		cache(cloudvm.NewOCIFetcher(), ""),
+		cache(scopedLambdaFetcher(targetID, region), regionFor("lambda-vm", targetID, region)),
+	}
+	// AWS live pricing (the Price List Query API) is ~8 sequential CLI calls.
+	// Fetch it when AWS is the target or when comparing all clouds (targetID
+	// empty); skip it for a specific non-AWS target, which keeps the fast
+	// rate-card AWS estimate it always used. (AWS bulk pricing never resolved in
+	// time, so this is no regression — and the fetch runs concurrently with the
+	// other providers, so it adds little wall time.)
+	if targetID == "aws-vm" || targetID == "" {
+		fetchers = append(fetchers, cache(cloudvm.NewAWSFetcher(region), region))
 	}
 
 	cat, skipped, err := cloudvm.NewLiveCatalog(ctx, fetchers...)
@@ -75,12 +94,54 @@ func loadLiveCatalogScoped(stderr io.Writer, targetID, region string) *cloudvm.C
 	return cat
 }
 
+// pricingCache resolves the on-disk pricing-cache directory and TTL. An empty
+// dir disables caching (fetch live every time). DISPATCHER_PRICING_CACHE_TTL
+// overrides the default: a positive duration (e.g. "6h") shortens it, and "0"
+// or a non-positive value disables the cache.
+func pricingCache() (string, time.Duration) {
+	ttl := cloudvm.DefaultPricingCacheTTL
+	if v := os.Getenv("DISPATCHER_PRICING_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			if d <= 0 {
+				return "", 0
+			}
+			ttl = d
+		}
+	}
+	dir, err := state.Dir()
+	if err != nil {
+		return "", ttl
+	}
+	return filepath.Join(dir, "pricing-cache"), ttl
+}
+
+// regionFor returns the run region for the fetcher that scopes to self, else ""
+// (providers that always price their default region). It mirrors the scoping in
+// scopedHetznerFetcher/scopedLambdaFetcher so the cache key matches the priced region.
+func regionFor(self, targetID, region string) string {
+	if targetID == self {
+		return region
+	}
+	return ""
+}
+
 func scopedHetznerFetcher(targetID, region string) *cloudvm.HetznerFetcher {
 	fetcher := cloudvm.NewHetznerFetcher()
 	if targetID == "hetzner-vm" {
 		fetcher.Location = region
 	}
 	return fetcher
+}
+
+// scopedLambdaFetcher pins the Lambda capacity filter to the run's region only
+// when lambda-vm is the target; otherwise it prices every type with capacity
+// anywhere (so it can appear as an alternative). Self-skips without an API key.
+func scopedLambdaFetcher(targetID, region string) *cloudvm.LambdaFetcher {
+	r := ""
+	if targetID == "lambda-vm" {
+		r = region
+	}
+	return cloudvm.NewLambdaFetcher(r)
 }
 
 func usableLiveCatalog(cat *cloudvm.Catalog, timedOut bool) *cloudvm.Catalog {

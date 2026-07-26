@@ -18,7 +18,28 @@ import (
 // ("insufficient authentication scopes") and the workload never runs. There is
 // no ssh-keys/startup-script: the workload is the container, reached over its own
 // TCP endpoint, not SSH.
-func gcpConfidentialSpaceCreateArgs(opts VMOptions, zone, project string) []string {
+// gcpCSComputeType maps the workload's requested confidential TEE type to the
+// gcloud --confidential-compute-type for the Confidential Space image. GCP
+// Confidential Space attestation supports SEV only: Google Cloud Attestation
+// rejects a SEV-SNP (or TDX) CS launch with UNSUPPORTED_CC_TECHNOLOGY, so such a
+// VM boots but its launcher fails attestation and shuts the VM down (verified
+// live via the serial console). Provision SEV for sev/any/empty and reject the
+// unsupported types here — before any VM is provisioned — with a pointer to the
+// backends that do attest SEV-SNP.
+func gcpCSComputeType(teeType string) (string, error) {
+	switch strings.ToLower(teeType) {
+	case "", "any", "sev":
+		return "SEV", nil
+	default:
+		return "", fmt.Errorf("gcp confidential space attestation supports sev only, not %q — use profile: azure-snp (Azure) or nitro (AWS) for sev-snp", teeType)
+	}
+}
+
+func gcpConfidentialSpaceCreateArgs(opts VMOptions, zone, project string) ([]string, error) {
+	ccType, err := gcpCSComputeType(opts.ConfidentialType)
+	if err != nil {
+		return nil, err
+	}
 	machineType := opts.InstanceType
 	if machineType == "" {
 		machineType = "n2d-standard-2" // AMD SEV-capable default
@@ -27,7 +48,7 @@ func gcpConfidentialSpaceCreateArgs(opts VMOptions, zone, project string) []stri
 		"compute", "instances", "create", opts.Name,
 		"--zone", zone,
 		"--machine-type", machineType,
-		"--confidential-compute-type=SEV",
+		"--confidential-compute-type=" + ccType,
 		"--shielded-secure-boot",
 		"--maintenance-policy=TERMINATE",
 		"--scopes=cloud-platform",
@@ -69,7 +90,7 @@ func gcpConfidentialSpaceCreateArgs(opts VMOptions, zone, project string) []stri
 	if project != "" {
 		args = append(args, "--project", project)
 	}
-	return args
+	return args, nil
 }
 
 // agentFirewallName is the deterministic name of a run's agent-port firewall
@@ -154,7 +175,16 @@ func (g *GCPProvider) createConfidentialSpaceVM(ctx context.Context, opts VMOpti
 			return nil, err
 		}
 	}
-	args := gcpConfidentialSpaceCreateArgs(opts, zone, g.project)
+	// The image ref goes into a comma-joined inline --metadata value, so a comma
+	// or other CLI-significant char would corrupt the metadata block. Validate the
+	// charset (as every other gcloud argv value is), matching the standard path.
+	if !isSafeArg(opts.ConfidentialSpaceImage) {
+		return nil, fmt.Errorf("gcp: confidential-space image ref %q contains characters outside [a-zA-Z0-9_.:/@-]", opts.ConfidentialSpaceImage)
+	}
+	args, err := gcpConfidentialSpaceCreateArgs(opts, zone, g.project)
+	if err != nil {
+		return nil, err
+	}
 
 	output, err := retryCLIOutput(ctx, "gcloud", "gcloud compute instances create", args...)
 	if err != nil {

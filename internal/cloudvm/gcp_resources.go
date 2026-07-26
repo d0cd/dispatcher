@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/dlog"
 )
 
 // gcpMonthlyHours approximates a 30-day month for turning hourly rates into a
@@ -40,6 +41,45 @@ const gcpDiskRateDefault = 0.100
 // list (e.g. no snapshots permission) can never blind GC to reapable instances
 // — missing one only reduces cost visibility, never causes wrong reaping.
 func (g *GCPProvider) ListResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
+	// Configured project: errors propagate (a real failure here is surfaced).
+	out, err := g.listResourcesInProject(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Scope = g.project
+	}
+
+	// Every other accessible project: gc scans them too so a dispatcher-owned
+	// resource leaked into another project is found. Best-effort — a project we
+	// can't read (permission) is skipped, never fails the scan — and only
+	// dispatcher-owned resources are surfaced so unrelated projects don't flood
+	// the report.
+	others := g.otherAccessibleProjects(ctx)
+	if len(others) > 0 {
+		dlog.L().Info("gcp.gc.cross_project", "additional_projects", len(others))
+	}
+	for _, proj := range others {
+		gp := &GCPProvider{project: proj, zone: g.zone}
+		rs, err := gp.listResourcesInProject(ctx)
+		if err != nil {
+			dlog.L().Warn("gcp.gc.project_skipped", "project", proj, "err", err.Error())
+			continue
+		}
+		for i := range rs {
+			if rs[i].Tags["dispatcher"] != "true" {
+				continue
+			}
+			rs[i].Scope = proj
+			out = append(out, rs[i])
+		}
+	}
+	return out, nil
+}
+
+// listResourcesInProject enumerates every billable resource kind in the
+// provider's currently-configured project.
+func (g *GCPProvider) listResourcesInProject(ctx context.Context) ([]adapter.ResourceInfo, error) {
 	out, err := g.listInstanceResources(ctx)
 	if err != nil {
 		return nil, err
@@ -53,6 +93,29 @@ func (g *GCPProvider) ListResources(ctx context.Context) ([]adapter.ResourceInfo
 		}
 	}
 	return out, nil
+}
+
+// otherAccessibleProjects lists the projects the active credential can see, minus
+// the configured one. Best-effort: without resourcemanager.projects.list (or if
+// the CLI errors) it returns nil and gc scans only the configured project.
+func (g *GCPProvider) otherAccessibleProjects(ctx context.Context) []string {
+	out, err := runCLI(ctx, "gcloud", "projects", "list", "--format", "json")
+	if err != nil {
+		return nil
+	}
+	var projects []struct {
+		ProjectID string `json:"projectId"`
+	}
+	if err := json.Unmarshal(out, &projects); err != nil {
+		return nil
+	}
+	var ids []string
+	for _, p := range projects {
+		if p.ProjectID != "" && p.ProjectID != g.project {
+			ids = append(ids, p.ProjectID)
+		}
+	}
+	return ids
 }
 
 // gcpScopeTag records, on an enumerated disk/address, whether it is zonal,
@@ -69,6 +132,15 @@ func (g *GCPProvider) DestroyResource(ctx context.Context, res adapter.ResourceI
 	}
 	if !destroyArgsSafe(res.ResourceID, res.Region) {
 		return fmt.Errorf("gcp: refusing to destroy %q: unsafe resource id or region", res.ResourceID)
+	}
+	// Route to the project the resource lives in (gc scans every accessible
+	// project), falling back to the configured one. Validate it — it lands in argv.
+	project := res.Scope
+	if project == "" {
+		project = g.project
+	}
+	if project != "" && !isSafeArg(project) {
+		return fmt.Errorf("gcp: refusing to destroy %q: unsafe project scope", res.ResourceID)
 	}
 	var args []string
 	switch res.Kind {
@@ -95,8 +167,8 @@ func (g *GCPProvider) DestroyResource(ctx context.Context, res adapter.ResourceI
 	case adapter.ResourceContainerImage:
 		// Artifact Registry repos are location-scoped, not under `compute`.
 		arArgs := []string{"artifacts", "repositories", "delete", res.ResourceID, "--location", res.Region, "--quiet"}
-		if g.project != "" {
-			arArgs = append(arArgs, "--project", g.project)
+		if project != "" {
+			arArgs = append(arArgs, "--project", project)
 		}
 		if _, err := runCLI(ctx, "gcloud", arArgs...); err != nil {
 			return fmt.Errorf("gcloud artifacts repositories delete failed: %w", err)
@@ -105,8 +177,8 @@ func (g *GCPProvider) DestroyResource(ctx context.Context, res adapter.ResourceI
 	default:
 		return fmt.Errorf("gcp: cannot destroy resource of kind %q", res.Kind)
 	}
-	if g.project != "" {
-		args = append(args, "--project", g.project)
+	if project != "" {
+		args = append(args, "--project", project)
 	}
 	if _, err := runCLI(ctx, "gcloud", args...); err != nil {
 		return fmt.Errorf("gcloud %s delete failed: %w", res.Kind, err)

@@ -211,6 +211,10 @@ func (g *Gate) Wait(ctx context.Context, inProcess ApprovalFunc) (Record, error)
 	case <-g.resultCh:
 		g.mu.Lock()
 		d := g.result
+		// The run is about to act on this decision, so close the gate to further
+		// decisions: a late `approve --deny` can't stop an already-approved run, so
+		// it must be refused ("already decided"), not acked "ok" and silently dropped.
+		g.abandoned = true
 		g.mu.Unlock()
 		rec.DecidedAt = time.Now().UTC()
 		rec.Decision = d.decision

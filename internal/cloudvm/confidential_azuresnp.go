@@ -15,25 +15,29 @@ import (
 // there is no scp/start — the parent just boots the pinned image and the agent
 // auto-starts.
 type azureSNPDeps struct {
-	provider   Provider
-	image      string // measured gallery image (agent in a dm-verity root -> PCR11)
-	pcrs       map[int]string
-	sshPubKey  string
-	sshUser    string
-	startAgent func(ctx context.Context, vm *VMInfo) (string, error)
-	waitReady  func(ctx context.Context, baseURL string) error
+	provider          Provider
+	image             string // measured gallery image (agent in a dm-verity root -> PCR11)
+	pcrs              map[int]string
+	launchMeasurement string // pinned SNP launch measurement (Azure firmware)
+	sshPubKey         string
+	sshUser           string
+	startAgent        func(ctx context.Context, vm *VMInfo) (string, error)
+	waitReady         func(ctx context.Context, baseURL string) error
 }
 
 // executeAzureSNPConfidential is the Azure measured-boot orchestration: the shared
 // SSH-VM flow, provisioning a CVM from the pinned measured image (Secure Boot off,
 // unsigned UKI) and verifying the direct SNP+vTPM evidence, pinning PCR11.
 func executeAzureSNPConfidential(ctx context.Context, d azureSNPDeps, p *types.Plan) (*confidentialRunState, error) {
+	if err := enforceWorkloadMeasurements(p.Workload.Requirements.Confidential, d.pcrs[11]); err != nil {
+		return nil, err
+	}
 	deps := sshConfidentialDeps{
 		provider: d.provider, image: d.image, confidential: "sev-snp", secureBootOff: true,
 		sshPubKey: d.sshPubKey, sshUser: d.sshUser,
 		startAgent: d.startAgent, waitReady: d.waitReady,
 		validator: func(req types.ConfidentialRequirement) *attest.AttestValidator {
-			return attest.AzureSNPValidatorPinned(d.pcrs, req.MinTCB)
+			return attest.AzureSNPValidatorPinned(d.pcrs, d.launchMeasurement, req.MinTCB)
 		},
 	}
 	return executeSSHConfidential(ctx, deps, p, fmt.Sprintf("dispatcher-azsnp-%s", adapter.SanitizeName(p.Workload.Name)))
@@ -60,26 +64,28 @@ func azureSNPStartAgent(egressCIDR string, provider Provider) func(context.Conte
 // agent-not-measured caveat on Azure. See docs/confidential-azure-uki.md.
 type AzureSNPConfidentialAdapter struct {
 	confidentialVMAdapter
-	image string // measured gallery image id (DISPATCHER_AZURE_SNP_IMAGE)
-	pcrs  map[int]string
+	image             string // measured gallery image id (DISPATCHER_AZURE_SNP_IMAGE)
+	pcrs              map[int]string
+	launchMeasurement string // pinned SNP launch measurement (Azure firmware) — roots the vTPM AK
 }
 
 // NewAzureSNPConfidentialAdapter builds the adapter. image is the pinned measured
-// gallery image; pcrs pins the PCRs (PCR11 = the agent-carrying dm-verity root).
-func NewAzureSNPConfidentialAdapter(provider Provider, image string, pcrs map[int]string, cfg Config) *AzureSNPConfidentialAdapter {
+// gallery image; pcrs pins the PCRs (PCR11 = the agent-carrying dm-verity root);
+// launchMeasurement pins the SNP launch measurement that roots the vTPM AK.
+func NewAzureSNPConfidentialAdapter(provider Provider, image string, pcrs map[int]string, launchMeasurement string, cfg Config) *AzureSNPConfidentialAdapter {
 	return &AzureSNPConfidentialAdapter{
 		confidentialVMAdapter: confidentialVMAdapter{
 			targetID: string(cfg.ProviderID) + "-snp",
 			provider: provider, config: cfg,
 			costAssumption: "confidential (SEV-SNP) CVM, measured image",
 		},
-		image: image, pcrs: pcrs,
+		image: image, pcrs: pcrs, launchMeasurement: launchMeasurement,
 	}
 }
 
 func (a *AzureSNPConfidentialAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.RunHandle, error) {
-	if a.image == "" || len(a.pcrs) == 0 {
-		return nil, fmt.Errorf("azure-snp adapter needs a measured gallery image and a pinned PCR11 (build with deploy/azure-uki/mkosi)")
+	if a.image == "" || len(a.pcrs) == 0 || a.launchMeasurement == "" {
+		return nil, fmt.Errorf("azure-snp adapter needs a measured gallery image, a pinned PCR11, AND a pinned SNP launch measurement (build with deploy/azure-uki/mkosi; re-capture to record the launch measurement)")
 	}
 	a.resolveRegion(p)
 	keyPath, err := generateSSHKey(ctx, p.Metadata.ID)
@@ -96,13 +102,14 @@ func (a *AzureSNPConfidentialAdapter) Execute(ctx context.Context, p *types.Plan
 		return nil, fmt.Errorf("scope confidential agent firewall: %w", err)
 	}
 	deps := azureSNPDeps{
-		provider:   a.provider,
-		image:      a.image,
-		pcrs:       a.pcrs,
-		sshPubKey:  keyPath + ".pub",
-		sshUser:    a.config.SSHUser,
-		startAgent: azureSNPStartAgent(egress, a.provider),
-		waitReady:  waitForAgentEndpoint,
+		provider:          a.provider,
+		image:             a.image,
+		pcrs:              a.pcrs,
+		launchMeasurement: a.launchMeasurement,
+		sshPubKey:         keyPath + ".pub",
+		sshUser:           a.config.SSHUser,
+		startAgent:        azureSNPStartAgent(egress, a.provider),
+		waitReady:         waitForAgentEndpoint,
 	}
 	state, err := executeAzureSNPConfidential(ctx, deps, p)
 	if err != nil {

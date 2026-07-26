@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/fatih/color"
@@ -145,7 +147,39 @@ func runStatusByID(id string) error {
 			formatCost(record.Cost.Value), record.Cost.Currency, record.Cost.Confidence)
 	}
 
+	// Surface the ongoing-spend warning here (not only on gc/bill) so a forgotten
+	// still-billing run is caught during the check users run most. Local only.
+	total, count := run.ActiveSpend()
+	writeActiveSpendWarning(os.Stderr, total, count, spendWarnThreshold())
+
 	return nil
+}
+
+// defaultSpendWarnUSD is the accumulated active-run cost above which status warns
+// when DISPATCHER_WARN_OVER is unset.
+const defaultSpendWarnUSD = 25.0
+
+// spendWarnThreshold is the active-run spend (USD) above which status warns.
+// DISPATCHER_WARN_OVER overrides the default; a non-positive value disables it.
+func spendWarnThreshold() float64 {
+	if v := os.Getenv("DISPATCHER_WARN_OVER"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return defaultSpendWarnUSD
+}
+
+// writeActiveSpendWarning warns when non-terminal runs' combined cost crosses the
+// threshold. Silent otherwise, so normal status output stays clean.
+func writeActiveSpendWarning(w io.Writer, total float64, count int, threshold float64) {
+	if threshold <= 0 || total <= threshold {
+		return
+	}
+	color.New(color.FgRed).Fprintf(w,
+		"\nWARNING: %d active run(s) have accumulated ~$%.2f (over the $%.2f threshold). "+
+			"Run `dispatcher gc` to check for leaked resources; set DISPATCHER_WARN_OVER to tune.\n",
+		count, total, threshold)
 }
 
 // printAttestation renders a confidential run's TEE attestation verdict (R13):

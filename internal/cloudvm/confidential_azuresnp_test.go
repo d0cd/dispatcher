@@ -16,7 +16,7 @@ import (
 var _ adapter.TargetAdapter = (*AzureSNPConfidentialAdapter)(nil)
 
 func TestNewAzureSNPConfidentialAdapter_ID(t *testing.T) {
-	a := NewAzureSNPConfidentialAdapter(NewMockProvider(ProviderAzure), "/img", map[int]string{11: "abc"},
+	a := NewAzureSNPConfidentialAdapter(NewMockProvider(ProviderAzure), "/img", map[int]string{11: "abc"}, "measabc",
 		Config{ProviderID: ProviderAzure, SSHUser: "dispatcher"})
 	assert.Equal(t, "azure-snp", a.ID())
 }
@@ -25,7 +25,7 @@ func TestNewAzureSNPConfidentialAdapter_ID(t *testing.T) {
 // PCR11 the adapter must refuse before provisioning.
 func TestAzureSNPExecute_FailsClosedWithoutImage(t *testing.T) {
 	provider := NewMockProvider(ProviderAzure)
-	a := NewAzureSNPConfidentialAdapter(provider, "", nil, Config{ProviderID: ProviderAzure, SSHUser: "dispatcher"})
+	a := NewAzureSNPConfidentialAdapter(provider, "", nil, "", Config{ProviderID: ProviderAzure, SSHUser: "dispatcher"})
 	_, err := a.Execute(context.Background(), &types.Plan{
 		Metadata: types.PlanMetadata{ID: "r1"},
 		Workload: types.WorkloadSpec{Name: "job"},
@@ -39,7 +39,7 @@ func TestAzureSNPCleanup_DestroysVM(t *testing.T) {
 	provider := NewMockProvider(ProviderAzure)
 	vm, err := provider.CreateVM(context.Background(), VMOptions{Name: "cvm"})
 	require.NoError(t, err)
-	a := NewAzureSNPConfidentialAdapter(provider, "/img", map[int]string{11: "abc"}, Config{ProviderID: ProviderAzure})
+	a := NewAzureSNPConfidentialAdapter(provider, "/img", map[int]string{11: "abc"}, "measabc", Config{ProviderID: ProviderAzure})
 	h := &adapter.RunHandle{ID: vm.ID, State: &confidentialRunState{Provider: ProviderAzure, VMID: vm.ID}}
 
 	res, err := a.Cleanup(context.Background(), h)

@@ -14,7 +14,7 @@ preamble.
 
 ```bash
 go build ./...
-go test ./...           # ~930 tests across 21 packages; race-clean
+go test ./...           # ~1090 tests across 21 packages; race-clean
 go vet ./...
 gofmt -l .              # must produce no output
 ```

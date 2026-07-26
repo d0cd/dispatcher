@@ -299,15 +299,19 @@ type TargetStats struct {
 
 // load reads the JSONL file into memory. Malformed lines are skipped (one
 // bad line shouldn't corrupt the whole history). If the on-disk file has
-// grown well past the cap, the file is compacted on load — this is the
-// only place trimming happens, so concurrent Record calls can never race
-// the rewrite (Record only appends, never rewrites).
-func (h *HistoryStore) load() {
-	f, err := os.Open(h.path)
+// grown well past the cap, it is compacted on load; the compaction re-reads
+// the file under an flock so a Record another process appended concurrently is
+// not lost (this is best-effort estimation data — a Record that lands during
+// the rewrite itself is a rare, tolerated loss).
+// scanHistoryFile reads the JSONL history into a slice, skipping malformed lines
+// (one bad line shouldn't corrupt the whole history).
+func scanHistoryFile(path string) []RunHistory {
+	f, err := os.Open(path)
 	if err != nil {
-		return
+		return nil
 	}
 	defer f.Close()
+	var out []RunHistory
 	scanner := bufio.NewScanner(f)
 	// Allow larger lines than the default 64 KiB — a history entry with
 	// long workload names could exceed it.
@@ -321,8 +325,13 @@ func (h *HistoryStore) load() {
 		if err := json.Unmarshal(line, &entry); err != nil {
 			continue
 		}
-		h.entries = append(h.entries, entry)
+		out = append(out, entry)
 	}
+	return out
+}
+
+func (h *HistoryStore) load() {
+	h.entries = scanHistoryFile(h.path)
 	// Trim to the last maxEntries on load — older entries are still on
 	// disk but we don't care about them for estimation.
 	if len(h.entries) > maxEntries {
@@ -382,12 +391,20 @@ func (h *HistoryStore) compactOnLoad() error {
 	}
 	defer flockUnlock(lock)
 
+	// Re-read the file UNDER the lock, not the snapshot load() read before the
+	// lock: another process may have appended entries since, and rewriting from
+	// the stale snapshot would silently drop them.
+	entries := scanHistoryFile(h.path)
+	if len(entries) > maxEntries {
+		entries = entries[len(entries)-maxEntries:]
+	}
+
 	tmp := h.path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	for _, e := range h.entries {
+	for _, e := range entries {
 		line, err := json.Marshal(e)
 		if err != nil {
 			f.Close()
@@ -404,6 +421,7 @@ func (h *HistoryStore) compactOnLoad() error {
 		_ = os.Remove(tmp)
 		return err
 	}
+	h.entries = entries // keep the in-memory view consistent with the compacted file
 	return os.Rename(tmp, h.path)
 }
 

@@ -16,6 +16,7 @@ const (
 	ProviderLima       ProviderID = "lima"
 	ProviderKubernetes ProviderID = "kubernetes"
 	ProviderOCI        ProviderID = "oci"
+	ProviderLambda     ProviderID = "lambda"
 )
 
 // VMOptions describes the VM to create.
@@ -64,6 +65,11 @@ type VMOptions struct {
 	// direct SNP+vTPM measured path uses an unsigned custom UKI image, which needs
 	// Secure Boot off; attestation there rests on PCR11, not Secure Boot.
 	SecureBootDisabled bool
+	// Spot requests an interruptible spot/preemptible instance (AWS spot, GCP SPOT
+	// provisioning, Azure Spot priority). Far cheaper but the provider can reclaim
+	// it at any time — only for interruption-tolerant work. The provider maps it to
+	// its market/priority flags; a provider without spot support ignores it.
+	Spot bool
 }
 
 // VMInfo describes a provisioned VM.
@@ -85,10 +91,15 @@ type VMInfo struct {
 	// VM. Lima uses the host user's name; cloud VMs use a provider-
 	// specific default ("ubuntu", "ec2-user", "dispatcher", etc.) and let
 	// the adapter Config supply it.
-	SSHUser   string
-	State     VMState
-	CreatedAt time.Time
-	Tags      map[string]string
+	SSHUser string
+	State   VMState
+	// InstanceType, when non-empty, is the size/shape the provider ACTUALLY
+	// launched — which can differ from the requested one (e.g. Azure substitutes
+	// an available size for an offer-restricted one). The adapter records it in
+	// run state so status/diagnose/gc reflect the real VM. Empty = same as requested.
+	InstanceType string
+	CreatedAt    time.Time
+	Tags         map[string]string
 }
 
 // VMState represents the VM lifecycle state.

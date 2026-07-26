@@ -3,6 +3,7 @@ package run
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -34,6 +35,15 @@ type retryAdapter struct {
 	termHandle      string // ID of the handle passed to Terminate
 	watchdogMu      sync.Mutex
 	watchdogHandles []string
+
+	// failWatchdogOnce, keyed by handle ID, makes that handle's first
+	// ExtendWatchdog fail (modeling a transient error on a freshly-booted VM). On
+	// that failing call the adapter records the on-disk persisted HandleID (via
+	// observeRunID) so a test can assert the run state was already saved with the
+	// new handle before the watchdog's own saveRun would have run.
+	failWatchdogOnce map[string]bool
+	observeRunID     string
+	observedHandleID string
 }
 
 func (m *retryAdapter) Status(_ context.Context, _ *adapter.RunHandle) (types.RunState, error) {
@@ -96,6 +106,15 @@ func (m *retryAdapter) ExtendWatchdog(_ context.Context, h *adapter.RunHandle, t
 	m.watchdogMu.Lock()
 	m.watchdogHandles = append(m.watchdogHandles, h.ID)
 	m.watchdogMu.Unlock()
+	if m.failWatchdogOnce[h.ID] {
+		delete(m.failWatchdogOnce, h.ID)
+		if m.observeRunID != "" {
+			if rec, err := LoadRecord(m.observeRunID); err == nil {
+				m.observedHandleID = rec.HandleID
+			}
+		}
+		return time.Time{}, errors.New("watchdog transient error")
+	}
 	return time.Now().Add(ttl), nil
 }
 
@@ -163,6 +182,31 @@ func TestExecutor_TransientRetrySucceeds(t *testing.T) {
 	assert.Contains(t, m.watchdogs(), "handle-1")
 	assert.Contains(t, m.watchdogs(), "handle-2",
 		"retry must replace the heartbeat closure so the new VM's watchdog is renewed")
+}
+
+// After a transient-failure retry re-provisions, the new handle must be
+// persisted to disk immediately — not left only in memory until the watchdog's
+// first successful save. If the new VM's first ExtendWatchdog fails transiently
+// (common right after boot) and the process then dies, on-disk state must already
+// point at the new handle so `stop` tears down the live new VM instead of the
+// destroyed old one.
+func TestExecutor_TransientRetry_PersistsNewHandleBeforeWatchdog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	m := &retryAdapter{
+		mockAdapter:      newMockAdapter(),
+		statusSeq:        []types.RunState{types.RunStateExecutionFailed, types.RunStateCompleted},
+		failure:          adapter.FailureDetails{OOMKilled: true},
+		failWatchdogOnce: map[string]bool{"handle-2": true}, // new VM's first heartbeat fails
+	}
+	ex := NewExecutor(m)
+	r := NewRun(executorTestPlan())
+	r.Plan.Constraints.RetryTransientFailures = true
+	m.observeRunID = r.ID
+
+	require.NoError(t, ex.Execute(context.Background(), r, io.Discard))
+	assert.Equal(t, "handle-2", m.observedHandleID,
+		"on-disk run state must already point at the re-provisioned handle when the new VM's first watchdog fires")
 }
 
 // After a transient-failure retry succeeds, the run's artifacts must come from

@@ -18,6 +18,7 @@ import (
 	"github.com/d0cd/dispatcher/internal/cloudvm"
 	"github.com/d0cd/dispatcher/internal/cost"
 	"github.com/d0cd/dispatcher/internal/plan"
+	"github.com/d0cd/dispatcher/internal/policy"
 	"github.com/d0cd/dispatcher/internal/run"
 	"github.com/d0cd/dispatcher/internal/shard"
 	"github.com/d0cd/dispatcher/internal/target"
@@ -36,6 +37,7 @@ var runFlags struct {
 	retryTransient bool
 	watchdogTTL    string
 	allowSSHFrom   string
+	spot           bool
 }
 
 var runCmd = &cobra.Command{
@@ -60,6 +62,8 @@ func init() {
 		"cloud VM self-destruct timer if dispatcher dies (e.g. 15m, 2h); default 30m")
 	runCmd.Flags().StringVar(&runFlags.allowSSHFrom, "allow-ssh-from", "",
 		"restrict cloud VM inbound SSH to this CIDR via a per-run firewall (e.g. 203.0.113.4/32); hetzner-vm and aws-vm")
+	runCmd.Flags().BoolVar(&runFlags.spot, "spot", false,
+		"provision an interruptible spot/preemptible instance (much cheaper, can be reclaimed anytime); aws/gcp/azure/oci. Pair with --retry-transient")
 	rootCmd.AddCommand(runCmd)
 }
 
@@ -81,7 +85,19 @@ func parseOptimize(s string) (types.OptimizeGoal, error) {
 // --allow-ssh-from; the rest reject it rather than silently ignore it.
 func perRunFirewallSupported(target string) bool {
 	switch target {
-	case "hetzner-vm", "aws-vm":
+	case "hetzner-vm", "aws-vm", "gcp-vm", "azure-vm":
+		return true
+	default:
+		return false
+	}
+}
+
+// spotSupported reports whether a target's provider implements interruptible
+// spot/preemptible provisioning. Only the hyperscalers do; other targets would
+// silently ignore --spot, so the CLI rejects it there instead.
+func spotSupported(target string) bool {
+	switch target {
+	case "aws-vm", "gcp-vm", "azure-vm", "oci-vm":
 		return true
 	default:
 		return false
@@ -149,6 +165,7 @@ func runRun(cmd *cobra.Command, args []string) error {
 		WatchdogTTL:            watchdogTTL,
 		RetryTransientFailures: runFlags.retryTransient,
 		AllowSSHFrom:           runFlags.allowSSHFrom,
+		Spot:                   runFlags.spot,
 	}
 
 	// Generate plan
@@ -175,7 +192,13 @@ func runRun(cmd *cobra.Command, args []string) error {
 	// per-run firewall, failing before creating a run/VM rather than deep inside
 	// provisioning (or silently ignoring the requested restriction).
 	if runFlags.allowSSHFrom != "" && !perRunFirewallSupported(p.Recommendation.Target) {
-		return fmt.Errorf("--allow-ssh-from is not supported on %s (only hetzner-vm and aws-vm implement a per-run SSH firewall) — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
+		return fmt.Errorf("--allow-ssh-from is not supported on %s (only hetzner-vm, aws-vm, gcp-vm, and azure-vm implement a per-run SSH firewall) — restrict SSH at the account/VPC level instead", p.Recommendation.Target)
+	}
+
+	// Spot is only meaningful on the hyperscalers; fail closed rather than
+	// silently provision a full-price instance the user asked to be spot.
+	if p.Constraints.Spot && !spotSupported(p.Recommendation.Target) {
+		return fmt.Errorf("--spot is not supported on %s (only aws-vm, gcp-vm, azure-vm, oci-vm provision spot/preemptible instances)", p.Recommendation.Target)
 	}
 
 	// Show summary
@@ -193,10 +216,15 @@ func runRun(cmd *cobra.Command, args []string) error {
 
 	// Sharded fan-out: run the workload across N shards, each a full run.
 	if p.Workload.Shard.Enabled() {
-		// A sharded run auto-approves each shard, so a plan needing approval
-		// must be approved once, up front, via --yes — never silently bypassed.
-		if len(p.RequiredApprovals) > 0 && !runFlags.yes {
-			return fmt.Errorf("this plan requires approval; sharded runs auto-approve each shard — pass --yes to approve the whole fan-out")
+		// The plan priced a SINGLE run; enforce --max-cost and the approval
+		// threshold against the TOTAL fan-out spend so a large shard.count can't
+		// silently bypass either control.
+		if err := checkShardFanoutCost(p, policy.DefaultCostAutoApproveUSD, runFlags.yes); err != nil {
+			return err
+		}
+		if count, _ := shardFanoutCount(p.Workload.Shard); count > 1 {
+			fmt.Fprintf(os.Stderr, "Fan-out:           %d shards, ~%s %s total\n",
+				count, formatCost(p.Recommendation.EstimatedCost.Value*float64(count)), p.Recommendation.EstimatedCost.Currency)
 		}
 		shardCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -509,6 +537,11 @@ func adapterForTarget(targetID string) (adapter.TargetAdapter, error) {
 		return cloudvm.NewCloudVMAdapter(
 			cloudvm.NewFirecrackerProvider(),
 			cloudvm.Config{ProviderID: cloudvm.ProviderFirecracker, SSHUser: "root"},
+		), nil
+	case "lambda-vm":
+		return cloudvm.NewCloudVMAdapter(
+			cloudvm.NewLambdaProvider(os.Getenv("DISPATCHER_LAMBDA_REGION")),
+			cloudvm.Config{ProviderID: cloudvm.ProviderLambda, SSHUser: "ubuntu"},
 		), nil
 	}
 

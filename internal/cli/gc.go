@@ -49,6 +49,34 @@ type gcReport struct {
 	External    []gcStandingJSON `json:"external,omitempty"`    // not dispatcher-owned, listed only
 	MonthlyUSD  float64          `json:"monthlyUsdTotal"`       // total ongoing cost across all listed resources
 	CostWarning bool             `json:"costWarning,omitempty"` // MonthlyUSD exceeds the warn threshold
+	ScopeNote   string           `json:"scopeNote,omitempty"`   // caveat when a cloud's scan is confined to one RG/project
+}
+
+// scopeLimitNote states how far each cloud's scan reached and where its residual
+// boundary is. gc scans Azure subscription-wide and every accessible GCP project,
+// so the remaining blind spots are other Azure subscriptions and GCP projects the
+// credential can't list. Returns "" when neither provider is present.
+func scopeLimitNote(adapterIDs []string) string {
+	azure, gcp := false, false
+	for _, id := range adapterIDs {
+		switch id {
+		case "azure-vm":
+			azure = true
+		case "gcp-vm":
+			gcp = true
+		}
+	}
+	var scopes []string
+	if azure {
+		scopes = append(scopes, "Azure (all resource groups in the active subscription; other subscriptions aren't scanned)")
+	}
+	if gcp {
+		scopes = append(scopes, "GCP (every project the credential can list; a project it can't list is skipped)")
+	}
+	if len(scopes) == 0 {
+		return ""
+	}
+	return "Note: gc scanned " + strings.Join(scopes, "; ") + "."
 }
 
 var gcCmd = &cobra.Command{
@@ -133,6 +161,11 @@ before running for real, especially with long-lived state directories.`,
 		var standing []adapter.ResourceInfo
 		var external []adapter.ResourceInfo
 
+		// Live prices for the ongoing-cost estimate: the static rate card drifts
+		// most for GPU instances. Nil when offline / live pricing disabled, in
+		// which case reprice is a no-op and the static estimate stands.
+		liveCatalog := loadLiveCatalog(os.Stderr)
+
 		for _, a := range adapters {
 			resources, err := a.ListResources(ctx)
 			if err != nil {
@@ -141,6 +174,7 @@ before running for real, especially with long-lived state directories.`,
 				}
 				continue
 			}
+			cloudvm.RepriceInstancesLive(resources, liveCatalog)
 
 			for _, res := range resources {
 				// Hard boundary: anything dispatcher doesn't own is listed for
@@ -201,6 +235,12 @@ before running for real, especially with long-lived state directories.`,
 		// reaping would destroy the whole live fleet. Refuse unless overridden.
 		// Dry-run is exempt (it never destroys and shows the user the problem); the
 		// JSON path without --yes is exempt too (it errors out before destroying).
+		adapterIDs := make([]string, 0, len(adapters))
+		for _, a := range adapters {
+			adapterIDs = append(adapterIDs, a.ID())
+		}
+		scopeNote := scopeLimitNote(adapterIDs)
+
 		willDestroy := !gcFlags.dryRun && (!asJSON || gcFlags.force)
 		if willDestroy && !gcFlags.allowEmptyStore && len(runIDs) == 0 && len(orphans) > 0 {
 			return fmt.Errorf("refusing to GC: run store has 0 records but %d dispatcher-owned resource(s) reference run IDs — the state dir is likely misconfigured (check $DISPATCHER_HOME / --state-dir). Re-run with --allow-empty-store if the store is genuinely empty and these are real orphans", len(orphans))
@@ -253,6 +293,7 @@ before running for real, especially with long-lived state directories.`,
 				report.MonthlyUSD += e.MonthlyUSD
 			}
 			report.CostWarning = gcFlags.warnOver > 0 && report.MonthlyUSD > gcFlags.warnOver
+			report.ScopeNote = scopeNote
 			return emitJSON(report)
 		}
 
@@ -268,6 +309,9 @@ before running for real, especially with long-lived state directories.`,
 		if gcFlags.warnOver > 0 && ongoing > gcFlags.warnOver {
 			red.Fprintf(os.Stderr, "\nWARNING: ongoing cost ~$%.2f/mo exceeds the $%.2f/mo threshold (--warn-over).\n",
 				ongoing, gcFlags.warnOver)
+		}
+		if scopeNote != "" {
+			color.New(color.Faint).Fprintf(os.Stderr, "\n%s\n", scopeNote)
 		}
 
 		if len(orphans) == 0 {
@@ -375,20 +419,37 @@ var gcProviderCLIs = map[string]string{
 	"oci-vm":     "oci",
 }
 
-// durableAdapters returns cloud VM adapters whose CLIs are actually installed.
+// gcProviderEnv maps REST/env-gated durable targets (no vendor CLI) to the env
+// var whose presence enables gc discovery. Lambda Cloud is HTTP-native, so CLI
+// presence can't gate it — the API key does. Same leak guarantee as
+// gcProviderCLIs: a provisionable target absent from both maps leaks silently.
+var gcProviderEnv = map[string]string{
+	"lambda-vm": "DISPATCHER_LAMBDA_API_KEY",
+}
+
+// durableAdapters returns cloud VM adapters whose CLI (or gating env) is present.
 func durableAdapters() []adapter.DurableAdapter {
 	var result []adapter.DurableAdapter
-	for id, cli := range gcProviderCLIs {
-		if _, err := exec.LookPath(cli); err != nil {
-			continue // CLI not installed, skip silently
-		}
+	add := func(id string) {
 		a, err := adapterForTarget(id)
 		if err != nil {
-			continue
+			return
 		}
 		if d, ok := a.(adapter.DurableAdapter); ok {
 			result = append(result, d)
 		}
+	}
+	for id, cli := range gcProviderCLIs {
+		if _, err := exec.LookPath(cli); err != nil {
+			continue // CLI not installed, skip silently
+		}
+		add(id)
+	}
+	for id, env := range gcProviderEnv {
+		if os.Getenv(env) == "" {
+			continue // not configured, skip
+		}
+		add(id)
 	}
 	return result
 }

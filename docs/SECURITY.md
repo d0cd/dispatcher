@@ -91,8 +91,12 @@ SSH access is gated by a **per-run ed25519 key with no password** and host-key p
 **Per-run SSH allowlist (`--allow-ssh-from`).** Pass `dispatcher run --allow-ssh-from <CIDR>` (e.g. `203.0.113.4/32`) to restrict inbound SSH to that range:
 
 - **Hetzner** — creates an `hcloud firewall` with an inbound TCP/22 rule from the CIDR, attached at create time; deleted on teardown.
-- **AWS** — sets the per-run security group's SSH ingress to the CIDR (replacing the `0.0.0.0/0` default); `run` accepts `--allow-ssh-from` for `aws-vm`, so this is reachable end-to-end.
-- **GCP / Azure / others** — **rejected** (no silent fallback). GCP's built-in `default-allow-ssh` permits tcp:22 from `0.0.0.0/0` and an additive ALLOW rule cannot subtract that access, so a per-run rule would imply a restriction it does not enforce; restrict SSH at the network/NSG level instead.
+- **AWS** — sets the per-run security group's SSH ingress to the CIDR (replacing the `0.0.0.0/0` default).
+- **GCP** — a **DENY + ALLOW rule pair** on the default network, both scoped to the VM's per-run network tag and reaped on teardown: a high-priority DENY on tcp:22 from `0.0.0.0/0` (an additive ALLOW alone cannot subtract the built-in `default-allow-ssh`) plus a still-higher-priority ALLOW from the CIDR.
+- **Azure** — the VM is created with `--nsg-rule NONE` (no default open-SSH rule; Azure default-denies inbound), then one scoped inbound ALLOW (tcp:22 from the CIDR) is added to the auto-created NSG.
+- **lima / kubernetes** — **rejected** (no silent fallback); restrict SSH at the network level instead.
+
+All four cloud implementations are live-validated (SSH lands from the allowed CIDR; the rules are reaped on teardown).
 
 The CIDR is validated (`net.ParseCIDR`) at the CLI boundary and again before use, and passed as a standalone argv token. Operators remain responsible for restricting any non-SSH workload-bound ports.
 
@@ -113,7 +117,7 @@ The watchdog is installed by cloud-init as a `systemd` service (`Restart=always`
 
 Default TTL is 30 minutes; tune via `watchdogTtl` in `dispatcher.yaml` or `--watchdog-ttl`.
 
-**Azure caveat:** the self-destruct is a guest-side `shutdown`, which stops compute billing on Hetzner/AWS/GCP. On Azure a guest halt leaves the VM *Stopped (allocated)* — still fully compute-billing; only a control-plane `az vm deallocate` (which the credential-less guest cannot call) stops charges. So on Azure the watchdog caps the OS but not compute cost; the deallocating backstop is `dispatcher gc`, which reaps stopped-but-allocated Azure VMs (manual/scheduled, not automatic). Auto-deallocation on Azure (managed identity + IMDS) is tracked in the roadmap.
+**Azure billing:** a guest-side `shutdown` stops compute billing on AWS/GCP, but on Azure a halt leaves the VM *Stopped (allocated)* — still fully compute-billing; only a control-plane `deallocate` stops charges. So on Azure the VM is created with a system-assigned managed identity granted `deallocate` on **itself** (least privilege), and the watchdog deallocates via an IMDS token at TTL instead of halting. This is best-effort: if the operator lacks role-assignment rights (`Microsoft.Authorization/roleAssignments/write`), the grant is skipped, the guest falls back to `shutdown`, and `dispatcher gc` remains the deallocating backstop (it reaps stopped-but-allocated Azure VMs by their dispatcher label).
 
 ## History and run state
 

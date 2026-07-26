@@ -3,10 +3,13 @@
 Remaining work, grouped by theme. dispatcher has broad backend coverage — landed
 and live-validated: provisioning/pricing across Hetzner / AWS / GCP / Azure, plus
 Kubernetes, Lima, local process/docker, and **Firecracker microVMs**; durable
-execution; **GPU end-to-end** (GCP + AWS, via driver-baked images);
-**measured confidential computing paths on GCP, Azure, and AWS** (Confidential
-Space / measured SNP / Nitro plus live evidence, GCP SEV-SNP
-golden-validated on real hardware) with the `dispatcher confidential` measured-image
+execution; **GPU end-to-end** (live-validated on Lambda, GCP L4, and AWS T4:
+provision → `nvidia-smi` → teardown, zero residual); **measured confidential
+computing paths on GCP, Azure,
+and AWS** (Confidential Space / measured SNP / Nitro plus live evidence — GCP
+Confidential Space is **SEV** and is live-validated end-to-end; Google Cloud
+Attestation does not support SEV-SNP for Confidential Space) with the
+`dispatcher confidential` measured-image
 pin pipeline; **sharding/fan-out**; per-run SSH-key injection + per-run
 firewalls; and the bring-your-own-hosts importer. What's left is completeness
 gaps and new capabilities. A July 2026 live 37 GB, CPU-saturating cloud workload
@@ -34,14 +37,28 @@ authoritative per-cloud spend (Cost Explorer / Azure Consumption / GCP
 BigQuery export), and `gc --warn-over <usd>` warns loudly when total ongoing
 cost crosses a threshold.
 
-Remaining polish: also surface the spend warning in `status` (not only on
-`gc`/`bill`); wire GPU long-tail pricing to the live catalog; **an auto-deallocating
-Azure watchdog** — the guest `shutdown` self-destruct leaves an Azure VM
-*Stopped (allocated)* (still compute-billing), so if the CLI dies before teardown
-only `gc` reclaims it; a managed-identity + IMDS-token `deallocate` would make the
-Azure cost backstop automatic like the other clouds; and the lower-priority items
-surfaced by audit (Azure/GCP GC are scoped to the configured RG/project; Azure
-auto-created VNet handled best-effort).
+**Auto-deallocating Azure watchdog** — *delivered:* an Azure VM is created with a
+system-assigned managed identity granted `deallocate` on itself (least privilege),
+and the guest watchdog deallocates via an IMDS token at TTL instead of halting
+(a bare halt leaves it *Stopped (allocated)*, still compute-billing). Best-effort:
+without role-assignment rights the guest falls back to `shutdown` + the `gc`
+backstop. So the Azure cost backstop is now automatic like the other clouds.
+Live-validated on Azure that the VM gets a system identity and the guest obtains a
+usable IMDS/ARM token; the grant + deallocate-succeeds path needs an Owner/UAA
+account (a non-admin subscription exercised the graceful fallback, as designed).
+
+GC polish *delivered:* `status` now surfaces the ongoing-spend warning (sums
+non-terminal runs' cost locally — no cloud scan — over `DISPATCHER_WARN_OVER`,
+default $25); gc reprices instances from the live catalog so the GPU long-tail
+estimate tracks live rates instead of the static rate card; and gc now scans
+**beyond the configured scope** — Azure subscription-wide (dispatcher-owned
+resources in any resource group, external resources still scoped to the
+configured RG) and every accessible GCP project (owned-only, best-effort;
+projects that can't be listed are logged and skipped). Each resource carries the
+RG/project it lives in and destroy routes there; the dispatcher tag stays the
+reap boundary. A scope note states the residual boundary (other Azure
+subscriptions; unlistable GCP projects). Remaining: Azure auto-created VNet
+handled best-effort.
 
 ## Large artifacts & supervised cloud jobs
 
@@ -93,14 +110,16 @@ only if control-plane starvation is ever actually observed).
 
 | Item | Effort | Impact |
 |---|---|---|
-| **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. At minimum, warn when `outputs:` is set but unretrievable. | M | Medium |
-| **Per-run SSH firewall beyond Hetzner + AWS** — `--allow-ssh-from` is honored end-to-end on hetzner-vm and aws-vm (per-run firewall / security group); GCP/Azure/Lima/Kubernetes still reject it — no per-run firewall (Azure `az vm create` opens tcp/22 by default; a scoped NSG rule is unimplemented; GCP's additive default-allow-ssh can't be subtracted). Add the GCP/Azure NSG/firewall rules. | S | Low |
-| **Spot/preemptible support** — lowest-cost-success is the headline and the planner advises spot, but there's no spot provisioning. Surface as "variable/evictable, not estimable" rather than a wrong precise price. | L | Medium |
+| **docker/k8s `outputs:` retrieval** — local/SSH/cloud copy declared outputs into `runs/<id>/artifacts/`; docker needs the `--rm` lifecycle changed + mount-vs-image path resolution, `kubectl cp` needs the pod alive at collection. (The warning when `outputs:` is set on an unretrievable target is implemented as the `outputs-unretrievable` risk; actual collection remains.) | M | Medium |
+| **Per-run SSH firewall** — *delivered* on hetzner-vm, aws-vm, **gcp-vm** (deny+allow rule pair — a pure ALLOW can't subtract GCP's default-allow-ssh), and **azure-vm** (`--nsg-rule NONE` at create + one scoped ALLOW rule on the auto NSG). Only lima/kubernetes reject `--allow-ssh-from`. Live-validated on GCP and Azure (SSH lands from the allowed CIDR; teardown reaps the rules) — the GCP run surfaced and fixed a firewall-reap leak (GetVM dropped instance labels). | — | Done |
+| **OCI live pricing** — *delivered:* an OCI Price List API fetcher (`pricing_oci.go`, no auth) prices the offered Flex shapes (A1/E4/E5) per-OCPU-hour + per-GB-memory-hour, so plan/run price OCI off live data. Live prices match the static rate card exactly. | — | Done |
+| **Spot/preemptible support** — delivered end-to-end: a `--spot` flag on plan/run, real provisioning on AWS/GCP/Azure/OCI, live spot pricing via `SpotRatio`/`ApplySpot` (all four providers, Azure Spot now folded from the retail feed), and reclaim detection in the adapter. | — | Done |
+| **Eviction-notice polling** — AWS (2-min IMDS warning), GCP/Azure (~30s metadata/Scheduled Events) all signal an impending spot reclaim; dispatcher only notices after the VM is gone. Deferred: without workload checkpointing the notice buys little (nowhere to drain/flush to), so it's only worth wiring once checkpoint/resume support exists — if ever. | M | Deferred |
 
 ## Confidential computing (secure jobs)
 
 Design: [confidential-computing.md](confidential-computing.md). Provisioning
-(GCP SEV-SNP + AMD Milan pin, AWS `AmdSevSnp`, Azure ConfidentialVM), the typed
+(GCP Confidential Space on SEV + AMD Milan pin, AWS `AmdSevSnp`, Azure ConfidentialVM), the typed
 `confidential:` model, verifier cores, pinned AMD ARK/AWS roots, **and the live
 attested-TLS evidence path** have landed on all three measured backends: dispatcher
 dials the measured in-TEE agent (`internal/attest/agent` + `cmd/dispatcher-attest*`)
@@ -115,12 +134,29 @@ fails closed unless the plan selects a measured backend: Nitro on AWS,
 `profile: azure-snp` on Azure, or Confidential Space on GCP. The unmeasured
 standard AWS SEV-SNP and Azure MAA routes were removed — their SSH-delivered agent
 sat outside the measured launch chain. **AMD KDS CRL revocation** remains,
-enforced on the `azure-snp` path. Remaining:
+enforced on the `azure-snp` path.
+
+**Remaining — none planned for immediate build; captured so the coverage gaps are
+explicit.** Today the design is *one measured VM/enclave backend per cloud* (AWS
+Nitro, Azure SEV-SNP+vTPM, GCP Confidential Space/SEV). The items below would
+harden those backends, add new TEE types, or cover confidential offerings
+dispatcher doesn't touch — grouped as **harden**, **new backend**, and **out of
+scope**. dispatcher does not support SGX, serverless confidential containers
+(ACI / Cloud Run), or confidential data/DB PaaS today.
 
 | Item | Effort | Impact |
 |---|---|---|
-| **AWS live pricing** — the EC2 bulk price list is ~479 MB and rarely parses in the plan timeout (now correctly skipped → static/rate-card fallback). Replace with the lightweight Price List Query API (`get-products`). | M | Low |
-| k8s Confidential Containers — a different, larger model. Out of scope until demand. | — | — |
+| **AWS live pricing** — *delivered:* replaced the ~479 MB EC2 bulk price list with the lightweight Price List Query API (`aws pricing get-products`) plus `describe-spot-price-history` for spot. | — | Done |
+| *Harden* — **Confidential OS-disk encryption (Azure)** — wire `DiskWithVMGuestState` so the OS disk is host-opaque (today dispatcher uses `VMGuestStateOnly`, which encrypts only the vTPM/guest-state blob). Closes the N1 disk-at-rest gap on the strongest backend. | M | Medium |
+| *Harden* — **In-TEE encrypted scratch (all backends)** — the measured agent provisions a dm-crypt volume keyed from a secret released post-attestation (key lives only in TEE memory), so workload disk writes are ciphertext to the host — a generic N1 fix. Reboot-ephemeral. Cheap precursor first: tmpfs `/tmp`, swap off, core dumps off in the measured image. | M–L | Medium |
+| *New backend* — **Confidential GPU (H100 on A3 / L4 on G4)** — release the secret only if **both** the NVIDIA GPU attestation (device cert + measurement, via NRAS or a local verifier) **and** the CPU TEE (TDX/SEV-SNP) verify; protects weights/prompts/context on the PCIe bus + VRAM. dispatcher rejects confidential+GPU today (CPU-only CVMs). The convergence of the GPU and confidential threads — highest-value gap. | L | High |
+| *New backend* — **GCP direct SEV-SNP** — a measured GCP CVM (raw SEV-SNP report → pinned AMD ARK, agent folded into the launch measurement / vTPM PCR) as an alternative to Confidential Space, upgrading GCP's anchor from Google's attestation service to AMD silicon with enforceable `minTCB` + KDS CRL. Verifier core already golden-validated against a GCP-captured report; the measured-image/provisioning side is the build. Narrow benefit (distrust of Google's attestation *service*, not just the hypervisor). | L | Low–Med |
+| *New backend* — **Intel TDX (Azure/GCP)** — a TDX-quote verifier + measured image so `type: tdx` is attestable (today `azure-vm` advertises `tdx` with no measured path; GCP TDX is rejected). A 4th attestation type alongside SEV-SNP / Nitro / CS. | L | Low |
+| *New backend* — **Run already-SGX-compiled apps as plain workloads** — needs an **instance-type pin** first (no SKU override exists; the planner picks from the catalog by cpu/mem/gpu), then run the app on an Azure DCsv3 as an ordinary, *non-attested-by-dispatcher* workload — the image brings the SGX runtime and the app self-attests; dispatcher provides provisioning + firewall/watchdog/budget/teardown. Azure-only. | S (pin) / M (SGX) | Low |
+| *New backend* — **dispatcher-attested SGX (DCAP)** — verify the enclave's ECDSA/DCAP quote against Intel roots, allowlist MRENCLAVE/MRSIGNER, bind the aTLS channel to `REPORT_DATA`. A different shape from the launch-measurement model (per-enclave MRENCLAVE, no whole-VM launch measurement). Only for a concrete requirement. | L | Low |
+| *New backend* — **Serverless confidential containers (Confidential ACI / Cloud Run Jobs)** — ephemeral, k8s-shaped adapters (no VM to own; auto-stop + per-execution billing make the durable watchdog/gc machinery moot) plus a new attestation path (their TEE attestation differs from the launch-measurement model). Two builds: the plain adapter, then its confidential/attestation variant. | M / L | Low |
+| *Out of scope* — **k8s Confidential Containers / Confidential GKE nodes** — confidential worker nodes + CoCo, a different and larger model. Until demand. | — | — |
+| *Out of scope* — **Confidential data/DB PaaS** (Azure SQL Always Encrypted w/ enclaves, Confidential BigQuery/Dataflow, customer-managed in-enclave DBs) — managed analytics/database services, not compute dispatcher provisions and attests. A confidential *compute* run can call them, but dispatcher won't wrap them. | — | — |
 
 ## Low-latency burst execution
 
@@ -153,7 +189,7 @@ the first REST provider is the real investment (it establishes an HTTP-based
 |---|---|---|---|---|
 | **Oracle Cloud (OCI)** | `oci` CLI, SSH VMs | ✅ near-identical to AWS/GCP | Large always-free tier (Ampere ARM) for CI; cheap ARM | **done — validated + enabled (provisioning only)** |
 | **Vultr** | `vultr-cli` + API, SSH VMs | ✅ | Cheap general + many regions; some GPU | M (low) |
-| **Lambda Cloud** | REST API (no rich CLI), SSH VMs | ~ VM lifecycle fits, but HTTP not CLI | On-demand H100/A100 well below hyperscaler list, often more available | M (first REST adapter) |
+| **Lambda Cloud** | REST API (no rich CLI), SSH VMs | ~ VM lifecycle fits, but HTTP not CLI | On-demand H100/A100 well below hyperscaler list, often more available | **done — validated + enabled (provisioning + GPU)** |
 | **RunPod** | REST/GraphQL + CLI, SSH-able pods | ~ container/VM hybrid | Very cheap community-cloud GPUs, per-second billing; burst GPU | M–L |
 | **Thunder Compute** | `tnr` CLI, SSH VMs | ✅ | Cheap GPU (GPU-over-TCP); newer/less proven | M (immature) |
 | **Modal** | Python SDK, serverless sandboxes | ❌ submit-and-invoke (k8s-shaped, no SSH) | Sub-second sandboxes, autoscale; adds a Python dep | L |
@@ -176,8 +212,12 @@ lane).
 
 **Suggested order:** (1) **Oracle** — *done* (validated + enabled; provisioning
 only, confidential not supported); free always-free tier gives a no-cost CI lane.
-(2) **Lambda Cloud** — highest-value GPU add; builds the reusable REST `Provider`
-pattern. (3) **RunPod** — cheapest burst GPU once REST exists. (4) **Vultr /
+(2) **Lambda Cloud** — *delivered + live-validated* (`lambda-vm`): the first REST
+`Provider` (HTTP + API key, not a CLI); GPU provision → `nvidia-smi` → teardown
+confirmed end-to-end on a live account (which surfaced and fixed a teardown leak —
+the terminate API returns 200 without acting, so DestroyVM now verifies-and-retries).
+Provisioning-only (no confidential, no per-run firewall, no in-VM watchdog).
+(3) **RunPod** — cheapest burst GPU, now that the REST pattern exists. (4) **Vultr /
 Thunder** — opportunistic. (5) **Modal** — separate serverless track, not a VM provider.
 
 GPU backends reuse the driver-baked-image mechanism already built
@@ -227,14 +267,13 @@ recoverable artifact collection, control-plane CPU headroom, kernel OOM evidence
 signal-exit retry classification, and the URI+digest bounded source preflight, plus
 the opt-in live stress lane. Remaining priorities:
 
-1. **Candidate backends** — **Oracle (OCI)** is built but gated experimental
-   (`DISPATCHER_OCI_EXPERIMENTAL`) pending a live-tenancy validation; then **Lambda
-   Cloud**, which establishes the reusable REST `Provider` pattern (every current
-   backend shells out to a CLI) and adds cheap on-demand H100/A100.
+1. **Candidate backends** — **Oracle (OCI)** and **Lambda Cloud** both ship enabled
+   and live-validated (Lambda established the reusable REST `Provider` pattern —
+   every other backend shells out to a CLI — and adds cheap on-demand H100/A100).
+   Next is **RunPod** for cheaper burst GPU, now that the REST pattern exists.
 2. **Low-latency** — cloud-native fast backend (prebaked images / warm pools) +
    startup-latency feasibility so the planner prefers fast backends for short jobs.
-3. **Shell completion** and **AWS live pricing** (replace the 479 MB bulk list
-   with the Price List Query API).
+3. **Shell completion** (`ValidArgsFunction` for run-ids / target-ids / enum flags).
 
 CI hardening is delivered — `staticcheck` (full default set, U1000 included) and
 per-package coverage floors are enforced and blocking.

@@ -58,7 +58,7 @@ dispatcher confidential pins        # Show/pin/capture/build/check measured-imag
                                     #   (subcommands: pins, pin, capture, build, check)
 ```
 
-### Execution Targets (10 with adapters)
+### Execution Targets (12 with adapters)
 
 | Target | Kind | Adapter | Status |
 |--------|------|---------|--------|
@@ -69,20 +69,22 @@ dispatcher confidential pins        # Show/pin/capture/build/check measured-imag
 | firecracker-vm | local-vm | CloudVMAdapter + FirecrackerProvider | Working (needs a KVM host; live-validated) |
 | kubernetes | kubernetes | K8sAdapter | Working (needs kubectl) |
 | hetzner-vm | cloud-vm | CloudVMAdapter + HetznerProvider | Live-validated: provisioning + gc reap/safety (needs hcloud CLI) |
-| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = AWS Nitro Enclaves (`confidential.profile: nitro`, measured enclave image → PCR0), attested over aTLS and hardware-validated. |
+| aws-vm | cloud-vm | CloudVMAdapter + AWSProvider | Live-validated: provisioning + GPU (T4) + gc reap/safety. Confidential = AWS Nitro Enclaves (`confidential.profile: nitro`, measured enclave image → PCR0), attested over aTLS and hardware-validated. |
 | gcp-vm | cloud-vm | CloudVMAdapter + GCPProvider | Live-validated: provisioning + GPU + gc reap/safety. Confidential = Confidential Space (measured agent image digest, Google JWS), attested over aTLS and hardware-validated. |
 | azure-vm | cloud-vm | CloudVMAdapter + AzureProvider | Live-validated: provisioning + gc reap/teardown-cascade, and a ConfidentialVM (SEV-SNP, vTPM, secure boot) create+reap. Confidential = measured direct SNP+vTPM path (`confidential.profile: azure-snp`, agent in PCR11), attested over aTLS and hardware-validated. |
+| oci-vm | cloud-vm | CloudVMAdapter + OCIProvider | Enabled (provisioning only; needs `oci` CLI). No confidential capability. |
+| lambda-vm | cloud-vm | CloudVMAdapter + LambdaProvider | Enabled (REST-based; needs `DISPATCHER_LAMBDA_API_KEY`; GPU). |
 
 ### Key Features
 
 - **Workload inspection**: Recursive scanning for runtime, entrypoints, ports, GPU, secrets, data deps, monorepo detection
 - **dispatcher.yaml**: Declarative config that overrides auto-detection (name, command, GPU, service port, budget, timeout, target)
 - **Cost estimation**: Per-target rate cards, historical run data, instance catalog with ~50 cloud VM types
-- **Risk analysis**: 11 risk categories (cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging, confidential-disk-residual)
+- **Risk analysis**: 13 risk categories (spot-interruption, cost uncertainty, runtime uncertainty, capacity, right-sizing, gpu-unschedulable, credentials, data egress, public endpoint, network, packaging, confidential-disk-residual, outputs-unretrievable)
 - **Host import**: register externally-provisioned hosts (Terraform/OpenTofu/Pulumi/scripts) as SSH targets via `targets import`, with cost/risk/approval/teardown on top. See [USAGE.md](USAGE.md#bring-your-own-hosts).
 - **Policy gates**: Per-run Unix-socket approval gate. In-process approver (terminal / `--yes`) races an external `dispatcher approve <id>`; filesystem perms (0700 dir, 0600 socket) are the auth boundary.
-- **GPU workloads**: detection → feasibility → catalog/pricing → provisioning. GCP/AWS provision GPU instances from an operator driver-baked image (`DISPATCHER_{GCP,AWS}_GPU_IMAGE`); validated end-to-end (nvidia-smi in-VM on L4/T4). k8s uses `nvidia.com/gpu` limits.
-- **Confidential computing**: typed `confidential:` requirement → TEE-capable machine selection + provisioning (GCP SEV-SNP/AMD Milan, AWS Nitro Enclaves, Azure ConfidentialVM) → per-cloud attestation verifiers (SEV-SNP with pinned AMD ARK roots, Nitro COSE with the pinned AWS root, Confidential Space JWS) delivered over an attested TLS session. All three measured backends hardware-validated. See [confidential-computing.md](confidential-computing.md).
+- **GPU workloads**: detection → feasibility → catalog/pricing → provisioning. **Live-validated end-to-end** on `lambda-vm`, `gcp-vm` (GCP L4), and `aws-vm` (AWS T4): provision a real GPU box → `nvidia-smi` in-VM → teardown, zero residual. GCP and AWS provision GPU instances from an operator driver-baked image (`DISPATCHER_{GCP,AWS}_GPU_IMAGE` — a Deep Learning AMI on AWS, an NVIDIA-driver image on GCP). k8s uses `nvidia.com/gpu` limits.
+- **Confidential computing**: typed `confidential:` requirement → TEE-capable machine selection + provisioning → per-cloud **measured** attestation delivered over an attested TLS session: **GCP** Confidential Space (SEV — sev-snp/tdx are rejected early; agent-image digest + Google JWS), **Azure** direct SNP+vTPM (`profile: azure-snp`; SEV-SNP report verified against pinned AMD ARK roots + agent measured into PCR11), **AWS** Nitro Enclaves (`profile: nitro`; COSE chain + pinned PCR0). All three measured backends hardware-validated. See [confidential-computing.md](confidential-computing.md).
 - **Sharding / fan-out**: `shard:`/`aggregate:` config fans a workload across N shards (fixed `count` or a `discover` command), each a full dispatcher run; bounded-parallel engine with fail/retry/continue; artifact aggregation. See [low-latency-execution.md](low-latency-execution.md).
 - **Durable execution**: Runs survive CLI restarts. Serializable adapter state, reconnection, cloud-init watchdog with self-destruct timer.
 - **Budget enforcement**: `--max-cost` (USD) and `--timeout` (duration) limits.
@@ -107,7 +109,7 @@ internal/
   run/                # Run state machine, executor, persistence, reconnection, cost tracking, trace
   approval/           # Per-run Unix-socket approval gate (audit Record embedded in run state)
   adapter/            # TargetAdapter interface, shared utilities, local/docker/ssh adapters
-  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima/Firecracker), watchdog, catalog, gc, bill, confidential adapters
+  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/OCI/Lambda/Lima/Firecracker), watchdog, catalog, gc, bill, confidential adapters
   attest/             # Attestation verifiers (SEV-SNP/Nitro/CS-JWS) + per-cloud aTLS validators, pinned AMD/AWS roots, in-TEE agent + attested-TLS transport
   confidential/       # Measured-image pin registry (input-hash drift guard)
   shard/              # Shard planning (count/discover), bounded-parallel fan-out engine

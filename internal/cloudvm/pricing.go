@@ -79,7 +79,39 @@ func NewLiveCatalog(ctx context.Context, fetchers ...Fetcher) (*Catalog, []Skipp
 		instances = append(instances, r.instances...)
 	}
 
-	return &Catalog{instances: seedStaticGPU(instances, fetched)}, skipped, nil
+	return &Catalog{instances: seedStaticGPU(enrichSpecsFromStatic(instances), fetched)}, skipped, nil
+}
+
+// enrichSpecsFromStatic fills vCPU/memory (and GPU/confidential) specs onto live
+// price rows whose feed omitted them (Azure's Retail Prices API returns no
+// per-SKU specs), matching by provider+SKU name against the built-in table. The
+// live price is preserved. This lets FindCheapest's size filters select a
+// correctly-sized SKU at the live price instead of collapsing onto the globally
+// cheapest spec-less row. SKUs absent from the built-in table stay spec-less and
+// are excluded from sized requests by FindCheapest.
+func enrichSpecsFromStatic(instances []InstanceType) []InstanceType {
+	specs := make(map[string]InstanceType, len(defaultInstances))
+	for _, s := range defaultInstances {
+		specs[string(s.Provider)+"/"+s.Name] = s
+	}
+	for i := range instances {
+		if instances[i].VCPUs != 0 || instances[i].MemoryGB != 0 {
+			continue
+		}
+		s, ok := specs[string(instances[i].Provider)+"/"+instances[i].Name]
+		if !ok {
+			continue
+		}
+		instances[i].VCPUs = s.VCPUs
+		instances[i].MemoryGB = s.MemoryGB
+		instances[i].GPUCount = s.GPUCount
+		instances[i].GPUModel = s.GPUModel
+		instances[i].Confidential = s.Confidential
+		if instances[i].Arch == "" {
+			instances[i].Arch = s.Arch
+		}
+	}
+	return instances
 }
 
 // seedStaticGPU backfills the static catalog's GPU AND confidential SKUs for any

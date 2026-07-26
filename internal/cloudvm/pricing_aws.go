@@ -4,33 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
-// AWSBulkPriceListBaseURL is AWS's public, unauthenticated Bulk Price List API.
-// Documented at:
-//
-//	https://docs.aws.amazon.com/awsaccountbilling/latest/aboutv2/price-changes.html
-//
-// Per-region files live under .../offers/v1.0/aws/AmazonEC2/current/<region>/index.json
-// and contain every EC2 product+term currently sold in that region. The file
-// is large (10–30 MB) but stable, cacheable, and the same data AWS uses for its
-// own pricing pages.
-const AWSBulkPriceListBaseURL = "https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonEC2/current"
+// awsPricingEndpointRegion is where the AWS Price List Query API is served.
+// It's only available from a couple of endpoints regardless of which region is
+// being priced — the priced region is a filter (regionCode), not the endpoint.
+const awsPricingEndpointRegion = "us-east-1"
 
-// AWSFetcher pulls EC2 on-demand pricing from AWS's public Bulk Price List API.
-// No credentials required — this is the same data backing console.aws.amazon.com
-// pricing pages.
+// awsPricingMaxPages bounds pagination at 100 SKUs/page. A single region's
+// Linux/shared/on-demand compute catalog is a few hundred SKUs, well under this;
+// the cap is a runaway backstop, not an expected limit.
+const awsPricingMaxPages = 40
+
+// AWSFetcher pulls EC2 on-demand pricing from the AWS Price List Query API via
+// `aws pricing get-products`, filtered to the region's Linux/shared/on-demand
+// compute SKUs. This replaces the per-region Bulk Price List file (~480 MB,
+// because it bundles every Reserved/Savings-Plan term), which rarely downloads
+// and parses inside a plan's deadline. Unlike the other fetchers it needs AWS
+// credentials + the pricing:GetProducts permission; when the CLI is missing or
+// unauthenticated the Fetch errors and the catalog records it as skipped.
 type AWSFetcher struct {
-	Region string // e.g. "us-east-1"
-
-	// Client overrides the HTTP client for tests.
-	Client *http.Client
-	// BaseURL overrides the bulk price list root for tests.
-	BaseURL string
+	Region string // region to price, e.g. "us-west-2" (a filter, not the endpoint)
 }
 
 func NewAWSFetcher(region string) *AWSFetcher {
@@ -43,44 +40,120 @@ func NewAWSFetcher(region string) *AWSFetcher {
 func (a *AWSFetcher) Provider() ProviderID { return ProviderAWS }
 
 func (a *AWSFetcher) Fetch(ctx context.Context) ([]InstanceType, error) {
-	client := a.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	base := a.BaseURL
-	if base == "" {
-		base = AWSBulkPriceListBaseURL
-	}
-
-	url := fmt.Sprintf("%s/%s/index.json", base, a.Region)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("build aws price list request: %w", err)
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("aws price list: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("aws price list status %d for %s: %s", resp.StatusCode, a.Region, body)
+	// Exact-match filters so the API returns only the "what you'd actually pay"
+	// SKU: Linux, shared tenancy, no pre-installed software, used capacity.
+	filters := []string{
+		"Type=TERM_MATCH,Field=regionCode,Value=" + a.Region,
+		"Type=TERM_MATCH,Field=operatingSystem,Value=Linux",
+		"Type=TERM_MATCH,Field=tenancy,Value=Shared",
+		"Type=TERM_MATCH,Field=capacitystatus,Value=Used",
+		"Type=TERM_MATCH,Field=preInstalledSw,Value=NA",
 	}
 
-	return parseAWSBulkPriceList(resp.Body)
+	var instances []InstanceType
+	token := ""
+	for page := 0; page < awsPricingMaxPages; page++ {
+		args := []string{
+			"pricing", "get-products",
+			"--service-code", "AmazonEC2",
+			"--region", awsPricingEndpointRegion,
+			"--max-results", "100",
+			"--output", "json",
+			"--filters",
+		}
+		args = append(args, filters...)
+		if token != "" {
+			args = append(args, "--next-token", token)
+		}
+
+		out, err := runCLI(ctx, "aws", args...)
+		if err != nil {
+			// Missing creds, a missing aws CLI, or a denied pricing:GetProducts
+			// permission are all "AWS pricing isn't available here" — classify them
+			// as ErrCredentialsMissing so the catalog skips AWS cleanly and falls
+			// back to the rate-card estimate, rather than calling a permanent auth
+			// failure "transient".
+			if isAWSCredentialError(err) {
+				return nil, fmt.Errorf("%w: aws pricing: %v", ErrCredentialsMissing, err)
+			}
+			return nil, fmt.Errorf("aws pricing get-products: %w", err)
+		}
+
+		var resp struct {
+			PriceList []string `json:"PriceList"`
+			NextToken string   `json:"NextToken"`
+		}
+		if err := json.Unmarshal(out, &resp); err != nil {
+			return nil, fmt.Errorf("parse aws pricing response: %w", err)
+		}
+		for _, entry := range resp.PriceList {
+			if inst, ok := parseAWSPriceListEntry(entry); ok {
+				instances = append(instances, inst)
+			}
+		}
+		if resp.NextToken == "" {
+			break
+		}
+		token = resp.NextToken
+	}
+
+	// Overlay live spot prices (best-effort — spot pricing is optional).
+	if spot := a.fetchSpotPrices(ctx); len(spot) > 0 {
+		for i := range instances {
+			if p, ok := spot[instances[i].Name]; ok && p > 0 && p < instances[i].PricePerHour {
+				instances[i].SpotPricePerHour = p
+			}
+		}
+	}
+	return instances, nil
 }
 
-// awsBulkPriceList is the shape of the per-region Bulk Price List doc.
-// We only read the OnDemand terms — Reserved/SavingsPlans aren't useful for
-// estimating what an on-demand launch would cost.
-type awsBulkPriceList struct {
-	Products map[string]struct {
-		SKU           string            `json:"sku"`
+// fetchSpotPrices returns each instance type's cheapest recent spot price in the
+// region. Best-effort: spot pricing is optional, so any failure yields nil and
+// the estimator falls back to the discount factor. The aws CLI auto-paginates
+// describe-spot-price-history, so this is a single call; start-time=now returns
+// the latest price per type/AZ.
+func (a *AWSFetcher) fetchSpotPrices(ctx context.Context) map[string]float64 {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-spot-price-history",
+		"--region", a.Region,
+		"--product-descriptions", "Linux/UNIX",
+		"--start-time", time.Now().UTC().Format(time.RFC3339),
+		"--output", "json")
+	if err != nil {
+		return nil
+	}
+	var resp struct {
+		SpotPriceHistory []struct {
+			InstanceType string `json:"InstanceType"`
+			SpotPrice    string `json:"SpotPrice"`
+		} `json:"SpotPriceHistory"`
+	}
+	if json.Unmarshal(out, &resp) != nil {
+		return nil
+	}
+	prices := make(map[string]float64, len(resp.SpotPriceHistory))
+	for _, e := range resp.SpotPriceHistory {
+		p, err := strconv.ParseFloat(e.SpotPrice, 64)
+		if err != nil || !isPlausibleHourlyPrice(p) {
+			continue
+		}
+		if cur, ok := prices[e.InstanceType]; !ok || p < cur {
+			prices[e.InstanceType] = p // cheapest AZ
+		}
+	}
+	return prices
+}
+
+// awsQueryProduct is one PriceList entry from the Query API (each is itself a
+// JSON string). terms.OnDemand is keyed by offer term code directly — one level
+// shallower than the Bulk Price List, which keys by SKU first.
+type awsQueryProduct struct {
+	Product struct {
 		ProductFamily string            `json:"productFamily"`
 		Attributes    map[string]string `json:"attributes"`
-	} `json:"products"`
+	} `json:"product"`
 	Terms struct {
-		OnDemand map[string]map[string]struct {
+		OnDemand map[string]struct {
 			PriceDimensions map[string]struct {
 				Unit         string            `json:"unit"`
 				PricePerUnit map[string]string `json:"pricePerUnit"`
@@ -89,71 +162,52 @@ type awsBulkPriceList struct {
 	} `json:"terms"`
 }
 
-func parseAWSBulkPriceList(r io.Reader) ([]InstanceType, error) {
-	var doc awsBulkPriceList
-	if err := json.NewDecoder(r).Decode(&doc); err != nil {
-		return nil, fmt.Errorf("parse aws price list: %w", err)
+// parseAWSPriceListEntry turns one get-products PriceList entry into an
+// InstanceType. Returns (_, false) for non-compute products or entries without a
+// plausible hourly on-demand price.
+func parseAWSPriceListEntry(entry string) (InstanceType, bool) {
+	var p awsQueryProduct
+	if err := json.Unmarshal([]byte(entry), &p); err != nil {
+		return InstanceType{}, false
+	}
+	if p.Product.ProductFamily != "Compute Instance" {
+		return InstanceType{}, false
+	}
+	attrs := p.Product.Attributes
+	name := attrs["instanceType"]
+	if name == "" {
+		return InstanceType{}, false
 	}
 
-	var instances []InstanceType
-	for sku, product := range doc.Products {
-		if product.ProductFamily != "Compute Instance" {
-			continue
-		}
-		// Filter to the canonical "what you'd actually pay" SKU:
-		// Linux, shared tenancy, no pre-installed software, used capacity.
-		attrs := product.Attributes
-		if attrs["operatingSystem"] != "Linux" ||
-			attrs["tenancy"] != "Shared" ||
-			attrs["preInstalledSw"] != "NA" ||
-			attrs["capacityStatus"] != "Used" {
-			continue
-		}
-
-		name := attrs["instanceType"]
-		if name == "" {
-			continue
-		}
-
-		price, ok := extractAWSBulkPrice(doc, sku)
-		if !ok || price <= 0 {
-			continue
-		}
-		// Sanity bounds: reject prices that fall outside the band of any
-		// real EC2 instance. Defense against a poisoned bulk-JSON response
-		// (DNS hijack, compromised mirror) injecting a near-zero price that
-		// would cause the planner to recommend a runaway-cost target. Today
-		// the cheapest real EC2 instance is $0.0042/hr and the most
-		// expensive on-demand SKU is ~$80/hr.
-		if !isPlausibleHourlyPrice(price) {
-			continue
-		}
-
-		vcpus, _ := strconv.Atoi(attrs["vcpu"])
-		gpuCount, _ := strconv.Atoi(attrs["gpu"])
-		instances = append(instances, InstanceType{
-			Name:         name,
-			Provider:     ProviderAWS,
-			VCPUs:        vcpus,
-			MemoryGB:     parseAWSMemoryGB(attrs["memory"]),
-			PricePerHour: price,
-			Arch:         normalizeAWSArch(attrs["physicalProcessor"], attrs["instanceFamily"]),
-			GPUCount:     gpuCount,
-			GPUModel:     normalizeAWSGPUModel(attrs["gpuMemory"], name),
-		})
+	price, ok := extractAWSOnDemandPrice(p)
+	if !ok || price <= 0 {
+		return InstanceType{}, false
 	}
-	return instances, nil
+	// Sanity bounds: reject prices outside the band of any real EC2 instance —
+	// defense against a poisoned response injecting a near-zero price that would
+	// make the planner recommend a runaway-cost target.
+	if !isPlausibleHourlyPrice(price) {
+		return InstanceType{}, false
+	}
+
+	vcpus, _ := strconv.Atoi(attrs["vcpu"])
+	gpuCount, _ := strconv.Atoi(attrs["gpu"])
+	return InstanceType{
+		Name:         name,
+		Provider:     ProviderAWS,
+		VCPUs:        vcpus,
+		MemoryGB:     parseAWSMemoryGB(attrs["memory"]),
+		PricePerHour: price,
+		Arch:         normalizeAWSArch(attrs["physicalProcessor"], attrs["instanceFamily"]),
+		GPUCount:     gpuCount,
+		GPUModel:     normalizeAWSGPUModel(attrs["gpuMemory"], name),
+	}, true
 }
 
-// extractAWSBulkPrice walks the nested terms.OnDemand[SKU] → priceDimensions
-// structure to find the hourly USD rate. Returns (0, false) if no Hrs
-// dimension exists for the SKU.
-func extractAWSBulkPrice(doc awsBulkPriceList, sku string) (float64, bool) {
-	offers, ok := doc.Terms.OnDemand[sku]
-	if !ok {
-		return 0, false
-	}
-	for _, offer := range offers {
+// extractAWSOnDemandPrice walks terms.OnDemand → priceDimensions for the hourly
+// USD rate. Returns (0, false) if no Hrs dimension exists.
+func extractAWSOnDemandPrice(p awsQueryProduct) (float64, bool) {
+	for _, offer := range p.Terms.OnDemand {
 		for _, dim := range offer.PriceDimensions {
 			if dim.Unit != "Hrs" && !strings.HasPrefix(dim.Unit, "Hrs") {
 				continue
@@ -162,20 +216,42 @@ func extractAWSBulkPrice(doc awsBulkPriceList, sku string) (float64, bool) {
 			if !ok {
 				continue
 			}
-			v, err := strconv.ParseFloat(usd, 64)
-			if err != nil {
-				continue
+			if v, err := strconv.ParseFloat(usd, 64); err == nil {
+				return v, true
 			}
-			return v, true
 		}
 	}
 	return 0, false
 }
 
+// isAWSCredentialError reports whether an `aws pricing` failure is due to
+// missing/invalid credentials, a denied pricing:GetProducts permission, or a
+// missing aws CLI — as opposed to a genuine transient failure (network blip,
+// throttling) that a retry could clear.
+func isAWSCredentialError(err error) bool {
+	s := strings.ToLower(err.Error())
+	for _, m := range []string{
+		"unable to locate credentials",
+		"unrecognizedclientexception",
+		"invalidclienttokenid",
+		"signaturedoesnotmatch",
+		"expiredtoken",
+		"accessdenied",
+		"not authorized to perform: pricing",
+		"could not be found",        // config profile () could not be found
+		"executable file not found", // aws CLI absent
+	} {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
+}
+
 // isPlausibleHourlyPrice rejects on-demand hourly prices outside the band any
 // real cloud VM falls into. Used to bound damage from a poisoned pricing
-// response. Bounds chosen so legit micro instances (~$0.004/hr) and
-// high-end H100 boxes (~$80/hr) both pass.
+// response. Bounds chosen so legit micro instances (~$0.004/hr) and high-end
+// H100 boxes (~$80/hr) both pass.
 func isPlausibleHourlyPrice(p float64) bool {
 	const min, max = 0.001, 200.0
 	return p >= min && p <= max
@@ -188,6 +264,7 @@ func parseAWSMemoryGB(s string) float64 {
 	if i := strings.IndexAny(s, " "); i > 0 {
 		s = s[:i]
 	}
+	s = strings.ReplaceAll(s, ",", "") // high-memory instances: "1,952 GiB"
 	v, _ := strconv.ParseFloat(s, 64)
 	return v
 }
@@ -202,13 +279,14 @@ func normalizeAWSArch(processor, family string) string {
 }
 
 // normalizeAWSGPUModel maps instance-family naming to GPU model strings the
-// catalog uses (e.g. "t4", "a100", "h100"). gpuMemory attribute is present but
-// the family name is the cleanest signal.
+// catalog uses (e.g. "t4", "a100", "h100").
 func normalizeAWSGPUModel(_ string, instanceName string) string {
 	n := strings.ToLower(instanceName)
 	switch {
-	case strings.HasPrefix(n, "g4dn"), strings.HasPrefix(n, "g4ad"):
-		return "t4"
+	case strings.HasPrefix(n, "g4dn"):
+		return "t4" // NVIDIA T4
+	case strings.HasPrefix(n, "g4ad"):
+		return "v520" // AMD Radeon Pro V520 — not a T4
 	case strings.HasPrefix(n, "g5"):
 		return "a10g"
 	case strings.HasPrefix(n, "p3"):

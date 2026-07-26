@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -195,4 +196,34 @@ func TestStatus_RenewsWatchdogWhenRunning(t *testing.T) {
 
 	require.NoError(t, runStatusByID(id))
 	assert.True(t, f.extended, "should renew the watchdog after confirming the run is still running")
+}
+
+func TestWriteActiveSpendWarning(t *testing.T) {
+	var over strings.Builder
+	writeActiveSpendWarning(&over, 40.0, 3, 25.0)
+	assert.Contains(t, over.String(), "WARNING")
+	assert.Contains(t, over.String(), "3 active run(s)")
+	assert.Contains(t, over.String(), "$40.00")
+
+	// At or below threshold: silent.
+	var under strings.Builder
+	writeActiveSpendWarning(&under, 10.0, 1, 25.0)
+	assert.Empty(t, under.String())
+
+	// Disabled (non-positive threshold): silent even with spend.
+	var off strings.Builder
+	writeActiveSpendWarning(&off, 999.0, 5, 0)
+	assert.Empty(t, off.String())
+}
+
+func TestSpendWarnThreshold(t *testing.T) {
+	t.Setenv("DISPATCHER_WARN_OVER", "")
+	assert.Equal(t, defaultSpendWarnUSD, spendWarnThreshold())
+
+	t.Setenv("DISPATCHER_WARN_OVER", "5.5")
+	assert.Equal(t, 5.5, spendWarnThreshold())
+
+	// Garbage falls back to the default rather than disabling silently.
+	t.Setenv("DISPATCHER_WARN_OVER", "not-a-number")
+	assert.Equal(t, defaultSpendWarnUSD, spendWarnThreshold())
 }

@@ -33,7 +33,7 @@ internal/
   run/                # Run state machine, executor, persistence, reconnection
   approval/           # Per-run Unix-socket approval gate (audit Record embedded in run state)
   adapter/            # TargetAdapter interface, shared utilities, local/docker/ssh adapters
-  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/Lima/Firecracker), watchdog, gc, bill, confidential adapters
+  cloudvm/            # Cloud VM adapter, providers (Hetzner/AWS/GCP/Azure/OCI/Lambda/Lima/Firecracker), watchdog, gc, bill, confidential adapters
   attest/             # Attestation verifiers (SNP/Nitro/CS-JWS) + per-cloud aTLS validators, pinned roots, in-TEE agent + attested-TLS transport
   confidential/       # Measured-image pin registry (input-hash drift guard)
   shard/              # Sharding / fan-out
@@ -48,7 +48,7 @@ docs/                 # DESIGN, USAGE, SECURITY, ROADMAP, confidential-* design/
 
 ```bash
 go build -o dispatcher ./cmd/dispatcher   # Build binary
-go test ./...                         # Run all tests (~930 tests across 21 packages)
+go test ./...                         # Run all tests (~1140 tests across 22 packages)
 go vet ./...                          # Lint
 gofmt -l .                            # Find unformatted files
 ```

@@ -84,7 +84,10 @@ func bigIntToLE(n *big.Int, width int) []byte {
 
 // buildSNPReport assembles a 0x4A0-byte report and signs its 0x2A0-byte prefix
 // with the VCEK key, matching the AMD SEV-SNP ABI fields the parser reads.
-func buildSNPReport(t *testing.T, measurement, reportData []byte, reportedTCB, policy uint64, key *ecdsa.PrivateKey) []byte {
+// The optional vmpl (default 0) sets the VMPL field at offset 0x30, inside the
+// signed region, so a VMPL>0 report is still validly signed and exercises the
+// paravisor-level check rather than failing on signature.
+func buildSNPReport(t *testing.T, measurement, reportData []byte, reportedTCB, policy uint64, key *ecdsa.PrivateKey, vmpl ...uint32) []byte {
 	t.Helper()
 	require.Len(t, measurement, 48)
 	require.Len(t, reportData, 64)
@@ -93,6 +96,9 @@ func buildSNPReport(t *testing.T, measurement, reportData []byte, reportedTCB, p
 	binary.LittleEndian.PutUint64(buf[0x08:], policy) // policy
 	binary.LittleEndian.PutUint32(buf[0x34:], 1)      // signature algo: ECDSA P-384 / SHA-384
 	binary.LittleEndian.PutUint64(buf[0x180:], reportedTCB)
+	if len(vmpl) > 0 {
+		binary.LittleEndian.PutUint32(buf[0x30:], vmpl[0]) // VMPL
+	}
 	copy(buf[0x50:], reportData)
 	copy(buf[0x90:], measurement)
 
@@ -199,15 +205,24 @@ func rsaLeafCert(t *testing.T) *x509.Certificate {
 func TestVerifySNPChain(t *testing.T) {
 	ch := newSNPChain(t)
 	roots := []*x509.Certificate{ch.ark}
-	require.NoError(t, verifySNPChain(ch.vcek, ch.ask, roots))
+	ark, err := verifySNPChain(ch.vcek, ch.ask, roots)
+	require.NoError(t, err)
+	assert.Equal(t, ch.ark, ark, "returns the specific ARK that signed the ASK (for CRL binding)")
 
 	// A foreign ARK must not validate this ASK.
 	other := []*x509.Certificate{newSNPChain(t).ark}
-	assert.Error(t, verifySNPChain(ch.vcek, ch.ask, other), "ASK chains to no pinned ARK")
-	assert.Error(t, verifySNPChain(ch.vcek, newSNPChain(t).ask, roots), "VCEK not signed by the presented ASK")
-	assert.Error(t, verifySNPChain(nil, ch.ask, roots), "an incomplete chain fails closed")
-	assert.Error(t, verifySNPChain(ch.vcek, ch.ask, nil), "no pinned roots fails closed")
+	_, err = verifySNPChain(ch.vcek, ch.ask, other)
+	assert.Error(t, err, "ASK chains to no pinned ARK")
+	_, err = verifySNPChain(ch.vcek, newSNPChain(t).ask, roots)
+	assert.Error(t, err, "VCEK not signed by the presented ASK")
+	_, err = verifySNPChain(nil, ch.ask, roots)
+	assert.Error(t, err, "an incomplete chain fails closed")
+	_, err = verifySNPChain(ch.vcek, ch.ask, nil)
+	assert.Error(t, err, "no pinned roots fails closed")
 
-	// Multiple pinned roots: the ASK is accepted if ANY pinned root signed it.
-	assert.NoError(t, verifySNPChain(ch.vcek, ch.ask, []*x509.Certificate{newSNPChain(t).ark, ch.ark}))
+	// Multiple pinned roots: accepted if ANY pinned root signed it; the matched
+	// one is returned so revocation can bind the CRL to it.
+	got, err := verifySNPChain(ch.vcek, ch.ask, []*x509.Certificate{newSNPChain(t).ark, ch.ark})
+	require.NoError(t, err)
+	assert.Equal(t, ch.ark, got)
 }

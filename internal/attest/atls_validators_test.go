@@ -122,7 +122,7 @@ func TestAzureSNPValidator(t *testing.T) {
 	require.NoError(t, err)
 	evidence := []byte(base64.StdEncoding.EncodeToString(raw))
 
-	val := AzureSNPValidator(roots, map[int]string{11: hex.EncodeToString(pcr11)}, 0)
+	val := AzureSNPValidator(roots, map[int]string{11: hex.EncodeToString(pcr11)}, hex.EncodeToString(make48(0x11)), 0)
 	ctx := context.Background()
 	require.NoError(t, val.Validate(ctx, evidence, bindData, nonce),
 		"a bundle bound to this session's bindData must verify")

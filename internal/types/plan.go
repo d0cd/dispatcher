@@ -32,6 +32,11 @@ type CostEstimate struct {
 	// launch the instance that was actually priced. Empty for non-catalog
 	// estimates (local/docker/rate-card).
 	InstanceType string `yaml:"instanceType,omitempty" json:"instanceType,omitempty"`
+	// SpotRatio is the priced instance's live spot price as a fraction of its
+	// on-demand price, when the catalog sourced a spot price (GCP/AWS). ApplySpot
+	// uses it for an accurate spot estimate; 0 means fall back to a per-provider
+	// discount factor.
+	SpotRatio float64 `yaml:"spotRatio,omitempty" json:"spotRatio,omitempty"`
 }
 
 // PlanMetadata contains identification and audit info.
@@ -67,6 +72,11 @@ type PlanConstraints struct {
 	// CLI accepts --allow-ssh-from for both; GCP, Azure, Lima, and Kubernetes
 	// reject a non-empty value.
 	AllowSSHFrom string `yaml:"allowSshFrom,omitempty" json:"allowSshFrom,omitempty"`
+	// Spot requests an interruptible spot/preemptible instance (AWS spot, GCP SPOT,
+	// Azure Spot). Much cheaper but the provider can reclaim it at any time, so it
+	// is only for interruption-tolerant work; pair with retryTransient to
+	// re-provision on reclaim. Ignored by targets without spot support.
+	Spot bool `yaml:"spot,omitempty" json:"spot,omitempty"`
 }
 
 // Recommendation is the primary target recommendation.

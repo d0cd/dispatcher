@@ -245,10 +245,16 @@ func (s *MCPServer) toolsCall(params json.RawMessage) map[string]any {
 	payloadResult := result.Result
 	if callParams.Name == "inspect_workload" && result.Error == "" {
 		if ws, ok := result.Result.(types.WorkloadSpec); ok {
+			// Store the REDACTED spec: subsequent tools (evaluate_all_targets)
+			// score against s.spec and embed workload fields — e.g. Data.Details in
+			// data-egress risk text — so storing the raw spec would leak them to the
+			// model. Redaction only blanks descriptive fields; feasibility/cost/risk
+			// still key off Requirements and Data.Kind.
+			redacted := redactWorkloadForAI(ws)
 			s.mu.Lock()
-			s.spec = &ws
+			s.spec = &redacted
 			s.mu.Unlock()
-			payloadResult = redactWorkloadForAI(ws)
+			payloadResult = redacted
 		}
 	}
 

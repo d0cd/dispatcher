@@ -2,9 +2,19 @@ package risk
 
 import "github.com/d0cd/dispatcher/internal/types"
 
-// Analyze enumerates risks for a workload on a target.
-func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate) []types.Risk {
+// Analyze enumerates risks for a workload on a target. spot indicates the run
+// requested an interruptible instance, which carries its own reclaim risk.
+func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate, spot bool) []types.Risk {
 	var risks []types.Risk
+
+	// Spot/preemptible interruption: the provider can reclaim the instance at any
+	// time, killing the run mid-flight. Only safe for restartable work.
+	if spot {
+		risks = append(risks, types.Risk{
+			Category:    "spot-interruption",
+			Description: "spot/preemptible instance can be reclaimed by the provider at any time; the run may be interrupted mid-execution — only for restartable work, and pair with --retry-transient to auto re-provision (typical GPU reclaim: A100 ~15-20%, H100 <5%)",
+		})
+	}
 
 	// Cost uncertainty
 	if est.Confidence == types.ConfidenceLow || est.Confidence == types.ConfidenceUnknown {
@@ -98,6 +108,16 @@ func Analyze(w types.WorkloadSpec, t types.TargetConfig, est types.CostEstimate)
 		risks = append(risks, types.Risk{
 			Category:    "confidential-disk-residual",
 			Description: "confidential VM encrypts memory, but the OS disk is not yet host-opaque (confidential OS-disk encryption is not wired) — keep durable secrets in memory (see docs/confidential-computing.md, N1)",
+		})
+	}
+
+	// Declared outputs on a target whose adapter can't retrieve them are silently
+	// lost: the docker and kubernetes adapters return no artifacts and tear the
+	// container/pod down after the run, so anything the workload wrote is gone.
+	if len(w.Outputs) > 0 && (t.Kind == types.TargetKindDocker || t.Kind == types.TargetKindKubernetes) {
+		risks = append(risks, types.Risk{
+			Category:    "outputs-unretrievable",
+			Description: "workload declares outputs: but the " + string(t.Kind) + " target does not retrieve artifacts and tears the container/pod down after the run — declared results will be lost; use an ssh or cloud-vm target to collect them",
 		})
 	}
 

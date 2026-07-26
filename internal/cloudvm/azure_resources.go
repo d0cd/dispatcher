@@ -44,7 +44,7 @@ type azureVMResources struct {
 // Azure's untagged satellites, so the caller must not delete the VM without them.
 // The per-NIC drill-down is best-effort (a missed IP is one leaked address, not
 // the whole cascade).
-func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) (azureVMResources, error) {
+func (a *AzureProvider) gatherVMResources(ctx context.Context, rg, vmID string) (azureVMResources, error) {
 	var out azureVMResources
 	// Retry the enumeration: the disk/NIC/IP ids captured here are the ONLY way
 	// teardown can reap Azure's auto-created (untagged) satellites, so a single
@@ -52,7 +52,7 @@ func (a *AzureProvider) gatherVMResources(ctx context.Context, vmID string) (azu
 	var raw []byte
 	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
 		o, e := runCLI(ctx, "az", "vm", "show",
-			"--resource-group", a.resourceGroup, "--name", vmID, "--output", "json")
+			"--resource-group", rg, "--name", vmID, "--output", "json")
 		if e != nil {
 			return wrapExecError("az vm show", e)
 		}
@@ -215,19 +215,26 @@ func (a *AzureProvider) DestroyResource(ctx context.Context, res adapter.Resourc
 	if !res.DispatcherOwned() {
 		return fmt.Errorf("refusing to destroy %s %q: not dispatcher-owned", res.Kind, res.ResourceID)
 	}
-	if !destroyArgsSafe(res.ResourceID, "") {
-		return fmt.Errorf("azure: refusing to destroy %q: unsafe resource id", res.ResourceID)
+	// Route to the RG the resource actually lives in (gc scans subscription-wide),
+	// falling back to the adapter's own group. Validate both so neither can inject
+	// argv.
+	rg := res.Scope
+	if rg == "" {
+		rg = a.resourceGroup
+	}
+	if !destroyArgsSafe(res.ResourceID, rg) {
+		return fmt.Errorf("azure: refusing to destroy %q: unsafe resource id or scope", res.ResourceID)
 	}
 	var args []string
 	switch res.Kind {
 	case adapter.ResourceInstance:
-		return a.DestroyVM(ctx, res.ResourceID)
+		return a.destroyVMInRG(ctx, rg, res.ResourceID)
 	case adapter.ResourceDisk:
-		args = []string{"disk", "delete", "--resource-group", a.resourceGroup, "--name", res.ResourceID, "--yes"}
+		args = []string{"disk", "delete", "--resource-group", rg, "--name", res.ResourceID, "--yes"}
 	case adapter.ResourceAddress:
-		args = []string{"network", "public-ip", "delete", "--resource-group", a.resourceGroup, "--name", res.ResourceID}
+		args = []string{"network", "public-ip", "delete", "--resource-group", rg, "--name", res.ResourceID}
 	case adapter.ResourceSnapshot:
-		args = []string{"snapshot", "delete", "--resource-group", a.resourceGroup, "--name", res.ResourceID}
+		args = []string{"snapshot", "delete", "--resource-group", rg, "--name", res.ResourceID}
 	default:
 		return fmt.Errorf("azure: cannot destroy resource of kind %q", res.Kind)
 	}
@@ -237,14 +244,34 @@ func (a *AzureProvider) DestroyResource(ctx context.Context, res adapter.Resourc
 	return nil
 }
 
+// includeCrossRG decides whether a subscription-wide-listed resource belongs in
+// the gc report. gc scans every resource group so a dispatcher-owned resource
+// leaked into another RG is still found; non-owned resources are only surfaced
+// from the configured RG so a large subscription doesn't flood the report with
+// unrelated infrastructure.
+func (a *AzureProvider) includeCrossRG(rg string, tags map[string]string) bool {
+	return tags["dispatcher"] == "true" || rg == a.resourceGroup
+}
+
+// azureRegionOr returns the resource's own location, or the adapter default when
+// the listing didn't carry one.
+func (a *AzureProvider) azureRegionOr(location string) string {
+	if location != "" {
+		return location
+	}
+	return a.location
+}
+
 func (a *AzureProvider) listVMResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "az", "vm", "list", "--resource-group", a.resourceGroup, "--show-details", "--output", "json")
+	out, err := runCLI(ctx, "az", "vm", "list", "--show-details", "--output", "json")
 	if err != nil {
 		return nil, wrapExecError("az vm list", err)
 	}
 	var vms []struct {
 		Name            string `json:"name"`
 		PowerState      string `json:"powerState"`
+		ResourceGroup   string `json:"resourceGroup"`
+		Location        string `json:"location"`
 		HardwareProfile struct {
 			VMSize string `json:"vmSize"`
 		} `json:"hardwareProfile"`
@@ -264,11 +291,15 @@ func (a *AzureProvider) listVMResources(ctx context.Context) ([]adapter.Resource
 		if !strings.Contains(ps, "running") && !strings.Contains(ps, "stopped") {
 			continue
 		}
+		if !a.includeCrossRG(vm.ResourceGroup, vm.Tags) {
+			continue
+		}
 		res = append(res, adapter.ResourceInfo{
 			ResourceID:   vm.Name,
 			Provider:     string(ProviderAzure),
 			Kind:         adapter.ResourceInstance,
-			Region:       a.location,
+			Region:       a.azureRegionOr(vm.Location),
+			Scope:        vm.ResourceGroup,
 			InstanceType: vm.HardwareProfile.VMSize,
 			RunID:        vm.Tags["dispatcher-run-id"],
 			Tags:         vm.Tags,
@@ -279,14 +310,16 @@ func (a *AzureProvider) listVMResources(ctx context.Context) ([]adapter.Resource
 }
 
 func (a *AzureProvider) listDiskResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "az", "disk", "list", "--resource-group", a.resourceGroup, "--output", "json")
+	out, err := runCLI(ctx, "az", "disk", "list", "--output", "json")
 	if err != nil {
 		return nil, err
 	}
 	var disks []struct {
-		Name       string `json:"name"`
-		DiskSizeGb int    `json:"diskSizeGb"`
-		Sku        struct {
+		Name          string `json:"name"`
+		ResourceGroup string `json:"resourceGroup"`
+		Location      string `json:"location"`
+		DiskSizeGb    int    `json:"diskSizeGb"`
+		Sku           struct {
 			Name string `json:"name"`
 		} `json:"sku"`
 		Tags map[string]string `json:"tags"`
@@ -296,6 +329,9 @@ func (a *AzureProvider) listDiskResources(ctx context.Context) ([]adapter.Resour
 	}
 	var res []adapter.ResourceInfo
 	for _, d := range disks {
+		if !a.includeCrossRG(d.ResourceGroup, d.Tags) {
+			continue
+		}
 		rate, ok := azureDiskRatePerGBMonth[d.Sku.Name]
 		if !ok {
 			rate = azureDiskRateDefault
@@ -304,7 +340,8 @@ func (a *AzureProvider) listDiskResources(ctx context.Context) ([]adapter.Resour
 			ResourceID: d.Name,
 			Provider:   string(ProviderAzure),
 			Kind:       adapter.ResourceDisk,
-			Region:     a.location,
+			Region:     a.azureRegionOr(d.Location),
+			Scope:      d.ResourceGroup,
 			RunID:      d.Tags["dispatcher-run-id"],
 			Tags:       d.Tags,
 			MonthlyUSD: float64(d.DiskSizeGb) * rate,
@@ -314,24 +351,30 @@ func (a *AzureProvider) listDiskResources(ctx context.Context) ([]adapter.Resour
 }
 
 func (a *AzureProvider) listPublicIPResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "az", "network", "public-ip", "list", "--resource-group", a.resourceGroup, "--output", "json")
+	out, err := runCLI(ctx, "az", "network", "public-ip", "list", "--output", "json")
 	if err != nil {
 		return nil, err
 	}
 	var ips []struct {
-		Name string            `json:"name"`
-		Tags map[string]string `json:"tags"`
+		Name          string            `json:"name"`
+		ResourceGroup string            `json:"resourceGroup"`
+		Location      string            `json:"location"`
+		Tags          map[string]string `json:"tags"`
 	}
 	if err := json.Unmarshal(out, &ips); err != nil {
 		return nil, fmt.Errorf("parse az public ips: %w", err)
 	}
 	var res []adapter.ResourceInfo
 	for _, ip := range ips {
+		if !a.includeCrossRG(ip.ResourceGroup, ip.Tags) {
+			continue
+		}
 		res = append(res, adapter.ResourceInfo{
 			ResourceID: ip.Name,
 			Provider:   string(ProviderAzure),
 			Kind:       adapter.ResourceAddress,
-			Region:     a.location,
+			Region:     a.azureRegionOr(ip.Location),
+			Scope:      ip.ResourceGroup,
 			RunID:      ip.Tags["dispatcher-run-id"],
 			Tags:       ip.Tags,
 			MonthlyUSD: azurePublicIPMonthly,
@@ -341,25 +384,31 @@ func (a *AzureProvider) listPublicIPResources(ctx context.Context) ([]adapter.Re
 }
 
 func (a *AzureProvider) listSnapshotResources(ctx context.Context) ([]adapter.ResourceInfo, error) {
-	out, err := runCLI(ctx, "az", "snapshot", "list", "--resource-group", a.resourceGroup, "--output", "json")
+	out, err := runCLI(ctx, "az", "snapshot", "list", "--output", "json")
 	if err != nil {
 		return nil, err
 	}
 	var snaps []struct {
-		Name       string            `json:"name"`
-		DiskSizeGb int               `json:"diskSizeGb"`
-		Tags       map[string]string `json:"tags"`
+		Name          string            `json:"name"`
+		ResourceGroup string            `json:"resourceGroup"`
+		Location      string            `json:"location"`
+		DiskSizeGb    int               `json:"diskSizeGb"`
+		Tags          map[string]string `json:"tags"`
 	}
 	if err := json.Unmarshal(out, &snaps); err != nil {
 		return nil, fmt.Errorf("parse az snapshots: %w", err)
 	}
 	var res []adapter.ResourceInfo
 	for _, s := range snaps {
+		if !a.includeCrossRG(s.ResourceGroup, s.Tags) {
+			continue
+		}
 		res = append(res, adapter.ResourceInfo{
 			ResourceID: s.Name,
 			Provider:   string(ProviderAzure),
 			Kind:       adapter.ResourceSnapshot,
-			Region:     a.location,
+			Region:     a.azureRegionOr(s.Location),
+			Scope:      s.ResourceGroup,
 			RunID:      s.Tags["dispatcher-run-id"],
 			Tags:       s.Tags,
 			MonthlyUSD: float64(s.DiskSizeGb) * azureSnapshotRatePerGBMonth,

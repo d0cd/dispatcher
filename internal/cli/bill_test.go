@@ -97,21 +97,44 @@ func TestParseAWSCost_MixedCurrencyAndDroppedRow(t *testing.T) {
 	assert.Contains(t, note, "currencies")
 }
 
+// parseAzureCost consumes a Microsoft.CostManagement/query response (columns +
+// rows), not the deprecated `az consumption usage list` shape (which returns
+// pretaxCost:"None" for many subscriptions and silently zeroed the total).
 func TestParseAzureCost(t *testing.T) {
-	raw := []byte(`[
-		{"pretaxCost":"5.00","currency":"USD","consumedService":"Microsoft.Compute","tags":{"dispatcher":"true"}},
-		{"pretaxCost":"2.00","currency":"USD","consumedService":"Microsoft.Storage","tags":{}}]`)
+	raw := []byte(`{"properties":{
+		"columns":[{"name":"PreTaxCost"},{"name":"ServiceName"},{"name":"Currency"}],
+		"rows":[[0.2749,"Virtual Machines","USD"],[0.0680,"Virtual Network","USD"],[0.0256,"Storage","USD"]]
+	}}`)
 
-	// tagged only
-	amt, _, _, _, err := parseAzureCost(raw, false, false)
+	total, cur, svcs, note, err := parseAzureCost(raw, true)
 	require.NoError(t, err)
-	assert.InDelta(t, 5.00, amt, 0.001, "tagged mode counts only dispatcher=true rows")
+	assert.InDelta(t, 0.3685, total, 0.0001, "sums PreTaxCost across all rows")
+	assert.Equal(t, "USD", cur)
+	assert.Empty(t, note, "well-formed rows drop nothing")
+	require.Len(t, svcs, 3)
+	assert.Equal(t, "Virtual Machines", svcs[0].Name, "sorted by amount desc")
 
-	// all, by service
-	amtAll, _, svcs, _, err := parseAzureCost(raw, true, true)
+	// Without by-service, the total is still correct but no breakdown is produced.
+	total2, _, svcs2, _, err := parseAzureCost(raw, false)
 	require.NoError(t, err)
-	assert.InDelta(t, 7.00, amtAll, 0.001, "--all counts every row")
-	require.Len(t, svcs, 2)
+	assert.InDelta(t, 0.3685, total2, 0.0001)
+	assert.Empty(t, svcs2)
+}
+
+// buildAzureCostQuery filters to dispatcher-tagged resources by default and drops
+// the filter under --all; ServiceName grouping only when a breakdown is asked for.
+func TestBuildAzureCostQuery(t *testing.T) {
+	start := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+
+	tagged := buildAzureCostQuery(start, end, false, false)
+	assert.Contains(t, tagged, "\"dispatcher\"", "default query filters to dispatcher-tagged spend")
+	assert.NotContains(t, tagged, "ServiceName", "no grouping without --by-service")
+
+	allSvc := buildAzureCostQuery(start, end, true, true)
+	assert.NotContains(t, allSvc, "dispatcher", "--all drops the tag filter")
+	assert.Contains(t, allSvc, "ServiceName", "--by-service groups by ServiceName")
+	assert.Contains(t, allSvc, "2026-07-01", "carries the start of the window")
 }
 
 type billRow struct {
@@ -147,8 +170,10 @@ func TestBill_JSON_AuthFailAndAmount(t *testing.T) {
 		switch {
 		case name == "aws" && strings.Contains(joined, "sts"):
 			return nil, assert.AnError // aws auth probe fails -> unavailable
-		case name == "az" && strings.Contains(joined, "consumption"):
-			return []byte(`[{"pretaxCost":"2.50","currency":"USD","consumedService":"Microsoft.Compute","tags":{"dispatcher":"true"}}]`), nil
+		case name == "az" && strings.Contains(joined, "account show"):
+			return []byte("sub-123"), nil
+		case name == "az" && strings.Contains(joined, "CostManagement"):
+			return []byte(`{"properties":{"columns":[{"name":"PreTaxCost"},{"name":"Currency"}],"rows":[[2.50,"USD"]]}}`), nil
 		}
 		return []byte("{}"), nil
 	}

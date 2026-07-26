@@ -23,7 +23,7 @@ func TestResolveUbuntuAMI_ArgvAndParse(t *testing.T) {
 	calls := captureRunCLIWith(t, func(string, ...string) ([]byte, error) {
 		return []byte("ami-0abc123def\n"), nil
 	})
-	ami, err := resolveUbuntuAMI(context.Background(), "ap-south-1")
+	ami, err := resolveUbuntuAMI(context.Background(), "ap-south-1", "x86_64")
 	require.NoError(t, err)
 	assert.Equal(t, "ami-0abc123def", ami, "the resolved AMI is trimmed")
 	assert.True(t, containsCall(*calls, "aws", "ssm", "get-parameter",
@@ -36,7 +36,7 @@ func TestResolveUbuntuAMI_RejectsGarbage(t *testing.T) {
 	captureRunCLIWith(t, func(string, ...string) ([]byte, error) {
 		return []byte("None\n"), nil // SSM prints "None" when a parameter is missing
 	})
-	_, err := resolveUbuntuAMI(context.Background(), "us-east-1")
+	_, err := resolveUbuntuAMI(context.Background(), "us-east-1", "x86_64")
 	require.Error(t, err, "a non-ami value must not be passed to run-instances")
 }
 

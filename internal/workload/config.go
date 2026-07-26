@@ -14,6 +14,10 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// maxShardCount bounds a fixed fan-out so a huge shard.count can't OOM-allocate
+// the assignment slice before any run starts. Far above any real fan-out.
+const maxShardCount = 10000
+
 // envRefPattern matches ${VAR} and ${VAR:-default}. Only the braced form is
 // expanded — a bare $VAR (e.g. inside a shell command meant to expand on the
 // remote host) is left untouched.
@@ -78,9 +82,13 @@ type DispatcherConfig struct {
 	// Confidential requests a TEE-backed (memory-encrypted) VM. Presence means
 	// "required"; the block selects the TEE type and attestation policy.
 	Confidential *DispatchConfidentialConfig `yaml:"confidential,omitempty"`
-	MaxCost      float64                     `yaml:"maxCost,omitempty"`
-	MaxTime      string                      `yaml:"maxTime,omitempty"`
-	Target       string                      `yaml:"target,omitempty"`
+	// Spot requests an interruptible spot/preemptible instance (much cheaper, can
+	// be reclaimed anytime). Only for interruption-tolerant work; the --spot flag
+	// also sets it.
+	Spot    bool    `yaml:"spot,omitempty"`
+	MaxCost float64 `yaml:"maxCost,omitempty"`
+	MaxTime string  `yaml:"maxTime,omitempty"`
+	Target  string  `yaml:"target,omitempty"`
 	// Region pins the cloud region/zone (overridden by the --region flag).
 	Region string `yaml:"region,omitempty"`
 	// Outputs lists workload-relative paths that should be retrieved before
@@ -102,6 +110,13 @@ type DispatcherConfig struct {
 	// shards' outputs are collected and how a shard failure is handled.
 	Shard     *DispatchShardConfig     `yaml:"shard,omitempty"`
 	Aggregate *DispatchAggregateConfig `yaml:"aggregate,omitempty"`
+	// Secrets is NOT honored from a per-project dispatcher.yaml: a secret command
+	// runs against the operator's unlocked secret manager, so an untrusted repo must
+	// not be able to define one. Configure credential commands in the user-global
+	// ~/.config/dispatcher/config.yaml instead (OperatorConfig.Secrets). This field
+	// exists only so a stray project-level block is warned about, not silently
+	// ignored.
+	Secrets map[string][]string `yaml:"secrets,omitempty"`
 }
 
 // DispatchShardConfig describes fan-out in dispatcher.yaml.
@@ -150,7 +165,13 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		path := filepath.Join(dir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			// A config that exists but can't be read (permissions, a directory, a
+			// broken symlink) must NOT be treated as "no config" — that would
+			// silently void cost caps and the confidential requirement. Fail loudly.
+			return nil, fmt.Errorf("read %s: %w", path, err)
 		}
 		data, err = expandEnvRefs(data)
 		if err != nil {
@@ -160,7 +181,7 @@ func LoadConfig(dir string) (*DispatcherConfig, error) {
 		dec.KnownFields(true)
 		var cfg DispatcherConfig
 		if err := dec.Decode(&cfg); err != nil {
-			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, cpu, memory, arch, gpu, service, sandbox, confidential, shard, aggregate, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
+			return nil, fmt.Errorf("parse %s: %w (did you mistype a field name? known fields are name, image, command, cpu, memory, arch, gpu, service, sandbox, confidential, spot, shard, aggregate, maxCost, maxTime, target, region, outputs, watchdogTtl, retryTransientFailures)", path, err)
 		}
 		if err := cfg.Validate(); err != nil {
 			return nil, fmt.Errorf("validate %s: %w", path, err)
@@ -260,6 +281,12 @@ func (c *DispatcherConfig) Validate() error {
 	if c.Shard != nil {
 		if c.Shard.Count < 0 {
 			return fmt.Errorf("shard.count must be non-negative (got %d)", c.Shard.Count)
+		}
+		// Bound the fan-out: shard.Plan allocates a slice of this size, so an
+		// absurd value (e.g. math.MaxInt) would OOM before any run starts. No real
+		// fan-out needs thousands of full runs.
+		if c.Shard.Count > maxShardCount {
+			return fmt.Errorf("shard.count %d exceeds the maximum of %d", c.Shard.Count, maxShardCount)
 		}
 		if c.Shard.MaxParallel < 0 {
 			return fmt.Errorf("shard.maxParallel must be non-negative (got %d)", c.Shard.MaxParallel)

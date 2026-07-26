@@ -124,16 +124,22 @@ func executeConfidentialSpace(ctx context.Context, d csDeps, p *types.Plan) (*co
 	if err != nil {
 		return nil, fmt.Errorf("build confidential image: %w", err)
 	}
+	// Enforce the workload's measurement allowlist (if any) against the digest we
+	// will attest, before provisioning — a documented control, not a no-op.
+	if err := enforceWorkloadMeasurements(w.Requirements.Confidential, imageDigest); err != nil {
+		return nil, err
+	}
 
 	region := p.Constraints.Region
 	opts := VMOptions{
 		Name:                   fmt.Sprintf("dispatcher-cs-%s", adapter.SanitizeName(w.Name)),
 		Region:                 region,
-		ConfidentialType:       "sev-snp",
+		ConfidentialType:       w.Requirements.Confidential.Type,
 		ConfidentialSpaceImage: imageRef,
-		// A bounded run caps the instance lifetime at the source too, so a CLI
-		// crash that skips the deferred teardown can't leak a billing SEV VM.
-		MaxLifetimeSeconds: int(p.Constraints.MaxDuration.Seconds()),
+		// Always cap the instance lifetime so a CLI crash that skips the deferred
+		// teardown can't leak a billing SEV VM. Use the run's MaxDuration when set,
+		// else the watchdog TTL / a default — never 0 (uncapped).
+		MaxLifetimeSeconds: int(confidentialLifetime(p.Constraints).Seconds()),
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",
@@ -286,16 +292,41 @@ func (a *ConfidentialSpaceAdapter) Execute(ctx context.Context, p *types.Plan) (
 
 func (a *ConfidentialSpaceAdapter) Cleanup(ctx context.Context, h *adapter.RunHandle) (*adapter.CleanupResult, error) {
 	state := h.State.(*confidentialRunState)
-	if err := a.deps.provider.DestroyVM(ctx, state.VMID); err != nil {
-		return &adapter.CleanupResult{Success: false, Errors: []string{err.Error()}}, nil
+	var cleaned, errs []string
+
+	vmErr := a.deps.provider.DestroyVM(ctx, state.VMID)
+	if vmErr != nil {
+		errs = append(errs, vmErr.Error())
+	} else {
+		cleaned = append(cleaned, state.VMID)
 	}
-	cleaned := []string{state.VMID}
-	// Best-effort: reap the per-run agent-port firewall so it doesn't linger.
+
+	// Reap the per-run agent-port firewall regardless of the VM outcome: it's an
+	// independent resource, and gating it behind DestroyVM leaks it whenever
+	// DestroyVM hits a transient error (e.g. the VM mid-self-terminate on a
+	// confidential run). Surface a reap failure rather than swallow it — gc reaps
+	// it by run-id as a backstop, but a silent success hides the leak.
 	if fw, ok := a.deps.provider.(agentFirewaller); ok {
 		name := agentFirewallName(state.VMID)
-		if err := fw.deleteAgentFirewall(ctx, name); err == nil {
+		if err := fw.deleteAgentFirewall(ctx, name); err != nil {
+			errs = append(errs, "agent firewall (gc will reap): "+err.Error())
+		} else {
 			cleaned = append(cleaned, name)
 		}
 	}
-	return &adapter.CleanupResult{Success: true, ResourcesCleaned: cleaned}, nil
+
+	return &adapter.CleanupResult{Success: vmErr == nil, ResourcesCleaned: cleaned, Errors: errs}, nil
+}
+
+// confidentialLifetime is the hard instance-lifetime cap for a confidential run:
+// the explicit MaxDuration when set, else the watchdog TTL, else the default —
+// never 0, which would leave a billing SEV VM uncapped.
+func confidentialLifetime(c types.PlanConstraints) time.Duration {
+	if c.MaxDuration > 0 {
+		return c.MaxDuration
+	}
+	if c.WatchdogTTL > 0 {
+		return c.WatchdogTTL
+	}
+	return DefaultWatchdogTTL
 }

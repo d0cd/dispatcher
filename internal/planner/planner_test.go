@@ -86,6 +86,30 @@ func TestToolRegistry_EvaluateAllTargets(t *testing.T) {
 	assert.NotNil(t, localEval.Cost)
 }
 
+// SetSpot(true) must make the AI-plan evaluate path price interruptible instances
+// and surface the spot-interruption risk, mirroring the deterministic --spot path.
+func TestToolRegistry_EvaluateAllTargets_Spot(t *testing.T) {
+	tools, dir := setupTestEnv(t)
+	inspect := tools.Execute(ToolCall{Name: "inspect_workload", Input: mustJSON(map[string]string{"path": dir})}, nil)
+	spec := inspect.Result.(types.WorkloadSpec)
+
+	hasSpotRisk := func() bool {
+		res := tools.Execute(ToolCall{Name: "evaluate_all_targets", Input: json.RawMessage("{}")}, &spec)
+		for _, e := range res.Result.([]TargetEvaluation) {
+			for _, rk := range e.Risks {
+				if rk.Category == "spot-interruption" {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	assert.False(t, hasSpotRisk(), "no spot risk without SetSpot")
+	tools.SetSpot(true)
+	assert.True(t, hasSpotRisk(), "SetSpot(true) surfaces the spot-interruption risk")
+}
+
 func TestToolRegistry_EvaluateAllTargets_FlakyHistory(t *testing.T) {
 	tools, dir := setupTestEnv(t)
 

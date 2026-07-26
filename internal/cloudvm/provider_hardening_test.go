@@ -172,14 +172,13 @@ func TestHetznerFirewallArgs(t *testing.T) {
 // or a no-op rule that implies SSH is locked down. GCP is included because an
 // additive ALLOW rule cannot restrict the default network's default-allow-ssh.
 func TestFirewallUnsupportedProviders(t *testing.T) {
-	// AWS is intentionally absent: it now provisions a per-run security group
-	// for SSH ingress instead of rejecting --allow-ssh-from.
+	// AWS/GCP/Azure are intentionally absent: they now provision a per-run firewall
+	// (SG / deny+allow rules / scoped NSG rule) for SSH ingress instead of rejecting
+	// --allow-ssh-from.
 	cases := []struct {
 		name     string
 		provider Provider
 	}{
-		{"azure", NewAzureProvider("rg", "eastus")},
-		{"gcp", NewGCPProvider("proj", "us-central1-a")},
 		{"lima", NewLimaProvider()},
 	}
 	for _, c := range cases {
@@ -234,19 +233,23 @@ func TestBuildJobManifestSafeImage(t *testing.T) {
 	assert.Contains(t, m, "image: ghcr.io/org/img@sha256:abc")
 }
 
-// TestCatalogKeepsSpeclessInstances covers C2: an instance with unknown specs
-// (VCPUs/MemoryGB == 0, as live Azure rows arrive) must not be filtered out by
-// the vCPU/memory minimums.
-func TestCatalogKeepsSpeclessInstances(t *testing.T) {
-	cat := &Catalog{instances: []InstanceType{{
+// TestCatalogEnrichesSpeclessInstances covers a live Azure row that arrives
+// spec-less (VCPUs/MemoryGB == 0): enrichSpecsFromStatic backfills its specs from
+// the built-in table by SKU name (at the live price) so it matches a sized request
+// legitimately, rather than being accepted blindly (which would let an
+// under-sized SKU pass) or discarded (falling back to the stale rate card).
+func TestCatalogEnrichesSpeclessInstances(t *testing.T) {
+	live := []InstanceType{{
 		Name:         "Standard_B2s",
 		Provider:     ProviderAzure,
-		PricePerHour: 0.096,
+		PricePerHour: 0.096, // live price, no specs
 		Arch:         "x86_64",
-	}}}
+	}}
+	cat := &Catalog{instances: enrichSpecsFromStatic(live)}
 	matches := cat.FindCheapestForProvider(ProviderAzure, InstanceRequirements{MinVCPUs: 2, MinMemoryGB: 4})
 	require.Len(t, matches, 1)
 	assert.Equal(t, "Standard_B2s", matches[0].Name)
+	assert.Equal(t, 0.096, matches[0].PricePerHour, "live price preserved through enrichment")
 }
 
 // TestCatalogStillFiltersKnownSpecs ensures the C2 guard does not disable

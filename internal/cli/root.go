@@ -11,6 +11,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
+	"github.com/d0cd/dispatcher/internal/secrets"
+	"github.com/d0cd/dispatcher/internal/workload"
 )
 
 // Version is the dispatcher release tag. Overridden at build time via -ldflags
@@ -107,6 +109,14 @@ var rootCmd = &cobra.Command{
 		if jsonOutput() && cmd.Annotations[supportsJSON] != "true" {
 			return fmt.Errorf("--json is not supported by %q (supported: plan, audit, status, cost, list, bill, history, recover, gc)", cmd.CommandPath())
 		}
+		// Register user-global secret-resolution commands so any command that builds
+		// a provider (plan/run/gc/status) can resolve credentials; a per-project
+		// dispatcher.yaml layers on top. A malformed global config fails closed.
+		opCfg, err := workload.LoadOperatorConfig()
+		if err != nil {
+			return err
+		}
+		secrets.SetGlobal(opCfg.Secrets)
 		// Reap orphaned plaintext-secret tempfiles left by a crashed run.
 		_ = adapter.SweepStaleEnvFiles()
 		return nil

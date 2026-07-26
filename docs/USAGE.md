@@ -44,14 +44,14 @@ dispatcher stop <run-id>       # Stop and clean up
 | `plan <path>` | Generate execution plan with cost / risk analysis. Flags: `--ai` (LLM-driven planner), `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--gpu <spec>`. |
 | `validate [path]` | Validate `dispatcher.yaml` (schema + semantic checks) without planning or running. |
 | `audit <path>` | Pre-run risk audit: cost surprises, missing secrets, missing Dockerfile, no-feasible-target. |
-| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--region <region>` (cloud region/zone; overrides `region:`), `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; hetzner-vm and aws-vm — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
+| `run <path>` | Plan and execute. Flags: `--target`, `--optimize cost\|speed`, `--max-cost <usd>`, `--timeout <dur>`, `--gpu <spec>`, `--region <region>` (cloud region/zone; overrides `region:`), `--watchdog-ttl <dur>`, `--retry-transient`, `--allow-ssh-from <cidr>` (per-run SSH firewall; hetzner-vm, aws-vm, gcp-vm, azure-vm — see [SECURITY.md](SECURITY.md)), `--yes`. See *Exit codes* below. |
 | `explain <plan-id>` | Verbose recommendation for a saved plan. |
 
 ### Observability
 
 | Command | Purpose |
 |---|---|
-| `status <run-id>` | Run state (reconnects to live VMs; persists discovered terminal states). Reconnecting to a still-running cloud run also extends its watchdog (see `renew`). |
+| `status <run-id>` | Run state (reconnects to live VMs; persists discovered terminal states). Reconnecting to a still-running cloud run also extends its watchdog (see `renew`). Also warns when non-terminal runs' combined cost crosses `DISPATCHER_WARN_OVER` (default `$25`), so a forgotten still-billing run is caught during the check you run most. |
 | `logs <run-id>` | Stream logs (reconnects to live VMs). |
 | `trace <run-id>` | Emit a Chrome/Perfetto timeline of the run's phases (provision, run, collect, teardown) as JSON — pipe to a file and open in `chrome://tracing` or `ui.perfetto.dev` to see where wall-clock time went. |
 | `cost <run-id>` | Realized cost, broken down. |
@@ -66,7 +66,7 @@ dispatcher stop <run-id>       # Stop and clean up
 |---|---|
 | `stop <run-id> [--force]` | Terminate and clean up a running workload. `--force` finalizes a stranded run whose record can no longer be reconnected (no handle state, provider unreachable), marking it terminal without cleanup — reclaim any leftover resources with `gc`. |
 | `renew <run-id>` | Extend a running cloud run's self-destruct watchdog by its configured TTL. Run periodically (cron / systemd timer) to keep an unattended long-running workload alive past its watchdog TTL. |
-| `gc [--dry-run] [--yes] [--warn-over <usd>] [--allow-empty-store]` | Find and destroy orphaned cloud resources, and summarize ongoing cost. Classifies every listed resource three ways: **orphan** (dispatcher-owned, its run is gone) is reaped; **standing** (dispatcher-owned, tied to no run — e.g. a driver-baked image) is listed and kept; **external** (not dispatcher-owned) is listed only and never touched. Reaping only ever acts on resources tagged `dispatcher=true`. The cost audit covers idle-billable resources per provider — GCP (instances, disks, images, snapshots, static IPs), AWS (instances, EBS volumes, snapshots, Elastic IPs, per-run security groups — swept across **all enabled regions**), Azure (VMs, disks, public IPs, snapshots in the resource group), Hetzner (servers, volumes, primary/floating IPs, snapshots, per-run firewalls) — each with an estimated `~$/mo`; a running instance whose type isn't in the catalog shows `cost unknown` rather than $0. **Scope:** AWS sweeps all enabled regions, but **Azure covers only the `dispatcher-rg` resource group** and **GCP only the `gcloud` default project** — dispatcher-tagged resources outside those aren't seen, so keep dispatcher pointed at one project/RG. `--warn-over` (default `$10`/mo, `0` disables) warns loudly when total ongoing cost crosses the threshold. As a safety guard, gc **refuses to destroy** when the run store has zero records but owned resources reference run IDs (a mispointed state dir would otherwise misclassify the whole live fleet as orphans); `--allow-empty-store` overrides this for a genuinely-empty store. Prompts before destroying; `--dry-run` previews, `--yes`/`-y` skips the prompt. |
+| `gc [--dry-run] [--yes] [--warn-over <usd>] [--allow-empty-store]` | Find and destroy orphaned cloud resources, and summarize ongoing cost. Classifies every listed resource three ways: **orphan** (dispatcher-owned, its run is gone) is reaped; **standing** (dispatcher-owned, tied to no run — e.g. a driver-baked image) is listed and kept; **external** (not dispatcher-owned) is listed only and never touched. Reaping only ever acts on resources tagged `dispatcher=true`. The cost audit covers idle-billable resources per provider — GCP (instances, disks, images, snapshots, static IPs), AWS (instances, EBS volumes, snapshots, Elastic IPs, per-run security groups — swept across **all enabled regions**), Azure (VMs, disks, public IPs, snapshots), Hetzner (servers, volumes, primary/floating IPs, snapshots, per-run firewalls) — each with an estimated `~$/mo` (instances are repriced from the live catalog so the estimate tracks live rates — most impactful for the GPU long tail); a running instance whose type isn't in the catalog shows `cost unknown` rather than $0. **Scope:** AWS sweeps all enabled regions, Azure scans the whole active subscription (dispatcher-owned resources in **any** resource group; external ones stay scoped to `dispatcher-rg`), and GCP scans **every project the credential can list** (best-effort — a project it can't list is logged and skipped; owned-only). Each resource is destroyed in the RG/project it lives in. The residual blind spots are other Azure subscriptions and unlistable GCP projects. `--warn-over` (default `$10`/mo, `0` disables) warns loudly when total ongoing cost crosses the threshold. As a safety guard, gc **refuses to destroy** when the run store has zero records but owned resources reference run IDs (a mispointed state dir would otherwise misclassify the whole live fleet as orphans); `--allow-empty-store` overrides this for a genuinely-empty store. Prompts before destroying; `--dry-run` previews, `--yes`/`-y` skips the prompt. |
 | `recover [--attach]` | Inventory cloud VMs whose local run record is missing. `--attach` runs `status` against each recoverable run to refresh and persist live state. |
 
 ### Policy
@@ -113,6 +113,39 @@ Manage the measured-image pins that back attested confidential runs (see
 | `gcp-vm` | builtin | `gcloud` |
 | `azure-vm` | builtin | `az` |
 | `hetzner-vm` | builtin | `hcloud` |
+| `oci-vm` | builtin | `oci` CLI |
+| `lambda-vm` | builtin | `DISPATCHER_LAMBDA_API_KEY` (Lambda Cloud REST API; GPU) |
+
+`lambda-vm` is dispatcher's first REST-based provider — it talks to the Lambda
+Cloud API directly, so it needs `DISPATCHER_LAMBDA_API_KEY` (and optionally
+`DISPATCHER_LAMBDA_REGION`, default `us-east-1`) rather than a vendor CLI. Set
+the instance type via the plan (e.g. `gpu_1x_a100`); Lambda has no safe default.
+Provisioning only — no confidential execution, no per-run SSH firewall, and no
+in-VM watchdog (a dead dispatcher is reclaimed by `dispatcher gc`).
+
+### Secrets from a command
+
+Rather than exporting a credential in plaintext, dispatcher can resolve any
+`DISPATCHER_*` secret from a command whose stdout is the value. It's generic —
+supply whatever command reads your secret (a secret manager, `pass`, a script):
+
+```yaml
+secrets:
+  DISPATCHER_LAMBDA_API_KEY: ["pass", "show", "lambda/api-key"]
+```
+
+Secret **commands are only honored from the user-global** config at
+`~/.config/dispatcher/config.yaml` (honors `$XDG_CONFIG_HOME`), set once per
+machine. A secret command runs against your (unlocked) secret manager, so a
+per-project `dispatcher.yaml` is **not** allowed to define one — running an
+untrusted repo must not be able to read your credentials; a project-level
+`secrets:` block is ignored with a warning. An explicit environment variable
+still overrides the resolved value. The command runs lazily — only when that
+provider actually provisions or tears down a VM, not when pricing it as an
+alternative during `plan`/`run` — so an unrelated run never touches your secret
+manager. Its trimmed output is cached, and a command that fails leaves the
+variable unset so the provider fails closed. (Live pricing for such a provider
+still works if the credential is already exported in the environment.)
 
 User-defined targets (any SSH host, custom cloud) are added with `dispatcher targets add`.
 
@@ -218,7 +251,7 @@ aggregate:
 
 **GPU workloads:** dispatcher provisions the catalog instance that matches the GPU requirement. If no catalog instance matches (an unknown `gpu.model`, or a provider with no GPU inventory), `plan` flags a `gpu-unschedulable` risk and `run` refuses rather than silently launching a CPU-only box.
 
-**Confidential computing:** `confidential:` requests a TEE-backed VM (hardware-encrypted memory) of the given `type`, so the cloud host can't read the workload's memory. `type` is the TEE technology — GCP (`sev`, via Confidential Space; sev-snp/tdx are rejected, not downgraded), AWS (`sev-snp`), Azure (`sev-snp`/`tdx`); a job whose `type` no target offers is rejected (it never silently lands on a non-confidential VM, nor on a weaker TEE than requested). `profile` (optional, orthogonal to `type`) selects a *measured* attestation backend: `azure-snp` (Azure direct SNP+vTPM, agent measured into PCR11) or `nitro` (AWS Nitro Enclaves, PCR0). `attestation` defaults to `required`, and the verified path runs over an **attested TLS session**: dispatcher dials the in-TEE measured agent, and the agent's report/token binds a per-run nonce + the TLS session's `bindData` (`REPORT_DATA = H(nonce‖bindData)`, where `bindData = H(agent-cert-SPKI ‖ RFC 5705 exporter)`), which dispatcher verifies before delivering the workload over that same session — GCP Confidential Space (agent-image digest + JWS), Azure measured direct SNP+vTPM (`profile: azure-snp`, PCR11), AWS Nitro Enclaves (`profile: nitro`, PCR0). Set `attestation: off` to provision the encrypted-memory VM without verification (recorded as an unverified run). `measurements` is an exact allowlist enforced by the verifier (an empty allowlist fails closed under `required`); `minTCB` rejects reports below a firmware version (enforced on the SNP report path — `profile: azure-snp`; GCP Confidential Space carries no reported TCB and so **fails closed** when `minTCB` is set, and Nitro is n/a). **Operator setup:** supply a pinned measured image via the `DISPATCHER_*` env vars or `dispatcher confidential pin`; an unconfigured measured backend fails closed before provisioning. All three attested backends are measured — the agent is in the launch measurement (CS container digest, Nitro PCR0, Azure PCR11). See [docs/confidential-computing.md](confidential-computing.md) and [SECURITY.md](SECURITY.md).
+**Confidential computing:** `confidential:` requests a TEE-backed VM (hardware-encrypted memory) of the given `type`, so the cloud host can't read the workload's memory. `type` is the TEE technology — GCP (`sev`, via Confidential Space; sev-snp/tdx are rejected early — Google Cloud Attestation supports SEV only for CS), AWS (`sev-snp`), Azure (`sev-snp`/`tdx`); a job whose `type` no target offers is rejected (it never silently lands on a non-confidential VM, nor on a weaker TEE than requested). `profile` (optional, orthogonal to `type`) selects a *measured* attestation backend: `azure-snp` (Azure direct SNP+vTPM, agent measured into PCR11) or `nitro` (AWS Nitro Enclaves, PCR0). `attestation` defaults to `required`, and the verified path runs over an **attested TLS session**: dispatcher dials the in-TEE measured agent, and the agent's report/token binds a per-run nonce + the TLS session's `bindData` (`REPORT_DATA = H(nonce‖bindData)`, where `bindData = H(agent-cert-SPKI ‖ RFC 5705 exporter)`), which dispatcher verifies before delivering the workload over that same session — GCP Confidential Space (agent-image digest + JWS), Azure measured direct SNP+vTPM (`profile: azure-snp`, PCR11), AWS Nitro Enclaves (`profile: nitro`, PCR0). Set `attestation: off` to provision the encrypted-memory VM without verification (recorded as an unverified run). `measurements` is an exact allowlist enforced by the verifier (an empty allowlist fails closed under `required`); `minTCB` rejects reports below a firmware version (enforced on the SNP report path — `profile: azure-snp`; GCP Confidential Space carries no reported TCB and so **fails closed** when `minTCB` is set, and Nitro is n/a). **Operator setup:** supply a pinned measured image via the `DISPATCHER_*` env vars or `dispatcher confidential pin`; an unconfigured measured backend fails closed before provisioning. The in-TEE agent's port is firewalled to dispatcher's auto-detected public IP (a `/32`); behind CGNAT, a NAT pool, or an egress proxy that `/32` won't match your real connection source and the agent will be unreachable — set `DISPATCHER_AGENT_ALLOW_CIDR` to your actual egress range to scope it correctly. All three attested backends are measured — the agent is in the launch measurement (CS container digest, Nitro PCR0, Azure PCR11). See [docs/confidential-computing.md](confidential-computing.md) and [SECURITY.md](SECURITY.md).
 
 **GPU images (operator):** GPU instances need the NVIDIA driver preinstalled, which stock cloud images lack. Point dispatcher at an operator-built driver-baked image via `DISPATCHER_GCP_GPU_IMAGE` (a GCP image name in the current project) or `DISPATCHER_AWS_GPU_IMAGE` (an AMI id); GPU instance families then boot from it instead of stock Ubuntu. Build one once (install `nvidia-driver-*-server`, reboot, then `gcloud compute images create` / `aws ec2 create-image`). Without it, a GPU run comes up driverless.
 

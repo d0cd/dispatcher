@@ -2,6 +2,7 @@ package cloudvm
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -201,4 +202,72 @@ func TestGCPProvider_DestroyResource_Argv(t *testing.T) {
 			assert.Equal(t, tc.want, got.args)
 		})
 	}
+}
+
+// gc must scan every accessible project so a dispatcher-owned resource leaked
+// into another project is found. External (non-dispatcher) resources are only
+// surfaced from the configured project so unrelated projects don't flood gc.
+func TestGCPListResources_CrossProject(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		switch {
+		case strings.Contains(joined, "projects list"):
+			return []byte(`[{"projectId":"proj-A"},{"projectId":"proj-other"}]`), nil
+		case strings.Contains(joined, "instances list") && strings.Contains(joined, "proj-A"):
+			return []byte(`[
+			  {"name":"vm-a","status":"RUNNING","zone":"z/us-central1-a","machineType":"m/e2-small","labels":{"dispatcher":"true","dispatcher-run-id":"r1"}},
+			  {"name":"ext-a","status":"RUNNING","zone":"z/us-central1-a","machineType":"m/e2-small","labels":{}}
+			]`), nil
+		case strings.Contains(joined, "instances list") && strings.Contains(joined, "proj-other"):
+			return []byte(`[
+			  {"name":"owned-other","status":"RUNNING","zone":"z/us-west1-a","machineType":"m/e2-small","labels":{"dispatcher":"true","dispatcher-run-id":"r2"}},
+			  {"name":"ext-other","status":"RUNNING","zone":"z/us-west1-a","machineType":"m/e2-small","labels":{}}
+			]`), nil
+		}
+		return []byte("[]"), nil
+	})
+
+	res, err := NewGCPProvider("proj-A", "us-central1-a").ListResources(context.Background())
+	require.NoError(t, err)
+	byName := map[string]adapter.ResourceInfo{}
+	for _, r := range res {
+		byName[r.ResourceID] = r
+	}
+	assert.Equal(t, "proj-A", byName["vm-a"].Scope, "configured-project owned resource carries its project")
+	assert.Contains(t, byName, "ext-a", "external in the configured project stays visible")
+	require.Contains(t, byName, "owned-other", "owned resource in another project is found")
+	assert.Equal(t, "proj-other", byName["owned-other"].Scope)
+	assert.NotContains(t, byName, "ext-other", "external in another project is not enumerated")
+}
+
+// Destroy must target the project the resource lives in, not the configured one.
+func TestGCPDestroyResource_RoutesToProject(t *testing.T) {
+	calls := captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) { return []byte("{}"), nil })
+	res := adapter.ResourceInfo{
+		Kind: adapter.ResourceInstance, ResourceID: "vm-x", Region: "us-west1-a",
+		Provider: string(ProviderGCP), Scope: "proj-other",
+		Tags: map[string]string{"dispatcher": "true"},
+	}
+	require.NoError(t, NewGCPProvider("proj-A", "us-central1-a").DestroyResource(context.Background(), res))
+	assert.True(t, containsCall(*calls, "gcloud", "compute", "instances", "delete", "vm-x", "--zone", "us-west1-a", "--quiet", "--project", "proj-other"),
+		"delete routes to the resource's project")
+}
+
+// If projects can't be listed (no resourcemanager.projects.list), gc falls back
+// to the configured project rather than failing.
+func TestGCPListResources_ProjectListForbiddenFallsBack(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "projects list") {
+			return nil, assert.AnError
+		}
+		if strings.Contains(joined, "instances list") {
+			return []byte(`[{"name":"vm-a","status":"RUNNING","zone":"z/us-central1-a","machineType":"m/e2-small","labels":{"dispatcher":"true"}}]`), nil
+		}
+		return []byte("[]"), nil
+	})
+	res, err := NewGCPProvider("proj-A", "us-central1-a").ListResources(context.Background())
+	require.NoError(t, err, "a forbidden project list must not fail the configured-project scan")
+	require.Len(t, res, 1)
+	assert.Equal(t, "vm-a", res[0].ResourceID)
 }

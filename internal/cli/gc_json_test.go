@@ -187,8 +187,26 @@ func TestGC_ProtectsCorruptRecordVMByRecoveredPlanID(t *testing.T) {
 // Every provisionable cloud-VM target must be discoverable by gc, or an orphaned
 // VM of that provider bills forever and never appears in `dispatcher gc`.
 func TestGCDiscoversAllCloudTargets(t *testing.T) {
-	for _, target := range []string{"hetzner-vm", "aws-vm", "gcp-vm", "azure-vm", "oci-vm"} {
-		_, ok := gcProviderCLIs[target]
-		assert.True(t, ok, "gc must discover %s (it's a provisionable target) or it leaks orphaned VMs invisibly", target)
+	for _, target := range []string{"hetzner-vm", "aws-vm", "gcp-vm", "azure-vm", "oci-vm", "lambda-vm"} {
+		_, viaCLI := gcProviderCLIs[target]
+		_, viaEnv := gcProviderEnv[target]
+		assert.True(t, viaCLI || viaEnv, "gc must discover %s (it's a provisionable target) or it leaks orphaned VMs invisibly", target)
 	}
+}
+
+// gc scans Azure subscription-wide and every accessible GCP project; the note
+// states each cloud's residual boundary (other subscriptions; unlistable projects).
+func TestScopeLimitNote(t *testing.T) {
+	n := scopeLimitNote([]string{"hetzner-vm", "azure-vm", "gcp-vm", "aws-vm"})
+	assert.Contains(t, n, "Azure")
+	assert.Contains(t, n, "subscription")
+	assert.Contains(t, n, "GCP")
+	assert.Contains(t, n, "project")
+
+	az := scopeLimitNote([]string{"azure-vm"})
+	assert.Contains(t, az, "Azure")
+	assert.NotContains(t, az, "GCP (")
+
+	// Neither cloud present → no note.
+	assert.Empty(t, scopeLimitNote([]string{"hetzner-vm", "aws-vm"}))
 }

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/d0cd/dispatcher/internal/state"
 	"github.com/d0cd/dispatcher/internal/types"
@@ -205,7 +206,15 @@ func sshDockerRunScript(quotedDir, quotedImage, envFileLines string) string {
 
 func (s *SSHAdapter) Status(_ context.Context, h *RunHandle) (types.RunState, error) {
 	ss := h.State.(*sshState)
-	if err := ss.cmd.Wait(); err != nil {
+	// Drain the output pipe before Wait so a remote command emitting more than the
+	// pipe buffer cannot block on write and deadlock cmd.Wait(). On the first
+	// attempt Logs() drains it; here we cover the paths where Logs() is skipped.
+	drained := ss.startDiscardDrain()
+	err := ss.cmd.Wait()
+	if drained != nil {
+		<-drained
+	}
+	if err != nil {
 		return types.RunStateExecutionFailed, nil
 	}
 	return types.RunStateCompleted, nil
@@ -221,6 +230,13 @@ func (s *SSHAdapter) Logs(_ context.Context, h *RunHandle, w io.Writer) error {
 	if !ok || ss.logs == nil {
 		return nil
 	}
+	ss.mu.Lock()
+	if ss.logStarted {
+		ss.mu.Unlock()
+		return nil // Status() already claimed the drain
+	}
+	ss.logStarted = true
+	ss.mu.Unlock()
 	defer ss.logs.Close()
 	_, err := io.Copy(w, ss.logs)
 	return err
@@ -429,4 +445,30 @@ type sshState struct {
 	// stdout/stderr to; Logs() drains it to the run's logWriter. nil for handles
 	// reconstructed outside Execute (e.g. Artifacts-only test fixtures).
 	logs *os.File
+	// mu guards logStarted so Logs() and Status() never both drain the pipe. The
+	// first to claim it owns the reader; the other is a no-op.
+	mu         sync.Mutex
+	logStarted bool
+}
+
+// startDiscardDrain starts a goroutine copying the log pipe to io.Discard unless a
+// drain (Logs) already claimed it, returning a channel closed when the drain
+// finishes (nil if none was started). Without this, cmd.Wait() deadlocks whenever
+// the remote command emits more than the ~64 KiB pipe buffer and no Logs()
+// consumer drains it (the transient-retry path and the logWriter==nil attempt).
+func (ss *sshState) startDiscardDrain() <-chan struct{} {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	if ss.logStarted || ss.logs == nil {
+		return nil
+	}
+	ss.logStarted = true
+	r := ss.logs
+	done := make(chan struct{})
+	go func() {
+		_, _ = io.Copy(io.Discard, r)
+		r.Close()
+		close(done)
+	}()
+	return done
 }

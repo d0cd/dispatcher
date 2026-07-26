@@ -3,10 +3,35 @@ package cloudvm
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/d0cd/dispatcher/internal/attest"
 	"github.com/d0cd/dispatcher/internal/types"
 )
+
+// enforceWorkloadMeasurements applies the workload author's measurement allowlist
+// (confidential.measurements) as an ADDITIONAL constraint on top of the operator
+// pins: the run's attested measurement is guaranteed by the validator to equal
+// the operator-pinned one, so if the workload declared an allowlist that doesn't
+// include it, fail closed BEFORE provisioning/running. An empty allowlist means
+// the operator pins are authoritative (no extra constraint). Comparison is
+// case-insensitive and ignores a leading "sha256:" (CS image digests).
+func enforceWorkloadMeasurements(req types.ConfidentialRequirement, attested string) error {
+	if len(req.Measurements) == 0 {
+		return nil
+	}
+	want := normalizeMeasurement(attested)
+	for _, m := range req.Measurements {
+		if normalizeMeasurement(m) == want {
+			return nil
+		}
+	}
+	return fmt.Errorf("confidential.measurements allowlist does not include the attested measurement %q — refusing to run (the operator-pinned image/PCR is not one the workload declared)", attested)
+}
+
+func normalizeMeasurement(s string) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(s)), "sha256:")
+}
 
 // verifyConfidential is the CloudVMAdapter (SSH-VM) path's attestation step. With
 // attestation on, GCP/Azure/AWS runs are routed to their confidential adapters

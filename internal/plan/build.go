@@ -22,6 +22,16 @@ type candidate struct {
 	cost   types.CostEstimate
 }
 
+// estimateCost prices a target, applying the spot discount when the run requested
+// an interruptible instance (a spot-incapable provider is unaffected).
+func estimateCost(spec types.WorkloadSpec, t types.TargetConfig, catalog *cloudvm.Catalog, spot bool) types.CostEstimate {
+	est := cost.EstimateCost(spec, t, catalog)
+	if spot {
+		est = cost.ApplySpot(est, t)
+	}
+	return est
+}
+
 // Build generates a complete plan for the workload at the given path.
 //
 // catalog supplies live cloud pricing; pass nil when no catalog is available
@@ -43,6 +53,16 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		return nil, fmt.Errorf("load dispatcher config: %w", cfgErr)
 	}
 	if cfg != nil {
+		// Secret-resolution commands are honored only from the user-global config
+		// (~/.config/dispatcher/config.yaml, registered at CLI startup). A per-project
+		// dispatcher.yaml must NOT be able to define a command that runs against the
+		// operator's unlocked secret manager, so a project secrets: block is ignored
+		// with a warning rather than silently.
+		if len(cfg.Secrets) > 0 {
+			dlog.L().Warn("secrets.per_project_ignored",
+				"note", "per-project secrets: are not executed; put operator credentials in ~/.config/dispatcher/config.yaml",
+				"count", len(cfg.Secrets))
+		}
 		if constraints.MaxEstimatedCostUSD == 0 && cfg.MaxCost > 0 {
 			constraints.MaxEstimatedCostUSD = cfg.MaxCost
 		}
@@ -64,6 +84,9 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		}
 		if !constraints.RetryTransientFailures && cfg.RetryTransientFailures != nil {
 			constraints.RetryTransientFailures = *cfg.RetryTransientFailures
+		}
+		if !constraints.Spot && cfg.Spot {
+			constraints.Spot = true
 		}
 	}
 
@@ -98,7 +121,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		if !result.Feasible {
 			return nil, fmt.Errorf("target %q is not feasible: %s", constraints.TargetName, result.Reasons[0])
 		}
-		est := cost.EstimateCost(spec, t, catalog)
+		est := estimateCost(spec, t, catalog, constraints.Spot)
 		feasible = append(feasible, candidate{target: t, cost: est})
 
 		// Evaluate rest as alternatives
@@ -108,7 +131,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 			}
 			result := target.CheckFeasibility(other, spec)
 			if result.Feasible {
-				est := cost.EstimateCost(spec, other, catalog)
+				est := estimateCost(spec, other, catalog, constraints.Spot)
 				feasible = append(feasible, candidate{target: other, cost: est})
 			} else {
 				rejected = append(rejected, types.RejectedTarget{
@@ -121,7 +144,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 		for _, t := range targets {
 			result := target.CheckFeasibility(t, spec)
 			if result.Feasible {
-				est := cost.EstimateCost(spec, t, catalog)
+				est := estimateCost(spec, t, catalog, constraints.Spot)
 				feasible = append(feasible, candidate{target: t, cost: est})
 			} else {
 				rejected = append(rejected, types.RejectedTarget{
@@ -164,7 +187,7 @@ func Build(path string, constraints types.PlanConstraints, catalog *cloudvm.Cata
 	}
 
 	// Risk analysis
-	risks := risk.Analyze(spec, best.target, best.cost)
+	risks := risk.Analyze(spec, best.target, best.cost, constraints.Spot)
 
 	// Policy evaluation
 	approvals := policy.Evaluate(spec, best.target, best.cost)

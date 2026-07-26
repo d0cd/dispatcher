@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
@@ -316,36 +317,95 @@ func awsSpend(ctx context.Context, start, end time.Time, all, byService bool) pr
 	return out
 }
 
-// parseAzureCost reads `az consumption usage list`. Without all it keeps only
-// dispatcher-tagged rows; with byService it aggregates by consumedService.
-func parseAzureCost(raw []byte, all, byService bool) (float64, string, []serviceSpend, string, error) {
-	var rows []struct {
-		PretaxCost      string            `json:"pretaxCost"`
-		Currency        string            `json:"currency"`
-		ConsumedService string            `json:"consumedService"`
-		Tags            map[string]string `json:"tags"`
+// buildAzureCostQuery builds the Microsoft.CostManagement/query body for the
+// window. Without all it filters to dispatcher-tagged spend; with byService it
+// groups by ServiceName. This is the API the portal uses — the deprecated
+// `az consumption usage list` returns pretaxCost:"None" for many subscription
+// offers and silently zeroed the total.
+func buildAzureCostQuery(start, end time.Time, all, byService bool) string {
+	dataset := map[string]any{
+		"granularity": "None",
+		"aggregation": map[string]any{
+			"totalCost": map[string]any{"name": "PreTaxCost", "function": "Sum"},
+		},
 	}
-	if err := json.Unmarshal(raw, &rows); err != nil {
+	if byService {
+		dataset["grouping"] = []map[string]any{{"type": "Dimension", "name": "ServiceName"}}
+	}
+	if !all {
+		dataset["filter"] = map[string]any{
+			"tags": map[string]any{"name": "dispatcher", "operator": "In", "values": []string{"true"}},
+		}
+	}
+	q := map[string]any{
+		"type":      "ActualCost",
+		"timeframe": "Custom",
+		"timePeriod": map[string]any{
+			"from": start.Format("2006-01-02T15:04:05Z"),
+			"to":   end.Format("2006-01-02T15:04:05Z"),
+		},
+		"dataset": dataset,
+	}
+	b, _ := json.Marshal(q)
+	return string(b)
+}
+
+// parseAzureCost sums PreTaxCost over a Cost Management query response (columns +
+// rows). With byService it also aggregates by the ServiceName column. The
+// dispatcher-tag filter is applied server-side in the query, not here.
+func parseAzureCost(raw []byte, byService bool) (float64, string, []serviceSpend, string, error) {
+	var resp struct {
+		Properties struct {
+			Columns []struct {
+				Name string `json:"name"`
+			} `json:"columns"`
+			Rows [][]json.RawMessage `json:"rows"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
 		return 0, "", nil, "", err
 	}
+	colIdx := map[string]int{}
+	for i, c := range resp.Properties.Columns {
+		colIdx[c.Name] = i
+	}
+	costI, ok := colIdx["PreTaxCost"]
+	if !ok {
+		costI, ok = colIdx["Cost"] // some responses label the aggregate "Cost"
+	}
+	if !ok {
+		return 0, "", nil, "", fmt.Errorf("cost column not found in Cost Management response")
+	}
+	svcI, hasSvc := colIdx["ServiceName"]
+	curI, hasCur := colIdx["Currency"]
+
 	var total float64
 	currencies := map[string]bool{}
-	dropped := 0
 	byName := map[string]float64{}
-	for _, r := range rows {
-		if !all && r.Tags["dispatcher"] != "true" {
-			continue
-		}
-		v, err := strconv.ParseFloat(r.PretaxCost, 64)
-		if err != nil {
+	dropped := 0
+	for _, row := range resp.Properties.Rows {
+		if costI >= len(row) {
 			dropped++
 			continue
 		}
-		total += v
-		if r.Currency != "" {
-			currencies[r.Currency] = true
+		var amt float64
+		if err := json.Unmarshal(row[costI], &amt); err != nil {
+			dropped++
+			continue
 		}
-		byName[r.ConsumedService] += v
+		total += amt
+		if hasCur && curI < len(row) {
+			var c string
+			_ = json.Unmarshal(row[curI], &c)
+			if c != "" {
+				currencies[c] = true
+			}
+		}
+		if byService && hasSvc && svcI < len(row) {
+			var name string
+			_ = json.Unmarshal(row[svcI], &name)
+			byName[name] += amt
+		}
 	}
 	var services []serviceSpend
 	if byService {
@@ -365,17 +425,20 @@ func azureSpend(ctx context.Context, start, end time.Time, all, byService bool) 
 	if _, err := billLookPath("az"); err != nil {
 		return unavailable(out, "az CLI not installed")
 	}
-	if _, err := billExec(ctx, "az", "account", "show"); err != nil {
+	subRaw, err := billExec(ctx, "az", "account", "show", "--query", "id", "-o", "tsv")
+	if err != nil {
 		return unavailable(out, "az not authenticated (`az login`)")
 	}
-	raw, err := billExec(ctx, "az", "consumption", "usage", "list",
-		"--start-date", start.Format("2006-01-02"),
-		"--end-date", end.Format("2006-01-02"),
+	sub := strings.TrimSpace(string(subRaw))
+	url := "https://management.azure.com/subscriptions/" + sub +
+		"/providers/Microsoft.CostManagement/query?api-version=2023-11-01"
+	raw, err := billExec(ctx, "az", "rest", "--method", "post",
+		"--url", url, "--body", buildAzureCostQuery(start, end, all, byService),
 		"--output", "json")
 	if err != nil {
-		return unavailable(out, fmt.Sprintf("consumption query failed (need Billing Reader role): %v", trimCmdErr(err)))
+		return unavailable(out, fmt.Sprintf("cost management query failed (need Cost Management Reader role): %v", trimCmdErr(err)))
 	}
-	amount, currency, services, note, err := parseAzureCost(raw, all, byService)
+	amount, currency, services, note, err := parseAzureCost(raw, byService)
 	if err != nil {
 		return unavailable(out, fmt.Sprintf("parse az output: %v", err))
 	}

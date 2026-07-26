@@ -121,8 +121,13 @@ func dockerRunArgs(w types.WorkloadSpec, containerName, envFile string) ([]strin
 	//     is running a packaged tool, NOT their own code. Mounting
 	//     source would shadow the image's /app and break it.
 	if w.Package.Type != types.PackageTypeImage {
-		// --mount (not -v) so a source path containing ':' isn't split into a
-		// bogus mount spec.
+		// --mount (not -v) so a source path containing ':' isn't split into a bogus
+		// mount spec. --mount fields are comma-separated with no escaping, so a
+		// comma in the path would inject extra options — reject rather than
+		// silently mis-mount.
+		if strings.Contains(w.Source.Path, ",") {
+			return nil, fmt.Errorf("workload path %q contains a comma, which docker --mount cannot express; move it to a comma-free path", w.Source.Path)
+		}
 		args = append(args, "--mount", "type=bind,source="+w.Source.Path+",target=/app", "-w", "/app")
 	}
 	args = append(args, w.Package.BaseImage)

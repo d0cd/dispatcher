@@ -2,9 +2,11 @@ package cloudvm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -206,11 +208,20 @@ func (e assertErr) Error() string { return string(e) }
 type firewallMockProvider struct {
 	*MockProvider
 	deletedFirewall string
+	fwErr           error // deleteAgentFirewall returns this
+	destroyErr      error // DestroyVM returns this
 }
 
 func (f *firewallMockProvider) deleteAgentFirewall(_ context.Context, name string) error {
 	f.deletedFirewall = name
-	return nil
+	return f.fwErr
+}
+
+func (f *firewallMockProvider) DestroyVM(ctx context.Context, id string) error {
+	if f.destroyErr != nil {
+		return f.destroyErr
+	}
+	return f.MockProvider.DestroyVM(ctx, id)
 }
 
 func TestConfidentialSpaceAdapter_CleanupReapsFirewall(t *testing.T) {
@@ -223,4 +234,32 @@ func TestConfidentialSpaceAdapter_CleanupReapsFirewall(t *testing.T) {
 	assert.True(t, res.Success)
 	assert.Equal(t, agentFirewallName("vm-1"), provider.deletedFirewall, "Cleanup must reap the per-run agent firewall")
 	assert.Contains(t, res.ResourcesCleaned, agentFirewallName("vm-1"))
+}
+
+// The firewall reap must not be coupled to DestroyVM success: on a confidential
+// run the CS launcher self-terminates the VM, so a Cleanup DestroyVM can hit a
+// transient error while the firewall still needs reaping. Gating it leaked the
+// rule (observed live).
+func TestConfidentialSpaceAdapter_CleanupReapsFirewallDespiteDestroyError(t *testing.T) {
+	provider := &firewallMockProvider{MockProvider: NewMockProvider(ProviderGCP), destroyErr: errors.New("instance is being deleted")}
+	a := NewConfidentialSpaceAdapter(provider, nil, nil, Config{ProviderID: ProviderGCP})
+	h := &adapter.RunHandle{ID: "vm-1", State: &confidentialRunState{Provider: ProviderGCP, VMID: "vm-1"}}
+
+	res, err := a.Cleanup(context.Background(), h)
+	require.NoError(t, err)
+	assert.False(t, res.Success, "VM destroy failed, so cleanup is not fully successful")
+	assert.Equal(t, agentFirewallName("vm-1"), provider.deletedFirewall, "the firewall must still be reaped when DestroyVM errors")
+}
+
+// A failed firewall reap must be surfaced, not silently swallowed, so the leak is
+// visible (gc reaps it by run-id as a backstop).
+func TestConfidentialSpaceAdapter_CleanupSurfacesFirewallError(t *testing.T) {
+	provider := &firewallMockProvider{MockProvider: NewMockProvider(ProviderGCP), fwErr: errors.New("firewall in use")}
+	a := NewConfidentialSpaceAdapter(provider, nil, nil, Config{ProviderID: ProviderGCP})
+	h := &adapter.RunHandle{ID: "vm-1", State: &confidentialRunState{Provider: ProviderGCP, VMID: "vm-1"}}
+
+	res, err := a.Cleanup(context.Background(), h)
+	require.NoError(t, err)
+	require.NotEmpty(t, res.Errors, "a failed firewall reap must be surfaced")
+	assert.Contains(t, strings.Join(res.Errors, " "), "firewall")
 }

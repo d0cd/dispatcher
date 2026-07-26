@@ -443,5 +443,47 @@ func BuiltinTargets() []types.TargetConfig {
 				},
 			},
 		},
+		{
+			ID:      "lambda-vm",
+			Kind:    types.TargetKindCloudVM,
+			Enabled: true,
+			Capabilities: types.Capabilities{
+				WorkloadKinds: []types.WorkloadKind{
+					types.WorkloadKindScript,
+					types.WorkloadKindJob,
+					types.WorkloadKindContainer,
+					types.WorkloadKindService,
+					types.WorkloadKindGPUJob,
+				},
+				Resources: types.ResourceCapability{
+					CPU:    true,
+					Memory: true,
+					// Lambda Cloud is a GPU specialist: on-demand H100/A100/GH200
+					// well below hyperscaler list price.
+					GPU: types.GPUCapability{
+						Supported: true,
+						Models:    []string{"a100", "h100", "gh200", "a10", "a6000"},
+					},
+					// No confidential model (plain SSH GPU VMs, no measured boot).
+					Confidential: types.ConfidentialCapability{Supported: false},
+				},
+				Networking: types.NetworkingCapability{
+					PublicEndpoint: true,
+				},
+				Accounting: types.AccountingCapability{
+					CostEstimate:  true,
+					ActualBilling: false,
+					RateCard:      "lambda",
+				},
+				Isolation: types.IsolationCapability{
+					Levels: []string{"vm"},
+				},
+				Observability: types.ObservabilityCapability{
+					Logs:      true,
+					Metrics:   false,
+					Artifacts: true,
+				},
+			},
+		},
 	}
 }

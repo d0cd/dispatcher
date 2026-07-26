@@ -78,12 +78,24 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 	// referenced by name. Upload the per-run public key under a name
 	// derived from the run ID (unique across concurrent runs).
 	sshKeyName := hetznerSSHKeyName(opts)
+	keyUploaded := false
 	if opts.SSHKeyPath != "" && sshKeyName != "" {
 		if err := uploadHetznerSSHKey(ctx, sshKeyName, opts.SSHKeyPath); err != nil {
 			return nil, err
 		}
+		keyUploaded = true
 		args = append(args, "--ssh-key", sshKeyName)
 	}
+	// Reap the uploaded key on ANY early failure (label validation, firewall
+	// setup, a genuinely-failed create) — every error path between here and a
+	// live server would otherwise leak the account SSH key. Cleared on success
+	// and on adopt, where the live server still needs it.
+	createdOK := false
+	defer func() {
+		if !createdOK && keyUploaded {
+			_ = exec.CommandContext(context.Background(), "hcloud", "ssh-key", "delete", sshKeyName).Run()
+		}
+	}()
 
 	// hcloud >=1.45 dropped --user-data in favor of --user-data-from-file.
 	// Write to a 0600-from-creation tempfile (no TOCTOU window where the
@@ -133,13 +145,11 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 		// (and its ssh-key/firewall). Adopt it if the retry left one behind — and do
 		// NOT delete the ssh-key/firewall, which the live server still needs.
 		if vm := adoptCreatedVM(ctx, h, opts.Tags["dispatcher-run-id"]); vm != nil {
+			createdOK = true // the adopted live server still needs the key
 			return vm, nil
 		}
-		// VM creation genuinely failed but we may have already uploaded the SSH key
-		// and created the firewall. Best-effort cleanup so we don't leak them.
-		if sshKeyName != "" {
-			_ = exec.CommandContext(context.Background(), "hcloud", "ssh-key", "delete", sshKeyName).Run()
-		}
+		// VM creation genuinely failed; the deferred guard reaps the ssh-key, and
+		// the firewall (if any) is cleaned up here.
 		if fwName != "" {
 			_ = exec.CommandContext(context.Background(), "hcloud", "firewall", "delete", fwName).Run()
 		}
@@ -161,6 +171,7 @@ func (h *HetznerProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo
 		return nil, fmt.Errorf("cannot parse hcloud output: %w", err)
 	}
 
+	createdOK = true // live server owns the key + firewall now
 	return &VMInfo{
 		ID:        fmt.Sprintf("%d", result.Server.ID),
 		Name:      result.Server.Name,
@@ -225,6 +236,13 @@ func (h *HetznerProvider) DestroyVM(ctx context.Context, vmID string) error {
 	runID := h.runIDForServer(ctx, vmID)
 
 	if _, err := runCLI(ctx, "hcloud", "server", "delete", vmID); err != nil {
+		// Already gone — teardown is idempotent (matches the other providers + the
+		// GetVM contract), so a retried/racing gc doesn't report a spurious failure.
+		// The server's labels are unreadable once it's gone, so runID is already ""
+		// and the firewall/ssh-key cleanup below wouldn't run regardless.
+		if isVMNotFound(err, vmID) {
+			return nil
+		}
 		return fmt.Errorf("hcloud server delete failed: %w", err)
 	}
 	if runID != "" {

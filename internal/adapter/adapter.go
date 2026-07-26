@@ -74,6 +74,10 @@ type ResourceInfo struct {
 	CreatedAt    time.Time         `json:"createdAt"`
 	RunID        string            `json:"runId,omitempty"`
 	Tags         map[string]string `json:"tags,omitempty"`
+	// Scope is the provider sub-scope the resource actually lives in — an Azure
+	// resource group or a GCP project — captured when gc scans beyond the
+	// adapter's configured scope. Destroy routes to it (empty = adapter default).
+	Scope string `json:"scope,omitempty"`
 	// MonthlyUSD is the estimated ongoing cost of this resource (0 if free or
 	// unknown). Instances report their hourly rate as a monthly figure only as a
 	// worst-case; the real ongoing concern is persistent disks/images/IPs.
@@ -152,6 +156,7 @@ type FailureDetails struct {
 	ExitCode  int    // process exit code
 	Signal    string // "SIGKILL", "SIGSEGV", etc.; empty for normal exit
 	OOMKilled bool   // runtime-confirmed OOM (docker/k8s); local can only infer from SIGKILL
+	Reclaimed bool   // the spot/preemptible instance was reclaimed by the provider mid-run
 	Message   string // one-line human explanation
 }
 

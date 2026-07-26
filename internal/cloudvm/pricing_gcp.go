@@ -113,7 +113,9 @@ func (g *GCPFetcher) fetchBillingSKUs(ctx context.Context, token string) ([]gcpS
 	endpoint := fmt.Sprintf("%s/services/%s/skus", base, GCPComputeServiceID)
 	q := url.Values{}
 	q.Set("currencyCode", "USD")
-	q.Set("pageSize", "1000")
+	// The Compute Engine catalog is ~30k SKUs; 5000 (the API max page size)
+	// keeps it to ~7 sequential pages instead of ~30.
+	q.Set("pageSize", "5000")
 
 	var (
 		all       []gcpSKU
@@ -288,14 +290,14 @@ type gcpFamilyPrices struct{ cpu, ram, gpu float64 }
 // skipped. When multiple SKUs match a description (e.g. different machine-type
 // tiers within a family), the cheapest is used so the resulting per-core/RAM
 // rate is conservative.
-func findGCPFamilyPrices(skus []gcpSKU, region string) map[string]gcpFamilyPrices {
+func findGCPFamilyPrices(skus []gcpSKU, region, usageType string) map[string]gcpFamilyPrices {
 	out := make(map[string]gcpFamilyPrices, len(gcpFamilies))
 	for i := range gcpFamilies {
 		out[gcpFamilies[i].prefix] = gcpFamilyPrices{}
 	}
 
 	for _, s := range skus {
-		if s.Category.ResourceFamily != "Compute" || s.Category.UsageType != "OnDemand" {
+		if s.Category.ResourceFamily != "Compute" || s.Category.UsageType != usageType {
 			continue
 		}
 		if !skuServesRegion(s.ServiceRegions, region) {
@@ -369,7 +371,8 @@ func gcpGPUCount(name string) int {
 }
 
 func joinGCPSpecsAndPrices(specs []gcpMachineType, skus []gcpSKU, region string) []InstanceType {
-	prices := findGCPFamilyPrices(skus, region)
+	prices := findGCPFamilyPrices(skus, region, "OnDemand")
+	spotPrices := findGCPFamilyPrices(skus, region, "Preemptible")
 
 	var out []InstanceType
 	for _, s := range specs {
@@ -398,7 +401,7 @@ func joinGCPSpecsAndPrices(specs []gcpMachineType, skus []gcpSKU, region string)
 			arch = "x86_64"
 		}
 
-		out = append(out, InstanceType{
+		inst := InstanceType{
 			Name:         s.Name,
 			Provider:     ProviderGCP,
 			VCPUs:        s.GuestCpus,
@@ -407,7 +410,20 @@ func joinGCPSpecsAndPrices(specs []gcpMachineType, skus []gcpSKU, region string)
 			Arch:         arch,
 			GPUCount:     gpuCount,
 			GPUModel:     fam.gpuModel,
-		})
+		}
+
+		// Live preemptible (spot) price, when the catalog had Preemptible SKUs for
+		// the whole family (CPU+RAM, plus GPU for accelerator families).
+		if sp := spotPrices[fam.prefix]; sp.cpu > 0 && sp.ram > 0 && (fam.gpuSKU == "" || sp.gpu > 0) {
+			spot := sp.cpu*float64(s.GuestCpus) + sp.ram*memGB + sp.gpu*float64(gpuCount)
+			// A spot price at/above on-demand is nonsensical (SpotRatio >= 1); drop
+			// it so the estimator falls back to the discount factor, matching AWS.
+			if isPlausibleHourlyPrice(spot) && spot < price {
+				inst.SpotPricePerHour = spot
+			}
+		}
+
+		out = append(out, inst)
 	}
 	return out
 }

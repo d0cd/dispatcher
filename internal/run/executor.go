@@ -315,6 +315,8 @@ func (e *Executor) retryTransientFailure(ctx context.Context, r *Run, sup *super
 	retryHandle.RunID = r.ID
 	r.Handle = retryHandle
 	_ = r.PersistHandle()
+	saveRun(r) // flush the new handle to disk now so a crash before the first
+	// watchdog save doesn't leave stop reconnecting to the destroyed old handle
 	*sup = *e.superviseHandle(ctx, r, retryHandle, logWriter) // re-arm on the new handle
 
 	// We deliberately don't re-stream logs here — the original writer is closed.
@@ -487,6 +489,12 @@ func (e *Executor) startEphemeralWatchdog(ctx context.Context, r *Run,
 			case <-heartbeatCtx.Done():
 				return
 			case <-ticker.C:
+				// Once the budget tripped, stop renewing so the VM self-destructs at
+				// its watchdog TTL even if the immediate terminate failed — never
+				// keep renewing the deadline of an over-budget VM.
+				if r.GetState() == types.RunStateBudgetExceeded {
+					return
+				}
 				renew()
 			}
 		}

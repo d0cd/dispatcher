@@ -114,6 +114,16 @@ func (a *CloudVMAdapter) Prepare(ctx context.Context, p *types.Plan) error {
 	return nil // VM creation happens in Execute
 }
 
+// effectiveInstanceType records the size the provider actually launched. It
+// prefers the provider-reported type (Azure reports a substituted size when the
+// requested one was offer-restricted) and falls back to what was requested.
+func effectiveInstanceType(vmInfo *VMInfo, opts VMOptions) string {
+	if vmInfo != nil && vmInfo.InstanceType != "" {
+		return vmInfo.InstanceType
+	}
+	return opts.InstanceType
+}
+
 // buildVMOptions assembles the provisioning request for a plan. InstanceType
 // comes from the recommended target's priced estimate, so the VM that launches
 // matches the one that was costed; an empty value (non-catalog estimate) lets
@@ -130,6 +140,7 @@ func buildVMOptions(p *types.Plan, region, vmName, pubKeyPath, userData string) 
 		SSHKeyPath:   pubKeyPath,
 		UserData:     userData,
 		AllowSSHFrom: p.Constraints.AllowSSHFrom,
+		Spot:         p.Constraints.Spot,
 		Tags: map[string]string{
 			"dispatcher-run-id": p.Metadata.ID,
 			"dispatcher":        "true",
@@ -189,7 +200,7 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 	if p.Constraints.WatchdogTTL > 0 {
 		ttl = p.Constraints.WatchdogTTL
 	}
-	userData := WatchdogCloudInit(ttl, sshUser)
+	userData := WatchdogCloudInit(ttl, sshUser, watchdogSelfDestructFor(a.config.ProviderID))
 	vmName := fmt.Sprintf("dispatcher-%s", adapter.SanitizeName(w.Name))
 
 	// Pin the region: the plan's choice wins over the adapter default, and the
@@ -275,11 +286,12 @@ func (a *CloudVMAdapter) Execute(ctx context.Context, p *types.Plan) (*adapter.R
 		SSHUser:       effectiveUser,
 		SSHPort:       sshPort,
 		Region:        a.config.Region,
-		InstanceType:  opts.InstanceType,
+		InstanceType:  effectiveInstanceType(vmInfo, opts),
 		RemoteDir:     remoteDir,
 		LogPath:       remoteDir + "/dispatcher.log",
 		CreatedAt:     time.Now().UTC(),
 		Outputs:       w.Outputs,
+		Spot:          opts.Spot,
 	}
 
 	// Pin host key now so subsequent SSH/rsync use StrictHostKeyChecking=yes,
@@ -409,6 +421,12 @@ func (a *CloudVMAdapter) Status(ctx context.Context, h *adapter.RunHandle) (type
 	}
 
 	if vmInfo.State == VMStateTerminated {
+		// A spot/preemptible VM that vanishes mid-run was reclaimed by the
+		// provider, not by dispatcher. Record it so FailureDetails classifies the
+		// failure as transient and --retry-transient re-provisions.
+		if state.Spot {
+			state.Reclaimed = true
+		}
 		return types.RunStateExecutionFailed, nil
 	}
 
@@ -459,6 +477,14 @@ func (a *CloudVMAdapter) FailureDetails(h *adapter.RunHandle) adapter.FailureDet
 	state, ok := h.State.(*CloudVMState)
 	if !ok {
 		return adapter.FailureDetails{Message: "no cloud vm state"}
+	}
+	// A reclaimed spot VM is gone — SSH evidence capture would only time out.
+	// Report the reclaim directly; it classifies transient.
+	if state.Reclaimed {
+		return adapter.FailureDetails{
+			Reclaimed: true,
+			Message:   fmt.Sprintf("spot instance reclaimed by the provider (%s VM %s)", state.Provider, state.VMID),
+		}
 	}
 	// Capture kernel/cgroup OOM evidence from the still-alive VM before teardown,
 	// so diagnose can state OOM as a fact rather than a guess.
@@ -798,6 +824,8 @@ func providerBaseRate(p ProviderID) float64 {
 		return 0.04 // e2-medium ~$0.03
 	case ProviderAzure:
 		return 0.05 // B2s ~$0.04
+	case ProviderLambda:
+		return 0.75 // GPU cloud: gpu_1x_a100 ~$1.29/hr, gpu_1x_gh200 ~$1.49; floor low
 	default:
 		return 0.10
 	}

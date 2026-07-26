@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/d0cd/dispatcher/internal/adapter"
@@ -15,6 +16,10 @@ import (
 // AWSProvider implements Provider using the aws CLI.
 type AWSProvider struct {
 	defaultRegion string
+	// createSeq gives each CreateVM call a distinct run-instances idempotency
+	// token, so a spot-reclaim re-provision launches a NEW instance instead of
+	// colliding with the reclaimed attempt's token.
+	createSeq atomic.Uint64
 }
 
 // NewAWSProvider creates an AWS provider.
@@ -41,15 +46,52 @@ func (a *AWSProvider) SetRegion(region string) {
 // hardcode a region-pinned AMI.
 const ubuntuAMISSMParam = "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id"
 
+// ubuntuAMISSMParamARM64 is the arm64 (Graviton) counterpart, used when the
+// selected instance is a Graviton family.
+const ubuntuAMISSMParamARM64 = "/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id"
+
 // resolveUbuntuAMI looks up the region-correct Ubuntu AMI via SSM. AMI ids are
 // region-scoped, so a fixed id only works in one region; this makes any region
 // launchable without a hand-maintained region→AMI map.
-func resolveUbuntuAMI(ctx context.Context, region string) (string, error) {
+// awsInstanceArch derives x86_64 vs arm64 from an instance type name. AWS
+// Graviton families carry a 'g' immediately after the generation digits (t4g,
+// c7g, m6gd, im4gn, g5g); a1 is the one Graviton family without it. Needed so
+// resolveUbuntuAMI picks an architecture-matching AMI — otherwise an arm64
+// instance (which live pricing often selects as cheapest) fails to launch on an
+// x86_64 image.
+func awsInstanceArch(instanceType string) string {
+	fam := instanceType
+	if i := strings.IndexByte(fam, '.'); i >= 0 {
+		fam = fam[:i]
+	}
+	if fam == "a1" {
+		return "arm64"
+	}
+	for i := 0; i < len(fam); i++ {
+		if fam[i] >= '0' && fam[i] <= '9' {
+			j := i
+			for j < len(fam) && fam[j] >= '0' && fam[j] <= '9' {
+				j++
+			}
+			if j < len(fam) && fam[j] == 'g' {
+				return "arm64"
+			}
+			break
+		}
+	}
+	return "x86_64"
+}
+
+func resolveUbuntuAMI(ctx context.Context, region, arch string) (string, error) {
+	param := ubuntuAMISSMParam
+	if arch == "arm64" {
+		param = ubuntuAMISSMParamARM64
+	}
 	var out []byte
 	err := Retry(ctx, DefaultRetry, IsTransient, func() error {
 		o, e := runCLI(ctx, "aws", "ssm", "get-parameter",
 			"--region", region,
-			"--name", ubuntuAMISSMParam,
+			"--name", param,
 			"--query", "Parameter.Value",
 			"--output", "text",
 		)
@@ -94,6 +136,9 @@ func awsConfidentialArgs(opts VMOptions) ([]string, error) {
 }
 
 func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, error) {
+	// One distinct idempotency token per CreateVM call: stable across the CLI's
+	// internal retries within this call, different on a later re-provision.
+	attempt := a.createSeq.Add(1)
 	region := opts.Region
 	if region == "" {
 		region = a.defaultRegion
@@ -118,7 +163,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 			// supplies a driver-baked AMI.
 			image = awsGPUImage()
 		} else {
-			resolved, err := resolveUbuntuAMI(ctx, region)
+			resolved, err := resolveUbuntuAMI(ctx, region, awsInstanceArch(instanceType))
 			if err != nil {
 				return nil, fmt.Errorf("aws: %w", err)
 			}
@@ -141,6 +186,15 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	if err != nil {
 		return nil, err
 	}
+	// Reap the per-run security group on ANY failure between here and a live
+	// instance — the read-pubkey / write-user-data / parse paths would otherwise
+	// leak it. Cleared once an instance takes ownership of the group.
+	createdOK := false
+	defer func() {
+		if !createdOK {
+			awsDeleteSecurityGroup(context.Background(), region, sgID)
+		}
+	}()
 
 	tagSpec := awsTagSpec("instance", opts.Tags)
 
@@ -158,11 +212,18 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 	// instance is created would make the retry provision a SECOND instance. A
 	// stable per-run client token makes the create idempotent — a retry returns
 	// the already-created instance instead of duplicating it.
-	if token := awsClientToken(opts); token != "" {
+	if token := awsClientToken(opts, attempt); token != "" {
 		args = append(args, "--client-token", token)
 	}
 
 	args = append(args, confArgs...)
+
+	// Spot: request an interruptible instance at the spot price (defaults to a
+	// one-time request capped at the on-demand price, so it's evicted on capacity,
+	// not on price spikes). MarketType=spot is the documented shorthand structure.
+	if opts.Spot {
+		args = append(args, "--instance-market-options", "MarketType=spot")
+	}
 
 	// A Nitro Enclaves parent needs enclave support enabled at launch; the parent
 	// is a normal instance (no memory encryption) — the measured enclave is the TEE.
@@ -194,9 +255,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 
 	output, err := retryCLIOutput(ctx, "aws", "aws ec2 run-instances", args...)
 	if err != nil {
-		// No instance took ownership of the group; reclaim it now.
-		awsDeleteSecurityGroup(ctx, region, sgID)
-		return nil, err
+		return nil, err // the deferred guard reclaims the unused group
 	}
 
 	var result struct {
@@ -226,6 +285,7 @@ func (a *AWSProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		return nil, err
 	}
 
+	createdOK = true // the live instance owns the group now
 	return &VMInfo{
 		ID:        instanceID,
 		IP:        ip,
@@ -304,15 +364,22 @@ func awsTagSpec(resourceType string, tags map[string]string) string {
 	return fmt.Sprintf("ResourceType=%s,Tags=[%s]", resourceType, strings.Join(pairs, ","))
 }
 
-// awsClientToken returns a stable idempotency token for run-instances, derived
-// from the per-run tag (the plan id) or the VM name. Stable across a create's
-// retries and unique per run, so AWS dedupes a retried create to one instance.
-// AWS caps client tokens at 64 ASCII chars; the plan id / name are well under.
-func awsClientToken(opts VMOptions) string {
-	if id := opts.Tags["dispatcher-run-id"]; id != "" {
-		return id
+// awsClientToken returns an idempotency token for run-instances, scoped to the
+// run AND this provisioning attempt (a monotonic per-CreateVM counter). Within
+// one CreateVM call the token is stable, so the CLI's internal retries dedupe to
+// one instance; across attempts it differs, so a spot-reclaim re-provision
+// launches a NEW instance instead of the reclaimed one. It must NOT depend on
+// the security-group id, which a retry can adopt unchanged. AWS caps client
+// tokens at 64 ASCII chars; run id + a small integer stay well under.
+func awsClientToken(opts VMOptions, attempt uint64) string {
+	base := opts.Tags["dispatcher-run-id"]
+	if base == "" {
+		base = opts.Name
 	}
-	return opts.Name
+	if base == "" {
+		return ""
+	}
+	return fmt.Sprintf("%s-%d", base, attempt)
 }
 
 // awsCreateSSHSecurityGroup creates a security group in the region's default VPC
@@ -336,16 +403,59 @@ func awsCreateSSHSecurityGroup(ctx context.Context, region, name, cidr string, t
 		createArgs = append(createArgs, "--tag-specifications", awsTagSpec("security-group", tags))
 	}
 	out, err = runCLI(ctx, "aws", createArgs...)
+	adopted := false
 	if err != nil {
-		return "", fmt.Errorf("aws create security group: %w", err)
+		// A same-run retry (e.g. a spot-reclaim re-provision) can find the per-run
+		// SG still present because the terminated instance no longer reports its SG
+		// membership, so teardown couldn't locate and delete it. Adopt the existing
+		// group (name+VPC identify this run's group) instead of failing the retry.
+		if isAWSDuplicateSG(err) {
+			if existing := awsFindSGByName(ctx, region, vpc, name); existing != "" {
+				out = []byte(existing)
+				adopted = true
+			}
+		}
+		if !adopted {
+			return "", fmt.Errorf("aws create security group: %w", err)
+		}
 	}
 	sg := strings.TrimSpace(string(out))
 	if _, err := runCLI(ctx, "aws", "ec2", "authorize-security-group-ingress", "--region", region,
 		"--group-id", sg, "--protocol", "tcp", "--port", "22", "--cidr", cidr); err != nil {
-		awsDeleteSecurityGroup(ctx, region, sg)
+		// An adopted group already carries the ingress rule; a duplicate is success.
+		if isAWSDuplicatePermission(err) {
+			return sg, nil
+		}
+		if !adopted {
+			awsDeleteSecurityGroup(ctx, region, sg)
+		}
 		return "", fmt.Errorf("aws authorize ssh ingress: %w", err)
 	}
 	return sg, nil
+}
+
+func isAWSDuplicateSG(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "InvalidGroup.Duplicate")
+}
+
+func isAWSDuplicatePermission(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "InvalidPermission.Duplicate")
+}
+
+// awsFindSGByName resolves a security group id by its name within a VPC, used to
+// adopt a per-run group that a prior teardown left behind. Returns "" if none.
+func awsFindSGByName(ctx context.Context, region, vpc, name string) string {
+	out, err := runCLI(ctx, "aws", "ec2", "describe-security-groups", "--region", region,
+		"--filters", "Name=group-name,Values="+name, "Name=vpc-id,Values="+vpc,
+		"--query", "SecurityGroups[0].GroupId", "--output", "text")
+	if err != nil {
+		return ""
+	}
+	id := strings.TrimSpace(string(out))
+	if id == "" || id == "None" {
+		return ""
+	}
+	return id
 }
 
 // awsDeleteSecurityGroup removes a group (best-effort; a group in use can't be

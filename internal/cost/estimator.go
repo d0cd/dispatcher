@@ -120,6 +120,11 @@ func estimateFromCatalog(spec types.WorkloadSpec, t types.TargetConfig, catalog 
 		confidence = types.ConfidenceLow
 	}
 
+	spotRatio := 0.0
+	if cheapest.SpotPricePerHour > 0 && cheapest.PricePerHour > 0 {
+		spotRatio = cheapest.SpotPricePerHour / cheapest.PricePerHour
+	}
+
 	return types.CostEstimate{
 		Value:        roundCents(total),
 		Currency:     "USD",
@@ -127,6 +132,7 @@ func estimateFromCatalog(spec types.WorkloadSpec, t types.TargetConfig, catalog 
 		Assumptions:  assumptions,
 		Exclusions:   []string{"excludes network egress", "excludes storage after run"},
 		InstanceType: cheapest.Name,
+		SpotRatio:    spotRatio,
 	}, true
 }
 
@@ -204,6 +210,11 @@ func EstimateCostWithHistory(spec types.WorkloadSpec, t types.TargetConfig, hist
 		// GPU jobs / cloud rate-card fallbacks); scaleEstimateToHours hardcodes
 		// Medium. A real bump only comes from ConfidenceForTarget (≥3 samples) below.
 		scaled.Confidence = base.Confidence
+		// Carry forward the catalog-sourced spot ratio and exclusions, which
+		// scaleEstimateToHours doesn't recompute — otherwise ApplySpot loses the
+		// precise live ratio and falls back to the coarse per-provider factor.
+		scaled.SpotRatio = base.SpotRatio
+		scaled.Exclusions = base.Exclusions
 		scaled.Assumptions = append(scaled.Assumptions,
 			fmt.Sprintf("based on historical median runtime of %s", histDuration.Round(time.Second)))
 		base = scaled
@@ -266,6 +277,8 @@ func rateCardToProvider(card string) (cloudvm.ProviderID, bool) {
 		return cloudvm.ProviderHetzner, true
 	case "oci":
 		return cloudvm.ProviderOCI, true
+	case "lambda":
+		return cloudvm.ProviderLambda, true
 	}
 	return "", false
 }

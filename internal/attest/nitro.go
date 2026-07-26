@@ -82,6 +82,12 @@ func verifyNitroDoc(coseBytes []byte, roots *x509.CertPool, p NitroPolicy) (meas
 	}); err != nil {
 		return "", nil, fmt.Errorf("nitro certificate chain: %w", err)
 	}
+	// The signing leaf must be an end-entity cert. Verify treats the first cert as
+	// the leaf but does not forbid it from being a CA, so without this a cabundle
+	// intermediate could pose as the attestation-key leaf.
+	if leaf.IsCA {
+		return "", nil, fmt.Errorf("nitro leaf is a CA cert, not an end-entity attestation leaf")
+	}
 
 	// 2. COSE_Sign1 signature over the payload, by the leaf's key (ES384).
 	verifier, err := cose.NewVerifier(cose.AlgorithmES384, leaf.PublicKey)

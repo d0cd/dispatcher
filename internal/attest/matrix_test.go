@@ -3,7 +3,6 @@ package attest
 import (
 	"bytes"
 	"context"
-	"crypto/x509"
 	"encoding/hex"
 	"os"
 	"strings"
@@ -58,15 +57,15 @@ func TestMatrix_GroundedInCode(t *testing.T) {
 	snpPin := map[int]string{11: hex.EncodeToString(snpPCR11)}
 
 	evDbg, roots := azureEvidencePolicy(t, snpNonce, snpCK, snpPCR11, snpPolicyDebug, 9)
-	_, _, err := verifyAzureSNP(evDbg, AzureSNPPolicy{Roots: roots, Nonce: snpNonce, PCRs: snpPin})
+	_, _, err := verifyAzureSNP(evDbg, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: snpNonce, PCRs: snpPin})
 	assert.Error(t, err, "matrix says debug-off is enforced on the SNP path")
 
 	evMig, roots := azureEvidencePolicy(t, snpNonce, snpCK, snpPCR11, snpPolicyMigrateMA, 9)
-	_, _, err = verifyAzureSNP(evMig, AzureSNPPolicy{Roots: roots, Nonce: snpNonce, PCRs: snpPin})
+	_, _, err = verifyAzureSNP(evMig, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: snpNonce, PCRs: snpPin})
 	assert.Error(t, err, "matrix says migration-off is enforced on the SNP path")
 
 	evWeak, roots := azureEvidencePolicy(t, snpNonce, snpCK, snpPCR11, 0, 1)
-	_, _, err = verifyAzureSNP(evWeak, AzureSNPPolicy{Roots: roots, Nonce: snpNonce, PCRs: snpPin, MinTCB: 0xFF})
+	_, _, err = verifyAzureSNP(evWeak, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: snpNonce, PCRs: snpPin, MinTCB: 0xFF})
 	assert.Error(t, err, "matrix says the TCB floor is enforced on the SNP path")
 
 	// The GCP Confidential Space path can't read a TCB, so it fail-closes on
@@ -87,7 +86,7 @@ func TestMatrix_GroundedInCode(t *testing.T) {
 	}
 	snpChain := newSNPChain(t)
 	installCRL(t, arkSignedCRL(t, snpChain, snpChain.ask.SerialNumber)) // ASK revoked
-	assert.Error(t, azureSNPCheckRevocation(snpChain.vcek, snpChain.ask, []*x509.Certificate{snpChain.ark}),
+	assert.Error(t, azureSNPCheckRevocation(snpChain.vcek, snpChain.ask, snpChain.ark),
 		"a revoked ASK must be rejected, matching the azure-snp revocation cell")
 }
 

@@ -23,6 +23,11 @@ func TestClassifyFailure(t *testing.T) {
 			want: FailureTransient,
 		},
 		{
+			name: "spot reclaim is transient",
+			in:   FailureDetails{Reclaimed: true, Message: "spot instance reclaimed by the provider"},
+			want: FailureTransient,
+		},
+		{
 			name: "SIGTERM is transient (platform termination)",
 			in:   FailureDetails{Signal: "SIGTERM"},
 			want: FailureTransient,

@@ -2,12 +2,92 @@ package cloudvm
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+// On a spot-reclaim re-provision the per-run SG can survive teardown (a terminated
+// instance stops reporting its SG membership). CreateVM's SG setup must adopt the
+// existing same-name group instead of failing on InvalidGroup.Duplicate.
+func TestAWSCreateSSHSecurityGroup_AdoptsDuplicate(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-1"), nil
+		case slices.Contains(args, "create-security-group"):
+			return nil, errors.New("An error occurred (InvalidGroup.Duplicate) when calling the CreateSecurityGroup operation: the security group 'dispatcher-r' already exists")
+		case slices.Contains(args, "describe-security-groups"):
+			return []byte("sg-existing\n"), nil
+		case slices.Contains(args, "authorize-security-group-ingress"):
+			return nil, errors.New("An error occurred (InvalidPermission.Duplicate) when calling the AuthorizeSecurityGroupIngress operation: the specified rule already exists")
+		default:
+			return []byte(""), nil
+		}
+	})
+	sg, err := awsCreateSSHSecurityGroup(context.Background(), "us-east-1", "dispatcher-r", "0.0.0.0/0",
+		map[string]string{"dispatcher": "true"})
+	require.NoError(t, err, "a duplicate SG on retry must be adopted, not fatal")
+	assert.Equal(t, "sg-existing", sg)
+}
+
+func TestAWSInstanceArch(t *testing.T) {
+	cases := map[string]string{
+		"t3.micro":    "x86_64",
+		"m5.large":    "x86_64",
+		"g4dn.xlarge": "x86_64",
+		"g5.xlarge":   "x86_64",
+		"inf1.xlarge": "x86_64",
+		"t4g.nano":    "arm64",
+		"c7g.large":   "arm64",
+		"m6gd.xlarge": "arm64",
+		"im4gn.large": "arm64",
+		"g5g.xlarge":  "arm64",
+		"a1.medium":   "arm64",
+		"x2gd.large":  "arm64",
+	}
+	for it, want := range cases {
+		assert.Equal(t, want, awsInstanceArch(it), it)
+	}
+}
+
+// A Graviton (arm64) instance the planner selects as cheapest must resolve the
+// arm64 Ubuntu AMI, or run-instances fails with an architecture mismatch.
+func TestAWSCreateVM_ARM64ResolvesArmAMI(t *testing.T) {
+	var ssmName string
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "get-parameter"):
+			for i, a := range args {
+				if a == "--name" && i+1 < len(args) {
+					ssmName = args[i+1]
+				}
+			}
+			return []byte("ami-arm64example"), nil
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-1"), nil
+		case slices.Contains(args, "create-security-group"):
+			return []byte("sg-1"), nil
+		default:
+			return []byte(""), nil
+		}
+	})
+	prev := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, _ ...string) ([]byte, error) {
+		return nil, assert.AnError // stop after image resolution; args already captured
+	}
+	t.Cleanup(func() { retryCLIOutput = prev })
+
+	_, _ = NewAWSProvider("us-east-1").CreateVM(context.Background(), VMOptions{
+		Region: "us-east-1", InstanceType: "t4g.nano",
+		Tags: map[string]string{"dispatcher-run-id": "r"},
+	})
+	assert.Contains(t, ssmName, "arm64", "arm64 instance must resolve the arm64 AMI param")
+}
 
 // cliCall records one invocation of the runCLI seam.
 type cliCall struct {
@@ -97,8 +177,92 @@ func TestAWSCreateVM_PassesIdempotencyClientToken(t *testing.T) {
 
 	i := slices.Index(runArgs, "--client-token")
 	if assert.GreaterOrEqual(t, i, 0, "run-instances must carry a --client-token for idempotent retries") {
-		assert.Equal(t, "plan_x", runArgs[i+1], "the client token must be the stable per-run id")
+		// run id + the first attempt counter (a fresh provider starts at 1).
+		assert.Equal(t, "plan_x-1", runArgs[i+1])
 	}
+}
+
+// The client token must be stable within one provisioning attempt (so the CLI's
+// internal retries dedupe to one instance) but distinct across attempts (so a
+// spot-reclaim re-provision launches a NEW instance). Uniqueness comes from the
+// attempt counter, NOT the security-group id (a retry can adopt the same SG).
+func TestAWSClientToken_DistinctPerAttempt(t *testing.T) {
+	opts := VMOptions{Tags: map[string]string{"dispatcher-run-id": "run_abc"}}
+	first := awsClientToken(opts, 1)
+	second := awsClientToken(opts, 2)
+	assert.NotEqual(t, first, second, "a later attempt must yield a distinct token")
+	assert.Equal(t, first, awsClientToken(opts, 1), "same attempt must be stable for CLI-retry idempotency")
+	assert.Contains(t, first, "run_abc")
+	assert.LessOrEqual(t, len(first), 64, "AWS caps client tokens at 64 chars")
+}
+
+// Regression guard for the spot-reclaim retry path: two CreateVM calls on the
+// same provider and run — even when the security group is the SAME (adopted on
+// retry) — must send DISTINCT run-instances client tokens, or EC2 idempotency
+// returns the reclaimed (terminated) instance and the retry never re-provisions.
+func TestAWSCreateVM_DistinctTokenAcrossReprovision(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "get-parameter"):
+			return []byte("ami-1"), nil
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-1"), nil
+		case slices.Contains(args, "create-security-group"):
+			return []byte("sg-SAME"), nil // same id both calls (models adoption)
+		default:
+			return []byte(""), nil
+		}
+	})
+	var tokens []string
+	prev := retryCLIOutput
+	retryCLIOutput = func(_ context.Context, _, _ string, args ...string) ([]byte, error) {
+		if i := slices.Index(args, "--client-token"); i >= 0 && i+1 < len(args) {
+			tokens = append(tokens, args[i+1])
+		}
+		return nil, assert.AnError // token captured; the create's own error is irrelevant
+	}
+	t.Cleanup(func() { retryCLIOutput = prev })
+
+	p := NewAWSProvider("us-east-1")
+	opts := VMOptions{Region: "us-east-1", InstanceType: "t3.micro",
+		Tags: map[string]string{"dispatcher-run-id": "run_z"}}
+	_, _ = p.CreateVM(context.Background(), opts)
+	_, _ = p.CreateVM(context.Background(), opts)
+
+	require.Len(t, tokens, 2)
+	assert.NotEqual(t, tokens[0], tokens[1], "a re-provision must get a fresh token even with the same SG")
+}
+
+// A CreateVM failure BETWEEN security-group creation and a live instance (e.g.
+// an unreadable ssh pubkey) must reap the per-run SG, not leak it.
+func TestAWSCreateVM_ReapsSGOnEarlyFailure(t *testing.T) {
+	calls := captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		switch {
+		case slices.Contains(args, "describe-vpcs"):
+			return []byte("vpc-1"), nil
+		case slices.Contains(args, "create-security-group"):
+			return []byte("sg-1"), nil
+		default:
+			return []byte(""), nil // authorize-ingress, delete-security-group
+		}
+	})
+
+	// Fail at read-ssh-pubkey: a nonexistent key path with a login user set.
+	_, err := NewAWSProvider("us-east-1").CreateVM(context.Background(), VMOptions{
+		Region: "us-east-1", InstanceType: "t3.micro", Image: "ami-1",
+		SSHKeyPath: "/nonexistent/dispatcher-nope.pub", SSHUser: "ubuntu",
+		Tags: map[string]string{"dispatcher-run-id": "r"},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "read ssh pubkey")
+
+	sawDelete := false
+	for _, c := range *calls {
+		if slices.Contains(c.args, "delete-security-group") && slices.Contains(c.args, "sg-1") {
+			sawDelete = true
+		}
+	}
+	assert.True(t, sawDelete, "the per-run SG must be reaped when CreateVM fails before an instance exists")
 }
 
 func TestAWSProvider_Argv(t *testing.T) {

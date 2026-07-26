@@ -51,6 +51,13 @@ type CloudVMState struct {
 	// Attestation records the TEE attestation verdict for a confidential run
 	// (nil for non-confidential or attestation:off runs).
 	Attestation *attest.AttestationResult `json:"attestation,omitempty"`
+	// Spot marks the VM as an interruptible spot/preemptible instance. When set,
+	// Status treats an unexpected VMStateTerminated as a provider reclaim.
+	Spot bool `json:"spot,omitempty"`
+	// Reclaimed is set by Status when a Spot VM is found terminated mid-run.
+	// FailureDetails reports it as a reclaim so the failure classifies transient
+	// and --retry-transient re-provisions.
+	Reclaimed bool `json:"reclaimed,omitempty"`
 }
 
 // MarshalHandleState implements adapter.SerializableState.

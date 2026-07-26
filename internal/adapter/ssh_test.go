@@ -7,7 +7,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/d0cd/dispatcher/internal/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,6 +21,40 @@ func stubRunRsync(t *testing.T, fn func(ctx context.Context, args ...string) err
 	prev := runRsync
 	runRsync = fn
 	t.Cleanup(func() { runRsync = prev })
+}
+
+// TestSSHAdapter_Status_DrainsPipeWithoutLogs proves Status() does not deadlock
+// when the remote command emits more than the OS pipe buffer (~64 KiB) and no
+// Logs() consumer drains it — the transient-retry path and the logWriter==nil
+// first attempt. Without an internal discard drain, cmd.Wait() blocks forever
+// once the child's write blocks on the full pipe.
+func TestSSHAdapter_Status_DrainsPipeWithoutLogs(t *testing.T) {
+	logsR, logsW, err := os.Pipe()
+	require.NoError(t, err)
+
+	// A real child that writes 128 KiB (twice the pipe buffer) then exits; its
+	// stdout/stderr feed the log pipe exactly as Execute wires them.
+	cmd := exec.Command("sh", "-c", "head -c 131072 /dev/zero")
+	cmd.Stdout = logsW
+	cmd.Stderr = logsW
+	require.NoError(t, cmd.Start())
+	logsW.Close() // child holds the only remaining write end
+
+	h := &RunHandle{State: &sshState{cmd: cmd, logs: logsR}}
+	s := &SSHAdapter{}
+
+	got := make(chan types.RunState, 1)
+	go func() {
+		state, _ := s.Status(context.Background(), h)
+		got <- state
+	}()
+
+	select {
+	case state := <-got:
+		assert.Equal(t, types.RunStateCompleted, state)
+	case <-time.After(15 * time.Second):
+		t.Fatal("SSHAdapter.Status deadlocked: pipe not drained before cmd.Wait")
+	}
 }
 
 func TestSSHAdapter_Artifacts_RsyncsEachOutputSecurely(t *testing.T) {

@@ -2,11 +2,12 @@ package cloudvm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"io"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -150,133 +151,93 @@ func TestAzureFetcher_Fetch(t *testing.T) {
 	assert.Equal(t, "Standard_F4s_v2", instances[1].Name)
 }
 
+// Azure returns a Spot meter alongside the on-demand row for a SKU; the fetcher
+// must fold that live spot price into the SKU's SpotPricePerHour (not drop it and
+// fall back to the coarse per-provider factor), and ignore the legacy Low Priority
+// meter.
+func TestAzureFetcher_MergesSpotPrices(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"Items": [
+				{
+					"armSkuName": "Standard_D2s_v3", "retailPrice": 0.096,
+					"productName": "Virtual Machines DSv3 Series", "meterName": "D2s v3",
+					"unitOfMeasure": "1 Hour", "type": "Consumption"
+				},
+				{
+					"armSkuName": "Standard_D2s_v3", "retailPrice": 0.019,
+					"productName": "Virtual Machines DSv3 Series", "meterName": "D2s v3 Spot",
+					"unitOfMeasure": "1 Hour", "type": "Consumption"
+				},
+				{
+					"armSkuName": "Standard_D2s_v3", "retailPrice": 0.012,
+					"productName": "Virtual Machines DSv3 Series Low Priority",
+					"meterName": "D2s v3 Low Priority",
+					"unitOfMeasure": "1 Hour", "type": "Consumption"
+				}
+			],
+			"NextPageLink": ""
+		}`))
+	}))
+	defer srv.Close()
+
+	f := &AzureFetcher{Region: "eastus", BaseURL: srv.URL, Client: srv.Client()}
+	instances, err := f.Fetch(context.Background())
+	require.NoError(t, err)
+
+	require.Len(t, instances, 1, "only the on-demand row is emitted as an instance")
+	assert.Equal(t, "Standard_D2s_v3", instances[0].Name)
+	assert.Equal(t, 0.096, instances[0].PricePerHour, "on-demand price")
+	assert.Equal(t, 0.019, instances[0].SpotPricePerHour, "live spot price folded in, not the legacy Low Priority rate")
+}
+
 // --- AWS: parser-level tests ------------------------------------------------
 
-func TestAWSFetcher_ParseBulkPriceList(t *testing.T) {
-	// Realistic-shape Bulk Price List doc: products keyed by SKU, terms.OnDemand
-	// keyed by the same SKU pointing at offers → priceDimensions → USD/Hrs.
-	doc := `{
-		"formatVersion": "v1.0",
-		"products": {
-			"SKU_T3MICRO": {
-				"sku": "SKU_T3MICRO",
-				"productFamily": "Compute Instance",
-				"attributes": {
-					"instanceType": "t3.micro",
-					"vcpu": "2",
-					"memory": "1 GiB",
-					"operatingSystem": "Linux",
-					"tenancy": "Shared",
-					"preInstalledSw": "NA",
-					"capacityStatus": "Used",
-					"physicalProcessor": "Intel Skylake"
-				}
-			},
-			"SKU_T4GSMALL": {
-				"sku": "SKU_T4GSMALL",
-				"productFamily": "Compute Instance",
-				"attributes": {
-					"instanceType": "t4g.small",
-					"vcpu": "2",
-					"memory": "2 GiB",
-					"operatingSystem": "Linux",
-					"tenancy": "Shared",
-					"preInstalledSw": "NA",
-					"capacityStatus": "Used",
-					"physicalProcessor": "AWS Graviton2 Processor"
-				}
-			},
-			"SKU_G4DN": {
-				"sku": "SKU_G4DN",
-				"productFamily": "Compute Instance",
-				"attributes": {
-					"instanceType": "g4dn.xlarge",
-					"vcpu": "4",
-					"memory": "16 GiB",
-					"operatingSystem": "Linux",
-					"tenancy": "Shared",
-					"preInstalledSw": "NA",
-					"capacityStatus": "Used",
-					"gpu": "1",
-					"physicalProcessor": "Intel Xeon"
-				}
-			},
-			"SKU_WINDOWS": {
-				"sku": "SKU_WINDOWS",
-				"productFamily": "Compute Instance",
-				"attributes": {
-					"instanceType": "m5.large",
-					"operatingSystem": "Windows",
-					"tenancy": "Shared",
-					"preInstalledSw": "NA",
-					"capacityStatus": "Used"
-				}
-			},
-			"SKU_STORAGE": {
-				"sku": "SKU_STORAGE",
-				"productFamily": "Storage",
-				"attributes": {"volumeType": "gp3"}
-			}
-		},
-		"terms": {
-			"OnDemand": {
-				"SKU_T3MICRO": {
-					"SKU_T3MICRO.JRTCKXETXF": {
-						"priceDimensions": {
-							"SKU_T3MICRO.JRTCKXETXF.6YS6EN2CT7": {
-								"unit": "Hrs",
-								"pricePerUnit": {"USD": "0.0104"}
-							}
-						}
-					}
-				},
-				"SKU_T4GSMALL": {
-					"SKU_T4GSMALL.JRTCKXETXF": {
-						"priceDimensions": {
-							"SKU_T4GSMALL.JRTCKXETXF.6YS6EN2CT7": {
-								"unit": "Hrs",
-								"pricePerUnit": {"USD": "0.0168"}
-							}
-						}
-					}
-				},
-				"SKU_G4DN": {
-					"SKU_G4DN.JRTCKXETXF": {
-						"priceDimensions": {
-							"SKU_G4DN.JRTCKXETXF.6YS6EN2CT7": {
-								"unit": "Hrs",
-								"pricePerUnit": {"USD": "0.526"}
-							}
-						}
-					}
-				}
-			}
-		}
-	}`
-
-	instances, err := parseAWSBulkPriceList(strings.NewReader(doc))
-	require.NoError(t, err)
-	// Expect 3: Windows + Storage should be filtered out.
-	require.Len(t, instances, 3, "Windows and Storage SKUs should be filtered out")
-
-	byName := map[string]InstanceType{}
-	for _, inst := range instances {
-		byName[inst.Name] = inst
+func TestAWSFetcher_ParseQueryEntry(t *testing.T) {
+	// One PriceList entry from `aws pricing get-products`: product+terms, with
+	// terms.OnDemand keyed by offer term code (one level shallower than the Bulk
+	// Price List). Attribute key is "capacitystatus" (lowercase), as AWS returns.
+	entry := func(name, vcpu, mem, proc, gpu, usd string) string {
+		return `{"product":{"productFamily":"Compute Instance","attributes":{` +
+			`"instanceType":"` + name + `","vcpu":"` + vcpu + `","memory":"` + mem + `",` +
+			`"operatingSystem":"Linux","tenancy":"Shared","preInstalledSw":"NA",` +
+			`"capacitystatus":"Used","physicalProcessor":"` + proc + `","gpu":"` + gpu + `"}},` +
+			`"terms":{"OnDemand":{"OFFER":{"priceDimensions":{"DIM":{"unit":"Hrs",` +
+			`"pricePerUnit":{"USD":"` + usd + `"}}}}}}}`
 	}
 
-	t3 := byName["t3.micro"]
+	t3, ok := parseAWSPriceListEntry(entry("t3.micro", "2", "1 GiB", "Intel Skylake", "", "0.0104000000"))
+	require.True(t, ok)
 	assert.Equal(t, ProviderAWS, t3.Provider)
+	assert.Equal(t, "t3.micro", t3.Name)
 	assert.Equal(t, 2, t3.VCPUs)
 	assert.Equal(t, 1.0, t3.MemoryGB)
 	assert.Equal(t, 0.0104, t3.PricePerHour)
 	assert.Equal(t, "x86_64", t3.Arch)
 
-	t4g := byName["t4g.small"]
-	assert.Equal(t, "arm64", t4g.Arch, "Graviton physicalProcessor should normalize to arm64")
+	t4g, ok := parseAWSPriceListEntry(entry("t4g.small", "2", "2 GiB", "AWS Graviton2 Processor", "", "0.0168"))
+	require.True(t, ok)
+	assert.Equal(t, "arm64", t4g.Arch, "Graviton physicalProcessor normalizes to arm64")
 
-	g4dn := byName["g4dn.xlarge"]
-	assert.Equal(t, 1, g4dn.GPUCount)
-	assert.Equal(t, "t4", g4dn.GPUModel)
+	g4, ok := parseAWSPriceListEntry(entry("g4dn.xlarge", "4", "16 GiB", "Intel Xeon", "1", "0.526"))
+	require.True(t, ok)
+	assert.Equal(t, 1, g4.GPUCount)
+	assert.Equal(t, "t4", g4.GPUModel, "g4dn is NVIDIA T4")
+
+	// g4ad is AMD Radeon (V520), not a T4 — must not masquerade as one.
+	g4ad, ok := parseAWSPriceListEntry(entry("g4ad.xlarge", "4", "16 GiB", "AMD EPYC", "1", "0.379"))
+	require.True(t, ok)
+	assert.Equal(t, "v520", g4ad.GPUModel)
+
+	// A non-compute product (e.g. Storage) is rejected.
+	_, ok = parseAWSPriceListEntry(`{"product":{"productFamily":"Storage","attributes":{"volumeType":"gp3"}}}`)
+	assert.False(t, ok)
+
+	// High-memory instances report memory with a thousands comma ("1,952 GiB").
+	u, ok := parseAWSPriceListEntry(entry("u-6tb1.56xlarge", "224", "1,952 GiB", "Intel Xeon", "", "54.6"))
+	require.True(t, ok)
+	assert.Equal(t, 1952.0, u.MemoryGB)
 }
 
 func TestIsPlausibleHourlyPrice(t *testing.T) {
@@ -300,24 +261,144 @@ func TestIsPlausibleHourlyPrice(t *testing.T) {
 	}
 }
 
-func TestAWSFetcher_Fetch_HitsRegionURL(t *testing.T) {
-	// httptest server stands in for the AWS bulk endpoint. Verifies the
-	// fetcher constructs the right per-region URL.
-	var gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"products":{},"terms":{"OnDemand":{}}}`)
-	}))
-	defer srv.Close()
+func TestAWSFetcher_Fetch_PaginatesQueryAPI(t *testing.T) {
+	// Two-page get-products response over the runCLI seam: page 1 returns a
+	// NextToken, page 2 doesn't. The fetcher must pass the priced region as a
+	// filter and follow the token, aggregating both pages.
+	entry := func(name, usd string) string {
+		return `{"product":{"productFamily":"Compute Instance","attributes":{` +
+			`"instanceType":"` + name + `","vcpu":"2","memory":"4 GiB",` +
+			`"operatingSystem":"Linux","tenancy":"Shared","preInstalledSw":"NA",` +
+			`"capacitystatus":"Used","physicalProcessor":"Intel"}},` +
+			`"terms":{"OnDemand":{"O":{"priceDimensions":{"D":{"unit":"Hrs",` +
+			`"pricePerUnit":{"USD":"` + usd + `"}}}}}}}`
+	}
+	resp := func(entries []string, next string) []byte {
+		b, _ := json.Marshal(map[string]any{"PriceList": entries, "NextToken": next})
+		return b
+	}
 
-	f := &AWSFetcher{Region: "us-west-2", BaseURL: srv.URL, Client: srv.Client()}
-	_, err := f.Fetch(context.Background())
+	var tokens []string
+	calls := captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "describe-spot-price-history") {
+			return []byte(`{"SpotPriceHistory":[]}`), nil
+		}
+		tok := ""
+		for i, a := range args {
+			if a == "--next-token" && i+1 < len(args) {
+				tok = args[i+1]
+			}
+		}
+		tokens = append(tokens, tok)
+		if tok == "" {
+			return resp([]string{entry("m5.large", "0.096")}, "TOK2"), nil
+		}
+		return resp([]string{entry("c6g.large", "0.068")}, ""), nil
+	})
+
+	insts, err := NewAWSFetcher("us-west-2").Fetch(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, "/us-west-2/index.json", gotPath)
+	require.Len(t, insts, 2)
+	assert.Equal(t, []string{"", "TOK2"}, tokens, "page 1 has no token; page 2 follows NextToken")
+
+	sawRegionFilter := false
+	for _, c := range *calls {
+		if slices.Contains(c.args, "Type=TERM_MATCH,Field=regionCode,Value=us-west-2") {
+			sawRegionFilter = true
+		}
+	}
+	assert.True(t, sawRegionFilter, "region must be passed as a regionCode filter, not the endpoint")
+}
+
+// Fetch overlays each instance's cheapest recent spot price from
+// describe-spot-price-history onto the on-demand catalog.
+func TestAWSFetcher_Fetch_MergesSpotPrices(t *testing.T) {
+	product := `{"product":{"productFamily":"Compute Instance","attributes":{` +
+		`"instanceType":"m5.large","vcpu":"2","memory":"8 GiB",` +
+		`"operatingSystem":"Linux","tenancy":"Shared","preInstalledSw":"NA",` +
+		`"capacitystatus":"Used","physicalProcessor":"Intel"}},` +
+		`"terms":{"OnDemand":{"O":{"priceDimensions":{"D":{"unit":"Hrs","pricePerUnit":{"USD":"0.096"}}}}}}}`
+	getProducts, _ := json.Marshal(map[string]any{"PriceList": []string{product}, "NextToken": ""})
+	spotHist := `{"SpotPriceHistory":[
+		{"InstanceType":"m5.large","SpotPrice":"0.045","AvailabilityZone":"us-east-1a"},
+		{"InstanceType":"m5.large","SpotPrice":"0.038","AvailabilityZone":"us-east-1b"}
+	]}`
+	captureRunCLIWith(t, func(_ string, args ...string) ([]byte, error) {
+		if slices.Contains(args, "describe-spot-price-history") {
+			return []byte(spotHist), nil
+		}
+		return getProducts, nil
+	})
+
+	insts, err := NewAWSFetcher("us-east-1").Fetch(context.Background())
+	require.NoError(t, err)
+	require.Len(t, insts, 1)
+	assert.Equal(t, 0.096, insts[0].PricePerHour)
+	assert.Equal(t, 0.038, insts[0].SpotPricePerHour, "cheapest AZ spot price wins")
+}
+
+// Missing creds / the pricing:GetProducts permission / a missing aws CLI classify
+// as ErrCredentialsMissing, so the catalog skips AWS cleanly ("no credentials
+// configured") and degrades to the rate-card estimate — rather than mislabeling
+// a permanent auth failure as a transient error.
+func TestAWSFetcher_Fetch_CredentialErrorsSkipCleanly(t *testing.T) {
+	for _, stderr := range []string{
+		"Unable to locate credentials. You can configure credentials by running \"aws configure\".",
+		"An error occurred (UnrecognizedClientException) when calling the GetProducts operation: The security token included in the request is invalid.",
+		"An error occurred (AccessDeniedException) when calling the GetProducts operation: User is not authorized to perform: pricing:GetProducts",
+		"aws: executable file not found in $PATH",
+	} {
+		captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) {
+			return nil, errors.New(stderr)
+		})
+		_, err := NewAWSFetcher("us-east-1").Fetch(context.Background())
+		assert.ErrorIs(t, err, ErrCredentialsMissing, "stderr=%q should classify as missing creds", stderr)
+	}
+}
+
+func TestAWSFetcher_Fetch_TransientErrorStaysTransient(t *testing.T) {
+	captureRunCLIWith(t, func(_ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("Could not connect to the endpoint URL: https://api.pricing.us-east-1.amazonaws.com/")
+	})
+	_, err := NewAWSFetcher("us-east-1").Fetch(context.Background())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrCredentialsMissing, "a network error must not be mislabeled as missing creds")
 }
 
 // --- GCP: join logic with stub specs + SKUs ---------------------------------
+
+// mkGCPSKU builds a gcpSKU via JSON so tests don't have to spell out its nested
+// anonymous structs.
+func mkGCPSKU(desc, region, usage string, hourly float64) gcpSKU {
+	units := int(hourly)
+	nanos := int64((hourly - float64(units)) * 1e9)
+	j := fmt.Sprintf(`{"description":%q,"serviceRegions":[%q],`+
+		`"category":{"resourceFamily":"Compute","usageType":%q},`+
+		`"pricingInfo":[{"pricingExpression":{"tieredRates":[{"unitPrice":{"units":"%d","nanos":%d}}]}}]}`,
+		desc, region, usage, units, nanos)
+	var s gcpSKU
+	_ = json.Unmarshal([]byte(j), &s)
+	return s
+}
+
+// Preemptible SKUs (usageType=Preemptible) populate the live spot price; on-demand
+// stays the PricePerHour. A family without preemptible SKUs leaves spot unset.
+func TestGCPFetcher_JoinSpotPrices(t *testing.T) {
+	specs := []gcpMachineType{{Name: "e2-standard-2", GuestCpus: 2, MemoryMb: 8192}}
+	skus := []gcpSKU{
+		mkGCPSKU("E2 Instance Core running in Americas", "us-central1", "OnDemand", 0.021),
+		mkGCPSKU("E2 Instance Ram running in Americas", "us-central1", "OnDemand", 0.003),
+		mkGCPSKU("Spot Preemptible E2 Instance Core running in Americas", "us-central1", "Preemptible", 0.006),
+		mkGCPSKU("Spot Preemptible E2 Instance Ram running in Americas", "us-central1", "Preemptible", 0.001),
+	}
+
+	got := joinGCPSpecsAndPrices(specs, skus, "us-central1")
+	require.Len(t, got, 1)
+	inst := got[0]
+	assert.InDelta(t, 0.021*2+0.003*8, inst.PricePerHour, 0.0001, "on-demand = cpu*2 + ram*8")
+	assert.InDelta(t, 0.006*2+0.001*8, inst.SpotPricePerHour, 0.0001, "spot from preemptible SKUs")
+	assert.Less(t, inst.SpotPricePerHour, inst.PricePerHour)
+}
 
 func TestGCPFetcher_JoinSpecsAndPrices(t *testing.T) {
 	specs := []gcpMachineType{

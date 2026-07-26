@@ -152,6 +152,41 @@ func TestCloudVMAdapter_Reconnect(t *testing.T) {
 	assert.Equal(t, ProviderHetzner, reconState.Provider)
 }
 
+// A spot VM that the provider reclaims mid-run surfaces as VMStateTerminated.
+// Status must mark the state Reclaimed, and FailureDetails must report it as a
+// reclaim so ClassifyFailure returns transient and --retry-transient re-provisions.
+func TestCloudVMAdapter_SpotReclaim(t *testing.T) {
+	mock := NewMockProvider(ProviderGCP)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderGCP})
+
+	// VMID unknown to the mock → GetVM returns VMStateTerminated (the reclaim).
+	state := &CloudVMState{Provider: ProviderGCP, VMID: "reclaimed-vm", Spot: true}
+	handle := &adapter.RunHandle{ID: "reclaimed-vm", TargetID: "gcp-vm", State: state}
+
+	st, err := a.Status(context.Background(), handle)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateExecutionFailed, st)
+	assert.True(t, state.Reclaimed, "a terminated spot VM must be marked reclaimed")
+
+	fd := a.FailureDetails(handle)
+	assert.True(t, fd.Reclaimed, "FailureDetails must report the reclaim")
+	assert.Equal(t, adapter.FailureTransient, adapter.ClassifyFailure(fd))
+}
+
+// A non-spot VM found terminated is not attributed to a reclaim.
+func TestCloudVMAdapter_NonSpotTerminatedNotReclaimed(t *testing.T) {
+	mock := NewMockProvider(ProviderGCP)
+	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderGCP})
+
+	state := &CloudVMState{Provider: ProviderGCP, VMID: "gone-vm", Spot: false}
+	handle := &adapter.RunHandle{ID: "gone-vm", TargetID: "gcp-vm", State: state}
+
+	st, err := a.Status(context.Background(), handle)
+	require.NoError(t, err)
+	assert.Equal(t, types.RunStateExecutionFailed, st)
+	assert.False(t, state.Reclaimed, "non-spot termination must not be marked a reclaim")
+}
+
 func TestCloudVMAdapter_Cleanup(t *testing.T) {
 	mock := NewMockProvider(ProviderHetzner)
 	a := NewCloudVMAdapter(mock, Config{ProviderID: ProviderHetzner})
@@ -303,7 +338,7 @@ func TestCloudVMState_Serialization(t *testing.T) {
 }
 
 func TestWatchdogCloudInit(t *testing.T) {
-	script := WatchdogCloudInit(30*time.Minute, "ubuntu")
+	script := WatchdogCloudInit(30*time.Minute, "ubuntu", DefaultWatchdogSelfDestruct)
 	assert.Contains(t, script, "watchdog-deadline")
 	assert.Contains(t, script, "shutdown -h now")
 	assert.Contains(t, script, "sleep 60")
@@ -329,8 +364,36 @@ func TestWatchdogCloudInit(t *testing.T) {
 func TestWatchdogCloudInit_RootLoginNeedsNoChown(t *testing.T) {
 	// Where the login user is root (Hetzner/Firecracker) the file is already
 	// root-owned, so no chown is emitted.
-	script := WatchdogCloudInit(30*time.Minute, "root")
+	script := WatchdogCloudInit(30*time.Minute, "root", DefaultWatchdogSelfDestruct)
 	assert.NotContains(t, script, "chown root")
+}
+
+// watchdogSelfDestructFor picks the per-provider expiry action: every provider
+// halts the OS except Azure, where a bare halt leaves the VM Stopped(allocated)
+// and still compute-billing, so the guest must deallocate itself via IMDS.
+func TestWatchdogSelfDestructFor(t *testing.T) {
+	azure := watchdogSelfDestructFor(ProviderAzure)
+	assert.Contains(t, azure, "deallocate", "Azure must deallocate, not just halt")
+	assert.Contains(t, azure, "shutdown -h now", "and still halt as a fallback")
+
+	for _, p := range []ProviderID{ProviderAWS, ProviderGCP, ProviderHetzner, ProviderOCI} {
+		sd := watchdogSelfDestructFor(p)
+		assert.Equal(t, DefaultWatchdogSelfDestruct, sd, "%s should halt, not deallocate", p)
+		assert.NotContains(t, sd, "deallocate")
+	}
+}
+
+// The Azure expiry action must obtain a managed-identity token from IMDS, read
+// its own subscription/RG/name from instance metadata, and POST deallocate to
+// ARM — then fall back to halting the OS if any of that is unavailable.
+func TestWatchdogCloudInit_AzureDeallocate(t *testing.T) {
+	script := WatchdogCloudInit(30*time.Minute, "dispatcher", watchdogSelfDestructFor(ProviderAzure))
+	assert.Contains(t, script, "identity/oauth2/token", "must fetch an IMDS managed-identity token")
+	assert.Contains(t, script, "management.azure.com", "must call ARM")
+	assert.Contains(t, script, "/deallocate?api-version=", "must POST the deallocate action")
+	assert.Contains(t, script, "instance/compute/$1", "must read its own metadata from IMDS")
+	assert.Contains(t, script, "_az_meta subscriptionId", "must read its own subscription id")
+	assert.Contains(t, script, "shutdown -h now", "must still halt as a fallback")
 }
 
 func TestProviderBaseRates(t *testing.T) {

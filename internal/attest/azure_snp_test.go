@@ -49,8 +49,14 @@ func runtimeDataWithAK(t *testing.T, ak *rsa.PublicKey) []byte {
 
 // signedQuote builds a TPM quote (TPMS_ATTEST) over the given PCRs with extraData
 // (the run+channel binding) and signs it with the AK — what the vTPM produces.
-func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, extraData []byte) (quote, sig []byte) {
+// The optional bank (default SHA-256) sets the quote's PCRSelection hash alg, so
+// a non-SHA-256-bank quote can exercise the bank-enforcement check.
+func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, extraData []byte, bank ...legacytpm.Algorithm) (quote, sig []byte) {
 	t.Helper()
+	pcrBank := legacytpm.AlgSHA256
+	if len(bank) > 0 {
+		pcrBank = bank[0]
+	}
 	// The quote commits to SHA-256(concatenated selected PCR values), PCRs ordered
 	// ascending — the digest the TPM computes over the selection.
 	h := sha256.New()
@@ -63,7 +69,7 @@ func signedQuote(t *testing.T, akPriv *rsa.PrivateKey, pcrs map[uint32][]byte, e
 		QualifiedSigner: legacytpm.Name{},
 		ExtraData:       tpmutil.U16Bytes(extraData),
 		AttestedQuoteInfo: &legacytpm.QuoteInfo{
-			PCRSelection: legacytpm.PCRSelection{Hash: legacytpm.AlgSHA256, PCRs: []int{11}},
+			PCRSelection: legacytpm.PCRSelection{Hash: pcrBank, PCRs: []int{11}},
 			PCRDigest:    tpmutil.U16Bytes(digest),
 		},
 	}
@@ -111,6 +117,18 @@ func installCRL(t *testing.T, crl []byte) {
 // azureEvidence assembles a full, valid Azure SNP+vTPM evidence bundle bound to
 // nonce+channelKey, returning it plus the AMD roots to trust. mutate can tamper.
 func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate func(*agent.AzureSNPEvidence)) (agent.AzureSNPEvidence, []*x509.Certificate) {
+	return azureEvidenceOpts(t, nonce, channelKey, pcr11, mutate, azureEvidenceOptions{})
+}
+
+// azureEvidenceOptions tweaks the otherwise-valid bundle for a specific negative
+// test: a nonzero vmpl (a report requested below the paravisor) or a non-SHA-256
+// quote bank. The zero value reproduces the accepted-path bundle.
+type azureEvidenceOptions struct {
+	vmpl      uint32
+	quoteBank legacytpm.Algorithm
+}
+
+func azureEvidenceOpts(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate func(*agent.AzureSNPEvidence), opts azureEvidenceOptions) (agent.AzureSNPEvidence, []*x509.Certificate) {
 	t.Helper()
 	ch := newSNPChain(t)
 	installCRL(t, arkSignedCRL(t, ch)) // default: an empty (nothing-revoked) CRL
@@ -124,10 +142,14 @@ func azureEvidence(t *testing.T, nonce, channelKey []byte, pcr11 []byte, mutate 
 	rdHash := sha256.Sum256(runtimeData)
 	copy(reportData[:], rdHash[:])
 
-	report := buildSNPReport(t, make48(0x11), reportData[:], 9, 0, ch.vcekKey)
+	report := buildSNPReport(t, make48(0x11), reportData[:], 9, 0, ch.vcekKey, opts.vmpl)
 
 	pcrs := map[uint32][]byte{11: pcr11}
-	quote, sig := signedQuote(t, akPriv, pcrs, agent.MAABindingNonce(nonce, channelKey))
+	quoteBank := legacytpm.AlgSHA256
+	if opts.quoteBank != 0 {
+		quoteBank = opts.quoteBank
+	}
+	quote, sig := signedQuote(t, akPriv, pcrs, agent.MAABindingNonce(nonce, channelKey), quoteBank)
 
 	ev := agent.AzureSNPEvidence{
 		SNPReport:   report,
@@ -174,7 +196,7 @@ func TestVerifyAzureSNP_RejectsDebugPolicy(t *testing.T) {
 	channelKey := []byte("azure-channel-public-key-32-byte")
 	pcr11 := make48(0xAB)[:32]
 	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, snpPolicyDebug, 9)
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "debug")
 }
@@ -184,7 +206,7 @@ func TestVerifyAzureSNP_RejectsMigrateMA(t *testing.T) {
 	channelKey := []byte("azure-channel-public-key-32-byte")
 	pcr11 := make48(0xAB)[:32]
 	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, snpPolicyMigrateMA, 9)
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "migration")
 }
@@ -194,9 +216,44 @@ func TestVerifyAzureSNP_RejectsBelowMinTCB(t *testing.T) {
 	channelKey := []byte("azure-channel-public-key-32-byte")
 	pcr11 := make48(0xAB)[:32]
 	ev, roots := azureEvidencePolicy(t, nonce, channelKey, pcr11, 0, 5) // reported TCB 5
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}, MinTCB: 9})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)), Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}, MinTCB: 9})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "TCB")
+}
+
+// TestVerifyAzureSNP_RejectsNonZeroVMPL: only the Azure paravisor at VMPL0
+// generates the vTPM AK, so a report requested at a lower privilege level (VMPL>0)
+// may carry an attacker-substituted AK and must be rejected. The report is validly
+// signed with VMPL set inside the signed region, so this exercises the VMPL check
+// rather than the signature path.
+func TestVerifyAzureSNP_RejectsNonZeroVMPL(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+
+	ev, roots := azureEvidenceOpts(t, nonce, channelKey, pcr11, nil, azureEvidenceOptions{vmpl: 2})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
+		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "VMPL")
+}
+
+// TestVerifyAzureSNP_RejectsNonSHA256QuoteBank: the PCR digest is recomputed and
+// compared as SHA-256, so a quote whose PCR selection is over a different bank
+// (e.g. SHA-1) must be rejected — otherwise a SHA-1-bank quote paired with
+// SHA-256-shaped values could slip past the digest check.
+func TestVerifyAzureSNP_RejectsNonSHA256QuoteBank(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+
+	ev, roots := azureEvidenceOpts(t, nonce, channelKey, pcr11, nil, azureEvidenceOptions{quoteBank: legacytpm.AlgSHA1})
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
+		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "SHA-256 bank")
 }
 
 // TestVerifyAzureSNP_Accepts: a well-formed bundle — genuine SNP report binding the
@@ -208,12 +265,40 @@ func TestVerifyAzureSNP_Accepts(t *testing.T) {
 	pcr11 := make48(0xAB)[:32] // PCR values are the bank hash width (SHA-256 = 32)
 
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
-	measurement, gotKey, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	measurement, gotKey, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, hex.EncodeToString(pcr11), measurement, "measurement is the pinned PCR11")
 	assert.Equal(t, channelKey, gotKey, "the bound channel key is returned to seal to")
+}
+
+// The SNP launch MEASUREMENT roots the vTPM AK in trusted Azure firmware. Without
+// it, an attacker with their own ARK-chaining SNP box could embed their own AK in
+// REPORT_DATA and forge the entire vTPM/PCR chain. A missing or mismatched pin
+// must fail closed.
+func TestVerifyAzureSNP_EnforcesLaunchMeasurement(t *testing.T) {
+	nonce := bytesRepeat(0x5a, 32)
+	channelKey := []byte("azure-channel-public-key-32-byte")
+	pcr11 := make48(0xAB)[:32]
+	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
+
+	pol := func(meas string) AzureSNPPolicy {
+		return AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)}, Measurement: meas}
+	}
+
+	// The genuine report's launch measurement (make48(0x11)) verifies.
+	_, _, err := verifyAzureSNP(ev, pol(hex.EncodeToString(make48(0x11))))
+	require.NoError(t, err)
+
+	// No launch measurement pinned → fail closed (the AK can't be rooted).
+	_, _, err = verifyAzureSNP(ev, pol(""))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "launch measurement")
+
+	// A mismatched launch measurement → reject (attacker firmware).
+	_, _, err = verifyAzureSNP(ev, pol(hex.EncodeToString(make48(0x22))))
+	require.Error(t, err)
 }
 
 // TestCaptureAzureSNPPCR11_DerivesVerifiedPCR11: capture-time verification of a
@@ -226,7 +311,7 @@ func TestCaptureAzureSNPPCR11_DerivesVerifiedPCR11(t *testing.T) {
 	pcr11 := make48(0xAB)[:32]
 
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
-	got, err := captureAzureSNPPCR11(ev, roots, nonce)
+	got, _, err := captureAzureSNPPCR11(ev, roots, nonce)
 	require.NoError(t, err)
 	assert.Equal(t, hex.EncodeToString(pcr11), got, "capture derives the hardware-attested PCR11")
 }
@@ -241,7 +326,7 @@ func TestCaptureAzureSNPPCR11_RejectsForgedQuote(t *testing.T) {
 		signed := sha256.Sum256(e.Quote)
 		e.QuoteSig, _ = rsa.SignPKCS1v15(rand.Reader, other, crypto.SHA256, signed[:])
 	})
-	_, err := captureAzureSNPPCR11(ev, roots, nonce)
+	_, _, err := captureAzureSNPPCR11(ev, roots, nonce)
 	require.Error(t, err, "a bundle not signed by the bound AK cannot be captured")
 }
 
@@ -258,7 +343,7 @@ func TestVerifyAzureSNP_RejectsUnquotedPinnedPCR(t *testing.T) {
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, func(e *agent.AzureSNPEvidence) {
 		e.PCRs[7] = make48(0x77)[:32]
 	})
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{7: hex.EncodeToString(make48(0x77)[:32])},
 	})
 	require.Error(t, err)
@@ -273,7 +358,7 @@ func TestVerifyAzureSNP_RejectsPCRMismatch(t *testing.T) {
 	pcr11 := make48(0xAB)[:32]
 
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(make48(0xCD)[:32])},
 	})
 	require.Error(t, err)
@@ -291,7 +376,7 @@ func TestVerifyAzureSNP_RejectsUnboundAK(t *testing.T) {
 		e.RuntimeData = append([]byte(nil), e.RuntimeData...)
 		e.RuntimeData[len(e.RuntimeData)-2] ^= 0xFF // tamper → SHA-256 no longer matches REPORT_DATA
 	})
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
 	})
 	require.Error(t, err)
@@ -306,7 +391,7 @@ func TestVerifyAzureSNP_RejectsNonceMismatch(t *testing.T) {
 	pcr11 := make48(0xAB)[:32]
 
 	ev, roots := azureEvidence(t, nonce, channelKey, pcr11, nil)
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: bytesRepeat(0x11, 32), PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
 	})
 	require.Error(t, err)
@@ -325,7 +410,7 @@ func TestVerifyAzureSNP_RejectsForgedQuote(t *testing.T) {
 		signed := sha256.Sum256(e.Quote)
 		e.QuoteSig, _ = rsa.SignPKCS1v15(rand.Reader, other, crypto.SHA256, signed[:])
 	})
-	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{
+	_, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Measurement: hex.EncodeToString(make48(0x11)),
 		Roots: roots, Nonce: nonce, PCRs: map[int]string{11: hex.EncodeToString(pcr11)},
 	})
 	require.Error(t, err)
@@ -337,44 +422,43 @@ func TestVerifyAzureSNP_RejectsForgedQuote(t *testing.T) {
 // missing, unreachable, or not chained to a pinned root.
 func TestAzureSNPCheckRevocation(t *testing.T) {
 	ch := newSNPChain(t)
-	roots := []*x509.Certificate{ch.ark}
 
 	t.Run("passes when nothing is revoked", func(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, ch))
-		require.NoError(t, azureSNPCheckRevocation(ch.vcek, ch.ask, roots))
+		require.NoError(t, azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark))
 	})
 
 	t.Run("rejects a revoked VCEK", func(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, ch, ch.vcek.SerialNumber))
-		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "VCEK has been revoked")
 	})
 
 	t.Run("rejects a revoked ASK", func(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, ch, ch.ask.SerialNumber))
-		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "ASK has been revoked")
 	})
 
-	t.Run("rejects a CRL not signed by a pinned root", func(t *testing.T) {
+	t.Run("rejects a CRL signed by a different ARK than the ASK.s issuer (cross-family)", func(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, newSNPChain(t))) // signed by a foreign ARK
-		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not signed by a pinned")
+		assert.Contains(t, err.Error(), "issuing ARK")
 	})
 
 	t.Run("fails closed when the CRL can't be fetched", func(t *testing.T) {
 		prev := azureSNPCRLGetter
 		azureSNPCRLGetter = func(string) ([]byte, error) { return nil, assert.AnError }
 		t.Cleanup(func() { azureSNPCRLGetter = prev })
-		require.Error(t, azureSNPCheckRevocation(ch.vcek, ch.ask, roots))
+		require.Error(t, azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark))
 	})
 
 	t.Run("rejects a stale (expired) CRL — replay defense", func(t *testing.T) {
 		installCRL(t, arkSignedCRLUntil(t, ch, time.Now().Add(-time.Minute))) // NextUpdate in the past
-		err := azureSNPCheckRevocation(ch.vcek, ch.ask, roots)
+		err := azureSNPCheckRevocation(ch.vcek, ch.ask, ch.ark)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "stale")
 	})
@@ -383,6 +467,6 @@ func TestAzureSNPCheckRevocation(t *testing.T) {
 		installCRL(t, arkSignedCRL(t, ch))
 		askNoDP := *ch.ask
 		askNoDP.CRLDistributionPoints = nil
-		require.Error(t, azureSNPCheckRevocation(ch.vcek, &askNoDP, roots))
+		require.Error(t, azureSNPCheckRevocation(ch.vcek, &askNoDP, ch.ark))
 	})
 }

@@ -20,6 +20,7 @@ const (
 	snpReportLen    = 0x4A0
 	snpSignedLen    = 0x2A0
 	snpOffPolicy    = 0x08
+	snpOffVMPL      = 0x30 // VMPL, u32 (the privilege level the report was requested at)
 	snpOffSigAlgo   = 0x34
 	snpOffData      = 0x50  // REPORT_DATA, 64 bytes
 	snpOffMeas      = 0x90  // MEASUREMENT, 48 bytes
@@ -52,6 +53,7 @@ type snpReport struct {
 	signed      []byte // the 0x2A0-byte signed prefix
 	sigAlgo     uint32
 	policy      uint64
+	vmpl        uint32
 	reportedTCB uint64
 	measurement []byte
 	reportData  []byte
@@ -68,6 +70,7 @@ func parseSNPReport(b []byte) (*snpReport, error) {
 		signed:      append([]byte(nil), b[:snpSignedLen]...),
 		sigAlgo:     leUint32(b[snpOffSigAlgo:]),
 		policy:      leUint64(b[snpOffPolicy:]),
+		vmpl:        leUint32(b[snpOffVMPL:]),
 		reportedTCB: leUint64(b[snpOffTCB:]),
 		measurement: append([]byte(nil), b[snpOffMeas:snpOffMeas+snpLenMeas]...),
 		reportData:  append([]byte(nil), b[snpOffData:snpOffData+snpLenData]...),
@@ -107,16 +110,17 @@ func verifySNPSignature(r *snpReport, vcek *x509.Certificate) error {
 }
 
 // verifySNPChain checks VCEK <- ASK and that the ASK chains to one of the pinned
-// AMD ARK roots (R4). Trying each root avoids mapping the report's product line
-// (Milan/Genoa/Turin) to a specific ARK up front. It validates only the
-// signature links: time validity and revocation are the live-fetch layer's
-// concern.
-func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) error {
+// AMD ARK roots (R4), returning the specific ARK that signed the ASK. Trying each
+// root avoids mapping the report's product line (Milan/Genoa/Turin) up front; the
+// matched ARK is returned so the revocation check can bind the CRL to the SAME
+// issuer rather than any pinned root. It validates only the signature links; time
+// validity is checked here and revocation is the live-fetch layer's concern.
+func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) (*x509.Certificate, error) {
 	if vcek == nil || ask == nil {
-		return fmt.Errorf("snp cert chain incomplete")
+		return nil, fmt.Errorf("snp cert chain incomplete")
 	}
 	if len(roots) == 0 {
-		return fmt.Errorf("snp: no pinned AMD roots configured")
+		return nil, fmt.Errorf("snp: no pinned AMD roots configured")
 	}
 	// Reject expired / not-yet-valid VCEK or ASK. CheckSignatureFrom validates only
 	// the signature link, not validity dates, and nothing else on this path checks
@@ -124,16 +128,16 @@ func verifySNPChain(vcek, ask *x509.Certificate, roots []*x509.Certificate) erro
 	now := time.Now()
 	for _, c := range []*x509.Certificate{vcek, ask} {
 		if now.Before(c.NotBefore) || now.After(c.NotAfter) {
-			return fmt.Errorf("snp cert %q outside validity window [%s, %s]", c.Subject.CommonName, c.NotBefore, c.NotAfter)
+			return nil, fmt.Errorf("snp cert %q outside validity window [%s, %s]", c.Subject.CommonName, c.NotBefore, c.NotAfter)
 		}
 	}
 	if err := vcek.CheckSignatureFrom(ask); err != nil {
-		return fmt.Errorf("snp VCEK is not signed by the ASK: %w", err)
+		return nil, fmt.Errorf("snp VCEK is not signed by the ASK: %w", err)
 	}
 	for _, ark := range roots {
 		if ask.CheckSignatureFrom(ark) == nil {
-			return nil
+			return ark, nil
 		}
 	}
-	return fmt.Errorf("snp ASK chains to none of the %d pinned AMD roots", len(roots))
+	return nil, fmt.Errorf("snp ASK chains to none of the %d pinned AMD roots", len(roots))
 }

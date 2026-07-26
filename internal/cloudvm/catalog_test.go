@@ -139,3 +139,47 @@ func TestCatalog_ServesAdvertisedGPUModels(t *testing.T) {
 		assert.NotEmptyf(t, got, "%s must offer a %s instance in the catalog", c.provider, c.model)
 	}
 }
+
+// TestFindCheapest_RejectsSpecLessRowForSizedRequest guards against a live price
+// feed (e.g. Azure Retail Prices, which returns no per-SKU vCPU/memory) letting
+// the globally cheapest spec-less SKU satisfy a request that pins a size. Picking
+// it would under-provision the VM and under-report cost, silently passing a
+// budget gate the correctly-sized VM would trip.
+func TestFindCheapest_RejectsSpecLessRowForSizedRequest(t *testing.T) {
+	cat := &Catalog{instances: []InstanceType{
+		{Name: "Standard_B1ls", Provider: ProviderAzure, PricePerHour: 0.005, Arch: "x86_64"}, // spec-less, cheapest
+		{Name: "Standard_D8s_v5", Provider: ProviderAzure, VCPUs: 8, MemoryGB: 32, PricePerHour: 0.384, Arch: "x86_64"},
+	}}
+	got := cat.FindCheapest(InstanceRequirements{MinVCPUs: 8, MinMemoryGB: 32})
+	require.NotEmpty(t, got)
+	assert.Equal(t, "Standard_D8s_v5", got[0].Name, "must pick the SKU that actually meets the size, not the cheapest spec-less row")
+	for _, inst := range got {
+		assert.NotEqual(t, "Standard_B1ls", inst.Name, "a spec-less row must not satisfy a sized request")
+	}
+}
+
+// TestFindCheapest_KeepsSpecLessRowForUnsizedRequest confirms the guard only
+// applies when a size is demanded: an unsized request still prices spec-less rows.
+func TestFindCheapest_KeepsSpecLessRowForUnsizedRequest(t *testing.T) {
+	cat := &Catalog{instances: []InstanceType{
+		{Name: "Standard_B1ls", Provider: ProviderAzure, PricePerHour: 0.005, Arch: "x86_64"},
+	}}
+	got := cat.FindCheapest(InstanceRequirements{})
+	require.Len(t, got, 1)
+	assert.Equal(t, "Standard_B1ls", got[0].Name)
+}
+
+// TestEnrichSpecsFromStatic_FillsAzureLiveRowSpecs confirms a spec-less live row
+// is enriched with the built-in table's vCPU/memory by SKU name while keeping the
+// live price, so the size filters can select it.
+func TestEnrichSpecsFromStatic_FillsAzureLiveRowSpecs(t *testing.T) {
+	live := []InstanceType{
+		{Name: "Standard_D8s_v5", Provider: ProviderAzure, PricePerHour: 0.30, Arch: "x86_64"}, // spec-less, live price
+		{Name: "Standard_Unknown", Provider: ProviderAzure, PricePerHour: 0.01, Arch: "x86_64"},
+	}
+	got := enrichSpecsFromStatic(live)
+	assert.Equal(t, 8, got[0].VCPUs, "vCPU filled from static table")
+	assert.Equal(t, 32.0, got[0].MemoryGB, "memory filled from static table")
+	assert.Equal(t, 0.30, got[0].PricePerHour, "live price preserved")
+	assert.Equal(t, 0, got[1].VCPUs, "a SKU absent from the static table stays spec-less")
+}

@@ -68,6 +68,11 @@ const (
 // than the cost of a wrong "permanent" classification (user reruns
 // manually).
 func ClassifyFailure(d FailureDetails) FailureKind {
+	// A spot/preemptible reclaim is the textbook transient failure: the workload
+	// didn't misbehave, the provider took the instance. A retry re-provisions.
+	if d.Reclaimed {
+		return FailureTransient
+	}
 	if d.OOMKilled {
 		return FailureTransient
 	}

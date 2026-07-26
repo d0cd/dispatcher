@@ -79,14 +79,14 @@ func NitroValidator(roots *x509.CertPool, pcrs map[int]string) *AttestValidator 
 // its SEV-SNP REPORT_DATA and vTPM quote must commit to this session's bindData +
 // nonce. The channel-supplied key in the bundle is ignored — the session binding
 // is authoritative.
-func AzureSNPValidator(roots []*x509.Certificate, pcrs map[int]string, minTCB uint64) *AttestValidator {
+func AzureSNPValidator(roots []*x509.Certificate, pcrs map[int]string, launchMeasurement string, minTCB uint64) *AttestValidator {
 	return &AttestValidator{verify: func(evidence, bindData, nonce []byte) (AttestationResult, error) {
 		ev, err := parseAzureSNPEvidence(evidence)
 		if err != nil {
 			return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
 		}
 		ev.ChannelKey = bindData // trust the session binding, not the channel-supplied key
-		measurement, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: pcrs, MinTCB: minTCB})
+		measurement, _, err := verifyAzureSNP(ev, AzureSNPPolicy{Roots: roots, Nonce: nonce, PCRs: pcrs, Measurement: launchMeasurement, MinTCB: minTCB})
 		if err != nil {
 			return AttestationResult{Verified: false, Nonce: hex.EncodeToString(nonce), Verdict: err.Error()}, nil
 		}
@@ -102,8 +102,8 @@ func NitroValidatorPinned(pcrs map[int]string) *AttestValidator {
 
 // AzureSNPValidatorPinned builds an AzureSNPValidator against the pinned AMD ARK
 // roots, mirroring NewAzureSNPAttester.
-func AzureSNPValidatorPinned(pcrs map[int]string, minTCB uint64) *AttestValidator {
-	return AzureSNPValidator(amdRoots, pcrs, minTCB)
+func AzureSNPValidatorPinned(pcrs map[int]string, launchMeasurement string, minTCB uint64) *AttestValidator {
+	return AzureSNPValidator(amdRoots, pcrs, launchMeasurement, minTCB)
 }
 
 // parseAzureSNPEvidence accepts either raw JSON or the base64(JSON) the producer

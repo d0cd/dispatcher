@@ -17,7 +17,7 @@ import (
 func runLocalProcess(t *testing.T, name string, args ...string) *localState {
 	t.Helper()
 	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: runtime.GOOS != "windows"}
+	setProcessGroup(cmd) // build-tagged: no-op on Windows (Setpgid is Unix-only)
 	require.NoError(t, cmd.Start())
 	_ = cmd.Wait() // ignore exit error — that's the point
 	return &localState{cmd: cmd}
@@ -50,7 +50,7 @@ func TestLocalAdapter_FailureDetails_KilledBySignal(t *testing.T) {
 	}
 	// Start sleep, kill it, then inspect state.
 	cmd := exec.CommandContext(context.Background(), "sleep", "60")
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	require.NoError(t, cmd.Start())
 	require.NoError(t, cmd.Process.Signal(syscall.SIGKILL))
 	_ = cmd.Wait()

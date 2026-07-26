@@ -192,6 +192,14 @@ func (o *OCIProvider) CreateVM(ctx context.Context, opts VMOptions) (*VMInfo, er
 		"--output", "json",
 	)
 
+	// Spot: launch a preemptible instance that terminates (not just stops) on
+	// reclaim, matching the ephemeral-run model on the other clouds so nothing
+	// billable is left behind. The config is a fixed constant (no user input).
+	if opts.Spot {
+		args = append(args, "--preemptible-instance-config",
+			`{"preemptionAction": {"type": "TERMINATE", "preserveBootVolume": false}}`)
+	}
+
 	// Flex shapes require an explicit OCPU/memory config; bare-metal shapes reject
 	// it. Size it from the catalog SKU the planner selected (and costed) so the
 	// provisioned box matches what was priced, not a fixed 2/16.
